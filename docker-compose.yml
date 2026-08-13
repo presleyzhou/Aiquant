@@ -1,0 +1,29 @@
+services:
+  backend:
+    build: ./backend
+    environment:
+      # Optional — without it the site still serves quotes, indicators and
+      # backtests; only the AI panel is disabled.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5}
+      CLAUDE_EFFORT: ${CLAUDE_EFFORT:-high}
+      ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY:-}
+      # nginx is same-origin in this setup, so CORS is only needed if you point
+      # a separately-hosted frontend at this backend.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+    expose:
+      - "8000"
+    ports:
+      # Exposed for curl/debugging; the frontend reaches it over the compose
+      # network, not through this published port.
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

@@ -1,0 +1,13 @@
+# Keep the Python function bundle small — pandas/numpy alone are large.
+backend/.venv
+backend/tests
+backend/Dockerfile
+backend/.dockerignore
+frontend/node_modules
+frontend/Dockerfile
+frontend/nginx.conf
+frontend/.dockerignore
+docker-compose.yml
+.claude
+**/__pycache__
+**/.pytest_cache

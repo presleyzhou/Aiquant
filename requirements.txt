@@ -1,0 +1,13 @@
+# Vercel serverless function dependencies (api/index.py).
+# Deliberately leaner than backend/pyproject.toml: no uvicorn (Vercel runs the
+# ASGI app itself) and no websockets (not supported on Vercel functions —
+# the frontend falls back to REST polling). Keep this list in sync with the
+# runtime deps in backend/pyproject.toml when adding features.
+fastapi>=0.115
+pydantic>=2.9
+pydantic-settings>=2.6
+aiohttp>=3.10
+yfinance>=0.2.50
+pandas>=2.2
+numpy>=1.26
+anthropic>=0.69

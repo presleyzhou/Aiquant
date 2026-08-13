@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# Two top-level packages (app + the vendored fincept_terminal), so auto-discovery
+# can't guess; list them explicitly.
+[tool.setuptools.packages.find]
+include = ["app*", "fincept_terminal*"]
+
+[project]
+name = "aiquant-backend"
+version = "0.1.0"
+description = "AI quant terminal backend — FastAPI over vendored fincept-terminal data layer"
+requires-python = ">=3.11,<3.14"
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    # vendored fincept providers are async and import aiohttp,
+    # which upstream forgot to declare in requires_dist
+    "aiohttp>=3.10",
+    "yfinance>=0.2.50",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "anthropic>=0.69",
+    "websockets>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
