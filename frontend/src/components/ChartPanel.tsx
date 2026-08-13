@@ -20,11 +20,28 @@ const OVERLAYS = [
 
 type OverlayKey = (typeof OVERLAYS)[number]["key"];
 
-interface Props {
-  symbol: string;
+export interface CandlePalette {
+  up: string;
+  down: string;
+  upVol: string;
+  downVol: string;
 }
 
-export function ChartPanel({ symbol }: Props) {
+const DEFAULT_PALETTE: CandlePalette = {
+  up: "#33d17a",
+  down: "#ff4d4d",
+  upVol: "rgba(51,209,122,0.28)",
+  downVol: "rgba(255,77,77,0.28)",
+};
+
+interface Props {
+  symbol: string;
+  /** Candle colours — the A-share workspace passes the red-up convention.
+   *  Constant per workspace instance, so effects may treat it as stable. */
+  palette?: CandlePalette;
+}
+
+export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -63,12 +80,12 @@ export function ChartPanel({ symbol }: Props) {
     });
 
     priceRef.current = chart.addCandlestickSeries({
-      upColor: "#33d17a",
-      downColor: "#ff4d4d",
-      borderUpColor: "#33d17a",
-      borderDownColor: "#ff4d4d",
-      wickUpColor: "#33d17a",
-      wickDownColor: "#ff4d4d",
+      upColor: palette.up,
+      downColor: palette.down,
+      borderUpColor: palette.up,
+      borderDownColor: palette.down,
+      wickUpColor: palette.up,
+      wickDownColor: palette.down,
     });
 
     volumeRef.current = chart.addHistogramSeries({
@@ -80,9 +97,21 @@ export function ChartPanel({ symbol }: Props) {
 
     chartRef.current = chart;
 
+    // The A-share workspace mounts hidden (display:none → 0×0). When it first
+    // becomes visible, resize alone leaves the series crushed against the
+    // right edge — refit the time scale on the 0→visible transition.
+    let wasZero = true;
     const observer = new ResizeObserver(([entry]) => {
       const { width, height } = entry.contentRect;
-      if (width > 0 && height > 0) chart.resize(width, height);
+      if (width > 0 && height > 0) {
+        chart.resize(width, height);
+        if (wasZero) {
+          chart.timeScale().fitContent();
+          wasZero = false;
+        }
+      } else {
+        wasZero = true;
+      }
     });
     observer.observe(hostRef.current);
 
@@ -119,7 +148,7 @@ export function ChartPanel({ symbol }: Props) {
           res.candles.map((c: Candle) => ({
             time: c.time as UTCTimestamp,
             value: c.volume,
-            color: c.close >= c.open ? "rgba(51,209,122,0.28)" : "rgba(255,77,77,0.28)",
+            color: c.close >= c.open ? palette.upVol : palette.downVol,
           })),
         );
         chartRef.current?.timeScale().fitContent();

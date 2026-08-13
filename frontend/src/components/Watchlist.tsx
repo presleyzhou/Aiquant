@@ -1,7 +1,10 @@
 import { useState } from "react";
 import type { Quote } from "../api";
+import { usePriceFlash } from "../hooks/usePriceFlash";
+import { displayName, type MarketProfile } from "../markets";
 
 interface Props {
+  profile: MarketProfile;
   symbols: string[];
   quotes: Record<string, Quote>;
   active: string;
@@ -10,8 +13,9 @@ interface Props {
   onRemove: (symbol: string) => void;
 }
 
-export function Watchlist({ symbols, quotes, active, onSelect, onAdd, onRemove }: Props) {
+export function Watchlist({ profile, symbols, quotes, active, onSelect, onAdd, onRemove }: Props) {
   const [draft, setDraft] = useState("");
+  const flash = usePriceFlash(quotes);
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -34,13 +38,14 @@ export function Watchlist({ symbols, quotes, active, onSelect, onAdd, onRemove }
           style={{ flex: 1 }}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          placeholder="代码，如 TSLA"
+          placeholder={profile.placeholder}
           aria-label="添加标的"
         />
         <button className="btn" type="submit">
           添加
         </button>
       </form>
+      {profile.hint && <div className="watch-hint">{profile.hint}</div>}
 
       <div className="panel__body panel__body--flush">
         {symbols.length === 0 ? (
@@ -51,14 +56,21 @@ export function Watchlist({ symbols, quotes, active, onSelect, onAdd, onRemove }
               const q = quotes[symbol];
               const pct = q?.change_pct;
               const tone = pct === undefined ? "flat" : pct > 0 ? "up" : pct < 0 ? "dn" : "flat";
+              const name = displayName(profile, symbol);
               return (
                 <li
                   key={symbol}
                   className={`watch-row${symbol === active ? " is-active" : ""}`}
                   onClick={() => onSelect(symbol)}
                 >
-                  <span className="watch-row__sym">{symbol}</span>
-                  <span className="watch-row__px">
+                  <span className="watch-row__id">
+                    <span className="watch-row__sym">{symbol}</span>
+                    {name && <span className="watch-row__name">{name}</span>}
+                  </span>
+                  <span
+                    key={q?.price}
+                    className={`watch-row__px${flash[symbol] ? ` px--${flash[symbol]}` : ""}`}
+                  >
                     {q?.error ? <span className="dim">n/a</span> : (q?.price?.toFixed(2) ?? "—")}
                   </span>
                   <span className={`watch-row__chg ${tone}`}>

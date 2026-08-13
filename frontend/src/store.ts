@@ -61,6 +61,35 @@ export function installedSkills(): InstalledSkill[] {
   return read<InstalledSkill[]>("aiquant.skills", []);
 }
 
+// ----------------------------------------------------------------- purchases
+
+/** Client-side entitlements. Deliberate scope cut: real per-account
+ * entitlements need auth + a database; until then a purchase unlocks the item
+ * in this browser, and demo purchases are permanently badged as such. */
+export interface PurchaseRecord {
+  chargeId: string;
+  provider: string;
+  demo: boolean;
+  at: string;
+}
+
+const PURCHASES_KEY = "aiquant.purchases";
+
+export function purchases(): Record<string, PurchaseRecord> {
+  return read<Record<string, PurchaseRecord>>(PURCHASES_KEY, {});
+}
+
+export function isPurchased(itemId: string): boolean {
+  return itemId in purchases();
+}
+
+export function recordPurchase(itemId: string, record: PurchaseRecord): void {
+  const all = purchases();
+  all[itemId] = record;
+  localStorage.setItem(PURCHASES_KEY, JSON.stringify(all));
+  window.dispatchEvent(new CustomEvent(EVENTS.installed));
+}
+
 // ------------------------------------------------------------------- presets
 
 export interface BacktestPreset {

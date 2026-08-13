@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     # --- data sources (optional; yfinance needs no key) ---
     alpha_vantage_key: str | None = None
 
+    # --- marketplace payments (optional) ---
+    # With a Coinbase Commerce API key set, paid marketplace items check out
+    # through real hosted crypto payments; without it the flow runs in a
+    # clearly-labelled demo mode where no value moves.
+    coinbase_commerce_api_key: str | None = None
+
     # --- market data ---
     quote_cache_seconds: int = 15
     ws_poll_seconds: float = 5.0

@@ -13,9 +13,13 @@ const PERIODS = ["1y", "2y", "5y", "max"];
 
 interface Props {
   symbol: string;
+  /** Two panels are mounted (US + A-share workspaces). Only the one whose
+   *  market the user last had open consumes marketplace presets — the queue
+   *  is read-and-clear, so exactly one panel may take it. */
+  presetTarget?: boolean;
 }
 
-export function BacktestPanel({ symbol }: Props) {
+export function BacktestPanel({ symbol, presetTarget = true }: Props) {
   const [strategy, setStrategy] = useState("sma_cross");
   const [period, setPeriod] = useState("2y");
   const [fast, setFast] = useState(20);
@@ -29,6 +33,8 @@ export function BacktestPanel({ symbol }: Props) {
   const [error, setError] = useState<string | null>(null);
   const symbolRef = useRef(symbol);
   symbolRef.current = symbol;
+  const presetTargetRef = useRef(presetTarget);
+  presetTargetRef.current = presetTarget;
 
   const isCross = strategy === "sma_cross" || strategy === "ema_cross";
   const isRsi = strategy === "rsi_reversion";
@@ -65,6 +71,7 @@ export function BacktestPanel({ symbol }: Props) {
   // marketplace fires the preset event (the panel stays mounted across views).
   useEffect(() => {
     const applyPending = () => {
+      if (!presetTargetRef.current) return; // the other workspace's panel owns it
       const preset = takeBacktestPreset();
       if (!preset) return;
       const p = preset.payload;

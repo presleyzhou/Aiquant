@@ -230,12 +230,62 @@ body {
 /* ----------------------------------------------------------------- ticker -- */
 
 .ticker {
-  display: flex;
-  gap: 0;
+  position: relative;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-  scrollbar-width: thin;
+  overflow: hidden;
+  min-height: 30px;
+}
+
+/* Fade the tape out at both edges so items enter/leave softly. */
+.ticker::before,
+.ticker::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 36px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.ticker::before {
+  left: 0;
+  background: linear-gradient(90deg, var(--panel), transparent);
+}
+
+.ticker::after {
+  right: 0;
+  background: linear-gradient(-90deg, var(--panel), transparent);
+}
+
+/* Two identical halves; travelling -50% loops seamlessly. */
+.ticker__track {
+  display: flex;
+  width: max-content;
+  animation: ticker-scroll 60s linear infinite;
+  will-change: transform;
+}
+
+.ticker:hover .ticker__track,
+.ticker:focus-within .ticker__track {
+  animation-play-state: paused;
+}
+
+@keyframes ticker-scroll {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker {
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+  .ticker__track {
+    animation: none !important;
+  }
 }
 
 .ticker__item {
@@ -269,8 +319,37 @@ body {
   letter-spacing: 0.06em;
 }
 
+.ticker__name {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
 .ticker__px {
   color: var(--text-dim);
+  border-radius: 2px;
+  padding: 0 3px;
+  margin: 0 -3px;
+}
+
+/* -------------------------------------------------------------- px flash --- */
+
+@keyframes px-flash {
+  from {
+    background: var(--flash-bg);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+.px--up {
+  --flash-bg: color-mix(in srgb, var(--rise, var(--green)) 32%, transparent);
+  animation: px-flash 0.9s ease-out;
+}
+
+.px--dn {
+  --flash-bg: color-mix(in srgb, var(--fall, var(--red)) 32%, transparent);
+  animation: px-flash 0.9s ease-out;
 }
 
 /* ------------------------------------------------------------- watchlist --- */
@@ -290,12 +369,11 @@ body {
 
 .watch-row {
   display: grid;
-  /* Symbol sizes to its content and the price column absorbs the slack, so a
-     long ticker is never the thing that gets truncated. */
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  /* Identity block truncates first; price stays fully visible right-aligned. */
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 7px;
-  padding: 6px 9px;
+  padding: 5px 9px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
@@ -309,6 +387,13 @@ body {
   box-shadow: inset 3px 0 0 var(--amber);
 }
 
+.watch-row__id {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
 .watch-row__sym {
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -317,9 +402,28 @@ body {
   text-overflow: ellipsis;
 }
 
+.watch-row__name {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.watch-hint {
+  padding: 6px 10px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+  line-height: 1.5;
+}
+
 .watch-row__px {
   text-align: right;
   font-variant-numeric: tabular-nums;
+  border-radius: 2px;
+  padding: 1px 4px;
+  margin: -1px -4px;
 }
 
 .watch-row__chg {
@@ -658,11 +762,13 @@ td {
 
 /* ---------------------------------------------------------------- helpers -- */
 
+/* Rise/fall colours resolve through --rise/--fall so the A-share workspace can
+   flip to the Chinese red-up/green-down convention by overriding two vars. */
 .up {
-  color: var(--green);
+  color: var(--rise, var(--green));
 }
 .dn {
-  color: var(--red);
+  color: var(--fall, var(--red));
 }
 .flat {
   color: var(--text-dim);
@@ -1188,4 +1294,51 @@ td {
   border-radius: 50%;
   background: var(--violet);
   flex: 0 0 auto;
+}
+
+/* --------------------------------------------------------------- payments -- */
+
+.mk-badge--price {
+  color: var(--amber);
+  border-color: rgba(255, 176, 0, 0.45);
+  background: rgba(255, 176, 0, 0.09);
+  font-weight: 700;
+}
+
+.mk-badge--demo {
+  color: var(--violet);
+  border-color: rgba(167, 139, 250, 0.4);
+  background: rgba(167, 139, 250, 0.08);
+}
+
+.mk-overlay--pay {
+  z-index: 50;
+}
+
+.mk-modal--pay {
+  width: min(480px, 100%);
+}
+
+.pay-panel {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.pay-panel--demo {
+  border-style: dashed;
+  border-color: rgba(167, 139, 250, 0.4);
+}
+
+.pay-demo-flag {
+  display: inline-block;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--violet);
+  border: 1px solid rgba(167, 139, 250, 0.45);
+  border-radius: 3px;
+  padding: 2px 8px;
+  margin-bottom: 10px;
 }

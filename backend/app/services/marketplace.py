@@ -40,6 +40,9 @@ class Item:
     tier: str = "free"  # free | key_required | planned
     risk: str | None = None  # strategies only: low | medium | high
     integration: dict[str, Any] = field(default_factory=dict)
+    # None = free. Priced items check out through /api/payments (crypto via
+    # Coinbase Commerce when configured; labelled demo mode otherwise).
+    price: dict[str, str] | None = None  # {"amount": "4.99", "currency": "USD"}
 
 
 CATALOG: list[Item] = [
@@ -142,6 +145,51 @@ CATALOG: list[Item] = [
                 "rsi_oversold": 30,
                 "rsi_overbought": 70,
             },
+        },
+    ),
+    Item(
+        id="trend-sniper-pro",
+        type="strategy",
+        name="趋势狙击 Pro 10/40",
+        tagline="更快的 EMA 组合 + 5 年长窗口验证，付费预设",
+        description=(
+            "EMA 10/40 的激进趋势组合：入场比 12/26 更早，配合 5 年回测窗口"
+            "验证参数在完整牛熊周期中的表现。购买后与内置策略完全一样地运行——"
+            "一键回测、含成本、对比买入持有基准。付费的是调参与验证工作，"
+            "不是魔法：回测结果该难看时依然会难看。"
+        ),
+        author="AIQUANT Pro",
+        version="1.0",
+        tags=["趋势跟随", "Pro", "长窗口"],
+        risk="medium",
+        price={"amount": "4.99", "currency": "USD"},
+        integration={
+            "backtest": {"strategy": "ema_cross", "fast": 10, "slow": 40, "period": "5y"},
+        },
+    ),
+    Item(
+        id="deep-due-diligence",
+        type="skill",
+        name="机构级深度尽调",
+        tagline="一次提问跑完行情、全套指标、双策略回测与相对强弱",
+        description=(
+            "把技术面速览、风险体检、策略对比和大盘相对强弱合并成一次完整尽调："
+            "AI 会依次调取行情、RSI/MACD/布林带/ATR、双策略回测与 SPY 对比，"
+            "最后输出一份结构化的多空论点清单。工具调用次数多、耗时较长，"
+            "适合认真研究一只标的时使用。"
+        ),
+        author="AIQUANT Pro",
+        version="1.0",
+        tags=["AI 技能", "Pro", "深度研究"],
+        price={"amount": "2.99", "currency": "USD"},
+        integration={
+            "prompt_template": (
+                "对 {symbol} 做一次机构级深度尽调，按以下顺序使用工具并汇总："
+                "1) 当前行情与近 1 年走势；2) RSI(14)、MACD、布林带、ATR(14) 全套指标；"
+                "3) 分别回测 sma_cross(20/50) 与 rsi_reversion（2 年），对比买入持有；"
+                "4) 与 SPY 的 6 个月相对强弱。最后给出：多头论点、空头论点、"
+                "关键价位、以及这只标的更适合的交易风格——全部基于工具返回的真实数据。"
+            ),
         },
     ),
     Item(

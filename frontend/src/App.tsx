@@ -1,38 +1,64 @@
 import { useEffect, useMemo, useState } from "react";
-import { api } from "./api";
+import { api, type Quote } from "./api";
 import { AIPanel } from "./components/AIPanel";
 import { BacktestPanel } from "./components/BacktestPanel";
 import { ChartPanel } from "./components/ChartPanel";
 import { MarketPage } from "./components/MarketPage";
+import { TickerTape } from "./components/TickerTape";
 import { Watchlist } from "./components/Watchlist";
 import { useQuoteStream } from "./hooks/useQuoteStream";
+import {
+  MARKETS,
+  candlePalette,
+  marketColorVars,
+  type MarketId,
+  type MarketProfile,
+} from "./markets";
 
-const DEFAULT_WATCHLIST = ["AAPL", "MSFT", "NVDA", "SPY", "TSLA", "BTC-USD"];
-const STORAGE_KEY = "aiquant.watchlist";
+type View = MarketId | "market";
+
+function loadWatchlist(profile: MarketProfile): string[] {
+  try {
+    const saved = localStorage.getItem(profile.storageKey);
+    const parsed = saved ? JSON.parse(saved) : null;
+    if (Array.isArray(parsed) && parsed.length) return parsed;
+  } catch {
+    /* corrupt storage — fall through to the defaults */
+  }
+  return profile.defaults;
+}
+
+interface AiState {
+  enabled: boolean;
+  model: string | null;
+}
 
 export default function App() {
-  const [symbols, setSymbols] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      const parsed = saved ? JSON.parse(saved) : null;
-      if (Array.isArray(parsed) && parsed.length) return parsed;
-    } catch {
-      /* corrupt storage — fall through to the default list */
-    }
-    return DEFAULT_WATCHLIST;
-  });
-  const [active, setActive] = useState(symbols[0] ?? "AAPL");
-  const [view, setView] = useState<"terminal" | "market">("terminal");
-  const [ai, setAi] = useState<{ enabled: boolean; model: string | null }>({
-    enabled: false,
-    model: null,
-  });
+  const [view, setView] = useState<View>("us");
+  // Which terminal the marketplace should act on (and the tape should show)
+  // while the user is browsing the market page.
+  const [lastTerminal, setLastTerminal] = useState<MarketId>("us");
+  const [lists, setLists] = useState<Record<MarketId, string[]>>(() => ({
+    us: loadWatchlist(MARKETS.us),
+    cn: loadWatchlist(MARKETS.cn),
+  }));
+  const [actives, setActives] = useState<Record<MarketId, string>>(() => ({
+    us: loadWatchlist(MARKETS.us)[0] ?? "AAPL",
+    cn: loadWatchlist(MARKETS.cn)[0] ?? "600519.SS",
+  }));
+  const [ai, setAi] = useState<AiState>({ enabled: false, model: null });
 
-  const { quotes, status } = useQuoteStream(symbols);
+  // One socket / poll loop for both markets.
+  const allSymbols = useMemo(
+    () => [...new Set([...lists.us, ...lists.cn])].slice(0, 25),
+    [lists],
+  );
+  const { quotes, status } = useQuoteStream(allSymbols);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(symbols));
-  }, [symbols]);
+    localStorage.setItem(MARKETS.us.storageKey, JSON.stringify(lists.us));
+    localStorage.setItem(MARKETS.cn.storageKey, JSON.stringify(lists.cn));
+  }, [lists]);
 
   useEffect(() => {
     api
@@ -41,22 +67,35 @@ export default function App() {
       .catch(() => setAi({ enabled: false, model: null }));
   }, []);
 
-  const add = (symbol: string) => {
-    setSymbols((prev) => (prev.includes(symbol) ? prev : [...prev, symbol]));
-    setActive(symbol);
+  const switchView = (next: View) => {
+    setView(next);
+    if (next === "us" || next === "cn") setLastTerminal(next);
   };
 
-  const remove = (symbol: string) => {
-    setSymbols((prev) => {
-      const next = prev.filter((s) => s !== symbol);
-      // Keep a valid selection when the active symbol is the one removed.
-      if (symbol === active) setActive(next[0] ?? "");
-      return next;
+  const add = (market: MarketId, symbol: string) => {
+    setLists((prev) =>
+      prev[market].includes(symbol) ? prev : { ...prev, [market]: [...prev[market], symbol] },
+    );
+    setActives((prev) => ({ ...prev, [market]: symbol }));
+  };
+
+  const remove = (market: MarketId, symbol: string) => {
+    setLists((prev) => {
+      const next = prev[market].filter((s) => s !== symbol);
+      if (symbol === actives[market]) {
+        setActives((a) => ({ ...a, [market]: next[0] ?? "" }));
+      }
+      return { ...prev, [market]: next };
     });
   };
 
-  const activeQuote = quotes[active];
-  const tape = useMemo(() => symbols.slice(0, 12), [symbols]);
+  const select = (market: MarketId, symbol: string) => {
+    setActives((prev) => ({ ...prev, [market]: symbol }));
+  };
+
+  const tapeMarket: MarketId = view === "market" ? lastTerminal : view;
+  const tapeProfile = MARKETS[tapeMarket];
+  const activeQuote: Quote | undefined = quotes[actives[tapeMarket]];
 
   return (
     <div className="app">
@@ -66,18 +105,21 @@ export default function App() {
           <span className="brand__sub">TERMINAL</span>
         </div>
         <nav className="nav-tabs" aria-label="页面切换">
-          <button
-            className={`nav-tab${view === "terminal" ? " is-on" : ""}`}
-            onClick={() => setView("terminal")}
-          >
-            终端
-          </button>
-          <button
-            className={`nav-tab${view === "market" ? " is-on" : ""}`}
-            onClick={() => setView("market")}
-          >
-            市场
-          </button>
+          {(
+            [
+              ["us", MARKETS.us.label],
+              ["cn", MARKETS.cn.label],
+              ["market", "市场"],
+            ] as Array<[View, string]>
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              className={`nav-tab${view === value ? " is-on" : ""}`}
+              onClick={() => switchView(value)}
+            >
+              {label}
+            </button>
+          ))}
         </nav>
         <div className="status-row">
           <span className="status">
@@ -111,63 +153,99 @@ export default function App() {
         </div>
       </header>
 
-      <div className="ticker">
-        {tape.map((symbol) => {
-          const q = quotes[symbol];
-          const pct = q?.change_pct;
-          const tone = pct === undefined ? "flat" : pct > 0 ? "up" : pct < 0 ? "dn" : "flat";
-          return (
-            <button
-              key={symbol}
-              className={`ticker__item${symbol === active ? " is-active" : ""}`}
-              onClick={() => setActive(symbol)}
-            >
-              <span className="ticker__sym">{symbol}</span>
-              <span className="ticker__px">{q?.price?.toFixed(2) ?? "—"}</span>
-              <span className={tone}>
-                {pct === undefined ? "" : `${pct > 0 ? "+" : ""}${pct.toFixed(2)}%`}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+      <TickerTape
+        profile={tapeProfile}
+        symbols={lists[tapeMarket]}
+        quotes={quotes}
+        active={actives[tapeMarket]}
+        onSelect={(symbol) => {
+          select(tapeMarket, symbol);
+          if (view === "market") switchView(tapeMarket);
+        }}
+      />
 
-      {/* The market page conditionally mounts, but the workspace only hides:
-          unmounting it would wipe the AI conversation and chart state every
-          time the user browses the marketplace. */}
-      {view === "market" && <MarketPage onRunStrategy={() => setView("terminal")} />}
-      <div className="workspace" style={view === "market" ? { display: "none" } : undefined}>
-          <div className="column">
-            <Watchlist
-              symbols={symbols}
-              quotes={quotes}
-              active={active}
-              onSelect={setActive}
-              onAdd={add}
-              onRemove={remove}
-            />
-          </div>
-
-          <div className="column">
-            {active ? (
-              <>
-                <ChartPanel symbol={active} />
-                <BacktestPanel symbol={active} />
-              </>
-            ) : (
-              <div className="panel panel--grow">
-                <div className="empty">先在左侧添加一个标的</div>
-              </div>
-            )}
-          </div>
-
-          <div className="column">
-            <AIPanel enabled={ai.enabled} model={ai.model} symbol={active || "市场"} />
-          </div>
-      </div>
+      {/* The market page conditionally mounts, but both terminal workspaces
+          only hide: unmounting would wipe each market's AI conversation and
+          chart state on every tab switch. */}
+      {view === "market" && <MarketPage onRunStrategy={() => switchView(lastTerminal)} />}
+      {(["us", "cn"] as MarketId[]).map((market) => (
+        <TerminalWorkspace
+          key={market}
+          profile={MARKETS[market]}
+          hidden={view !== market}
+          symbols={lists[market]}
+          quotes={quotes}
+          active={actives[market]}
+          ai={ai}
+          presetTarget={lastTerminal === market}
+          onSelect={(s) => select(market, s)}
+          onAdd={(s) => add(market, s)}
+          onRemove={(s) => remove(market, s)}
+        />
+      ))}
 
       <div className="disclaimer">
         本站仅供研究与教育用途，不构成投资建议。行情数据来自公开数据源，可能存在延迟或误差；回测结果不代表未来收益。
+      </div>
+    </div>
+  );
+}
+
+function TerminalWorkspace({
+  profile,
+  hidden,
+  symbols,
+  quotes,
+  active,
+  ai,
+  presetTarget,
+  onSelect,
+  onAdd,
+  onRemove,
+}: {
+  profile: MarketProfile;
+  hidden: boolean;
+  symbols: string[];
+  quotes: Record<string, Quote>;
+  active: string;
+  ai: AiState;
+  presetTarget: boolean;
+  onSelect: (symbol: string) => void;
+  onAdd: (symbol: string) => void;
+  onRemove: (symbol: string) => void;
+}) {
+  return (
+    <div
+      className="workspace"
+      style={{ ...(hidden ? { display: "none" } : {}), ...marketColorVars(profile) } as never}
+    >
+      <div className="column">
+        <Watchlist
+          profile={profile}
+          symbols={symbols}
+          quotes={quotes}
+          active={active}
+          onSelect={onSelect}
+          onAdd={onAdd}
+          onRemove={onRemove}
+        />
+      </div>
+
+      <div className="column">
+        {active ? (
+          <>
+            <ChartPanel symbol={active} palette={candlePalette(profile)} />
+            <BacktestPanel symbol={active} presetTarget={presetTarget} />
+          </>
+        ) : (
+          <div className="panel panel--grow">
+            <div className="empty">先在左侧添加一个标的</div>
+          </div>
+        )}
+      </div>
+
+      <div className="column">
+        <AIPanel enabled={ai.enabled} model={ai.model} symbol={active || "市场"} />
       </div>
     </div>
   );

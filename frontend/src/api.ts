@@ -80,6 +80,25 @@ export interface MarketItem {
     env_key?: string;
   };
   status?: { state: string; label: string };
+  price: { amount: string; currency: string } | null;
+}
+
+export interface PaymentConfig {
+  provider: string;
+  real: boolean;
+  note: string;
+}
+
+export interface Charge {
+  charge_id: string;
+  provider: string;
+  status: "pending" | "confirmed" | "failed";
+  demo: boolean;
+  item_id?: string;
+  amount?: string;
+  currency?: string;
+  hosted_url: string | null;
+  expires_at?: string;
 }
 
 export type AIEvent =
@@ -141,6 +160,18 @@ export const api = {
       json<{ count: number; items: MarketItem[] }>,
     );
   },
+
+  paymentConfig: () => fetch("/api/payments/config").then(json<PaymentConfig>),
+
+  createCharge: (item_id: string) =>
+    fetch("/api/payments/charges", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_id }),
+    }).then(json<Charge>),
+
+  chargeStatus: (charge_id: string) =>
+    fetch(`/api/payments/charges/${encodeURIComponent(charge_id)}`).then(json<Charge>),
 };
 
 /** Stream the NDJSON analysis feed, invoking `onEvent` per parsed line. */

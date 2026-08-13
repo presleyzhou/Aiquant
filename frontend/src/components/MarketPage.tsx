@@ -1,6 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
-import { api, type MarketItem } from "../api";
-import { installedIds, queueBacktestPreset, toggleInstall } from "../store";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { api, type Charge, type MarketItem, type PaymentConfig } from "../api";
+import {
+  installedIds,
+  isPurchased,
+  purchases,
+  queueBacktestPreset,
+  recordPurchase,
+  toggleInstall,
+} from "../store";
 
 const TYPE_META = {
   strategy: { label: "策略", color: "var(--amber)", rgb: "255, 176, 0" },
@@ -27,7 +34,12 @@ export function MarketPage({ onRunStrategy }: Props) {
   const [filter, setFilter] = useState("");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<MarketItem | null>(null);
+  const [paying, setPaying] = useState<MarketItem | null>(null);
   const [installed, setInstalled] = useState<string[]>(installedIds);
+  const [owned, setOwned] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(Object.keys(purchases()).map((id) => [id, true])),
+  );
+  const [payConfig, setPayConfig] = useState<PaymentConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -35,6 +47,10 @@ export function MarketPage({ onRunStrategy }: Props) {
       .marketItems()
       .then((res) => setItems(res.items))
       .catch((err: Error) => setError(err.message));
+    api
+      .paymentConfig()
+      .then(setPayConfig)
+      .catch(() => setPayConfig(null));
   }, []);
 
   const visible = useMemo(() => {
@@ -134,9 +150,25 @@ export function MarketPage({ onRunStrategy }: Props) {
         <DetailModal
           item={selected}
           installed={installed.includes(selected.id)}
+          owned={!selected.price || owned[selected.id] === true}
+          ownedDemo={purchases()[selected.id]?.demo === true}
           onClose={() => setSelected(null)}
           onToggleInstall={() => handleToggleInstall(selected)}
           onRun={() => runStrategy(selected)}
+          onBuy={() => setPaying(selected)}
+        />
+      )}
+
+      {paying && (
+        <PaymentModal
+          item={paying}
+          config={payConfig}
+          onClose={() => setPaying(null)}
+          onPaid={(record) => {
+            recordPurchase(paying.id, record);
+            setOwned((prev) => ({ ...prev, [paying.id]: true }));
+            setPaying(null);
+          }}
         />
       )}
     </div>
@@ -163,6 +195,12 @@ function Card({
         </span>
         <span className="mk-card__badges">
           {installed && <span className="mk-badge mk-badge--installed">✓ 已安装</span>}
+          {item.price &&
+            (isPurchased(item.id) ? (
+              <span className="mk-badge mk-badge--installed">已购买</span>
+            ) : (
+              <span className="mk-badge mk-badge--price">${item.price.amount}</span>
+            ))}
           <span className="mk-badge" style={{ color: meta.color }}>
             {meta.label}
           </span>
@@ -205,15 +243,22 @@ function FootBadge({ item }: { item: MarketItem }) {
 function DetailModal({
   item,
   installed,
+  owned,
+  ownedDemo,
   onClose,
   onToggleInstall,
   onRun,
+  onBuy,
 }: {
   item: MarketItem;
   installed: boolean;
+  /** true when the item is free or has been purchased in this browser. */
+  owned: boolean;
+  ownedDemo: boolean;
   onClose: () => void;
   onToggleInstall: () => void;
   onRun: () => void;
+  onBuy: () => void;
 }) {
   const meta = TYPE_META[item.type];
 
@@ -293,20 +338,184 @@ function DetailModal({
         </div>
 
         <div className="mk-modal__actions">
-          {item.type === "strategy" && (
-            <button className="btn btn--primary" onClick={onRun}>
-              ▶ 在回测中运行
-            </button>
+          {!owned ? (
+            <>
+              <button className="btn btn--primary" onClick={onBuy}>
+                以 ${item.price!.amount} {item.price!.currency} 购买 · 加密支付
+              </button>
+              <span className="dim" style={{ fontSize: 11.5 }}>
+                购买后解锁{item.type === "strategy" ? "回测运行" : "安装"}
+              </span>
+            </>
+          ) : (
+            <>
+              {item.type === "strategy" && (
+                <button className="btn btn--primary" onClick={onRun}>
+                  ▶ 在回测中运行
+                </button>
+              )}
+              {item.type !== "data" && (
+                <button className="btn" onClick={onToggleInstall}>
+                  {installed ? "移除" : item.type === "skill" ? "安装到 AI 面板" : "收藏"}
+                </button>
+              )}
+              {ownedDemo && (
+                <span className="mk-badge mk-badge--demo" title="通过演示流程解锁，未发生真实支付">
+                  演示购买
+                </span>
+              )}
+              {item.type === "data" && item.status?.state === "active" && (
+                <span className="dim" style={{ fontSize: 12 }}>
+                  该数据源正在驱动本站行情，无需操作。
+                </span>
+              )}
+            </>
           )}
-          {item.type !== "data" && (
-            <button className="btn" onClick={onToggleInstall}>
-              {installed ? "移除" : item.type === "skill" ? "安装到 AI 面板" : "收藏"}
-            </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- payment */
+
+function PaymentModal({
+  item,
+  config,
+  onClose,
+  onPaid,
+}: {
+  item: MarketItem;
+  config: PaymentConfig | null;
+  onClose: () => void;
+  onPaid: (record: {
+    chargeId: string;
+    provider: string;
+    demo: boolean;
+    at: string;
+  }) => void;
+}) {
+  const [charge, setCharge] = useState<Charge | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const pollRef = useRef<number | undefined>(undefined);
+
+  // Create the charge on open.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .createCharge(item.id)
+      .then((c) => !cancelled && setCharge(c))
+      .catch((err: Error) => !cancelled && setError(err.message));
+    return () => {
+      cancelled = true;
+    };
+  }, [item.id]);
+
+  // Real charges: poll the provider until confirmed/failed.
+  useEffect(() => {
+    if (!charge || charge.demo || confirmed) return;
+    const poll = async () => {
+      try {
+        const status = await api.chargeStatus(charge.charge_id);
+        if (status.status === "confirmed") {
+          setConfirmed(true);
+          onPaid({
+            chargeId: charge.charge_id,
+            provider: charge.provider,
+            demo: false,
+            at: new Date().toISOString(),
+          });
+        } else if (status.status === "failed") {
+          setError("支付已过期或被取消，请重新发起。");
+        }
+      } catch {
+        /* transient — next tick retries */
+      }
+    };
+    pollRef.current = window.setInterval(poll, 4000);
+    return () => window.clearInterval(pollRef.current);
+  }, [charge, confirmed, onPaid]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="mk-overlay mk-overlay--pay" onClick={onClose}>
+      <div
+        className="mk-modal mk-modal--pay"
+        style={{ "--tint": "255, 176, 0" } as never}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-label={`购买 ${item.name}`}
+      >
+        <div className="mk-modal__head">
+          <div style={{ minWidth: 0 }}>
+            <div className="mk-modal__name">购买 · {item.name}</div>
+            <div className="mk-card__tagline">
+              ${item.price?.amount} {item.price?.currency} · 加密货币支付
+            </div>
+          </div>
+          <button className="mk-close" onClick={onClose} aria-label="关闭">
+            ✕
+          </button>
+        </div>
+
+        <div className="mk-modal__body">
+          {error && <div className="err">{error}</div>}
+          {!charge && !error && <div className="empty">正在创建订单…</div>}
+
+          {charge && !charge.demo && (
+            <div className="pay-panel">
+              <p className="mk-desc" style={{ fontSize: 12.5 }}>
+                订单已创建（{charge.charge_id}）。在 Coinbase Commerce
+                托管页面完成支付后，本页会自动确认并解锁——请保持此窗口打开。
+              </p>
+              <a
+                className="btn btn--primary"
+                href={charge.hosted_url ?? "#"}
+                target="_blank"
+                rel="noreferrer"
+                style={{ display: "inline-block", textDecoration: "none", marginTop: 10 }}
+              >
+                前往支付页面 ↗
+              </a>
+              <p className="dim" style={{ fontSize: 11.5, marginTop: 10 }}>
+                等待链上确认中…（每 4 秒查询一次订单状态）
+              </p>
+            </div>
           )}
-          {item.type === "data" && item.status?.state === "active" && (
-            <span className="dim" style={{ fontSize: 12 }}>
-              该数据源正在驱动本站行情，无需操作。
-            </span>
+
+          {charge?.demo && (
+            <div className="pay-panel pay-panel--demo">
+              <div className="pay-demo-flag">演示模式</div>
+              <p className="mk-desc" style={{ fontSize: 12.5 }}>
+                {config?.note ??
+                  "未配置支付通道，当前为演示流程：不展示收款地址，不会发生任何真实转账。"}
+              </p>
+              <p className="dim" style={{ fontSize: 11.5, margin: "8px 0 0" }}>
+                站长在 <code className="mk-inline-code">.env</code> 配置{" "}
+                <code className="mk-inline-code">COINBASE_COMMERCE_API_KEY</code>{" "}
+                后，此处会变为真实的托管加密支付页面。
+              </p>
+              <button
+                className="btn btn--primary"
+                style={{ marginTop: 12 }}
+                onClick={() =>
+                  onPaid({
+                    chargeId: charge.charge_id,
+                    provider: "demo",
+                    demo: true,
+                    at: new Date().toISOString(),
+                  })
+                }
+              >
+                模拟支付完成（演示解锁）
+              </button>
+            </div>
           )}
         </div>
       </div>

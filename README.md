@@ -1,6 +1,8 @@
 # AIQUANT TERMINAL
 
-一个 Bloomberg 风格的 AI 量化研究网站：实时行情、K 线与技术指标、无前视偏差的策略回测、一个会**实际调用这些工具**再作答的 Claude 分析面板，以及一个策略 / AI 技能 / 数据源的**市场**。
+一个 Bloomberg 风格的 AI 量化研究网站：**美股与 A 股**双终端、跑马灯行情、K 线与技术指标、无前视偏差的策略回测、一个会**实际调用这些工具**再作答的 Claude 分析面板，以及一个带**加密货币结账**的策略 / AI 技能 / 数据源市场。
+
+**线上地址**: https://aiquant-rust.vercel.app · **仓库**: https://github.com/presleyzhou/Aiquant
 
 数据层复用了 [`fincept-terminal` 2.0.8](https://pypi.org/project/fincept-terminal/) 中 MIT 协议且可用的部分（详见 [`backend/fincept_terminal/NOTICE.md`](backend/fincept_terminal/NOTICE.md)）。
 
@@ -133,6 +135,12 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
 **Claude 安全分类器的拒答有兜底。** Opus 5 的分类器偶尔会误伤正常的金融措辞。代码默认开启服务端 fallback（`fallbacks: "default"`），被拒的请求会在同一次调用里换模型重试。如果账号没开这个 beta，会自动降级到标准接口且只降级一次，不会让整个 AI 功能挂掉。
 
 **技术指标是重新实现的。** RSI 用 Wilder 平滑，且在「连续上涨、平均跌幅为 0」时返回 100 而不是 NaN。所有指标的预热期 NaN 在后端就丢掉了，前端不需要再过滤。
+
+**A 股终端遵循本土惯例。** 独立标签页、独立自选列表（预置上证指数、贵州茅台、宁德时代等，带中文名），行情、K 线蜡烛、涨跌幅与回测统计全部**红涨绿跌** —— 与美股页的绿涨红跌互不干扰（通过 `--rise`/`--fall` CSS 变量按工作区切换）。数据来自 Yahoo（`.SS` 沪市 / `.SZ` 深市，延时约 15 分钟），后端零改动。
+
+**行情条是真正的跑马灯。** 列表复制两份做无缝循环滚动，悬停暂停（保持可点击），`prefers-reduced-motion` 下退化为普通滚动条。报价变动时价格闪烁提示，闪烁颜色同样遵循所在市场的涨跌配色。
+
+**市场支持加密货币结账，且诚实分层。** 配置 `COINBASE_COMMERCE_API_KEY` 后，付费条目走 Coinbase Commerce 托管加密支付页（前端每 4 秒轮询订单状态，链上确认后自动解锁）；未配置时进入**明确标注的演示模式** —— 不展示任何收款地址（假地址就是等着被误付款的骗局）、服务端永不伪造「已支付」状态、演示解锁的条目永久带「演示购买」徽标。购买记录存浏览器 localStorage：真实的按账号计的权益需要登录体系和数据库，这是明确的范围裁剪而非疏忽。
 
 **市场里的每个条目都接在真实引擎上。** 借鉴 FinceptTerminal「100+ 连接器 / 37 个 agent」的市场概念，但这里没有装饰品：策略条目携带的参数就是 `POST /api/analytics/backtest` 的合法请求体（有测试保证），点「在回测中运行」会切回终端并立即执行；AI 技能安装后进入 AI 面板的快捷提问（`{symbol}` 自动替换为当前标的）；数据源条目的状态是当前进程实时计算的（哪个在驱动站点、哪个已内嵌待接入、哪个缺 key）。也刻意**没有**编造安装量和评分——这是一个站长自营目录，不该假装是社区市场。安装状态存在浏览器 localStorage，没有引入数据库。
 
