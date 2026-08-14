@@ -95,6 +95,9 @@ export function recordPurchase(itemId: string, record: PurchaseRecord): void {
 export interface BacktestPreset {
   name: string;
   payload: Record<string, unknown>;
+  /** Explicit target workspace ("us" | "cn"). Absent = whichever terminal the
+   * user last had open (marketplace flow). */
+  market?: string;
 }
 
 export function queueBacktestPreset(preset: BacktestPreset): void {
@@ -102,9 +105,62 @@ export function queueBacktestPreset(preset: BacktestPreset): void {
   window.dispatchEvent(new CustomEvent(EVENTS.preset));
 }
 
-/** Read-and-clear, so a stale preset never re-fires on a later mount. */
-export function takeBacktestPreset(): BacktestPreset | null {
+/** Claim the pending preset for one workspace's panel.
+ *
+ * Two BacktestPanels are mounted (US + A-share) and both hear the preset
+ * event; the claim is read-and-clear, so exactly one may take it. A preset
+ * with an explicit `market` goes to that workspace; one without goes to the
+ * fallback target (the last-active terminal).
+ */
+export function takeBacktestPresetFor(
+  marketId: string,
+  isFallbackTarget: boolean,
+): BacktestPreset | null {
   const preset = read<BacktestPreset | null>(PRESET_KEY, null);
+  if (!preset) return null;
+  const mine = preset.market ? preset.market === marketId : isFallbackTarget;
+  if (!mine) return null;
   localStorage.removeItem(PRESET_KEY);
   return preset;
+}
+
+// ------------------------------------------------------------ my strategies
+
+/** AI-generated strategies the user chose to keep. Browser-local, same
+ * deliberate scope cut as purchases. */
+export interface SavedStrategy {
+  id: string;
+  name: string;
+  symbol: string;
+  strategy: string;
+  params: Record<string, unknown>;
+  rationale: string;
+  risks: string[];
+  beats_buy_hold: boolean;
+  in_sample?: Record<string, unknown>;
+  validation?: Record<string, unknown>;
+  savedAt: string;
+}
+
+const STRATEGIES_KEY = "aiquant.mystrategies";
+
+export function savedStrategies(): SavedStrategy[] {
+  return read<SavedStrategy[]>(STRATEGIES_KEY, []);
+}
+
+export function saveStrategy(strategy: Omit<SavedStrategy, "id" | "savedAt">): SavedStrategy {
+  const record: SavedStrategy = {
+    ...strategy,
+    id: `strat_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    savedAt: new Date().toISOString(),
+  };
+  localStorage.setItem(STRATEGIES_KEY, JSON.stringify([record, ...savedStrategies()]));
+  return record;
+}
+
+export function deleteStrategy(id: string): void {
+  localStorage.setItem(
+    STRATEGIES_KEY,
+    JSON.stringify(savedStrategies().filter((s) => s.id !== id)),
+  );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type BacktestResult } from "../api";
-import { EVENTS, takeBacktestPreset } from "../store";
+import { EVENTS, takeBacktestPresetFor } from "../store";
 
 const STRATEGIES = [
   { value: "sma_cross", label: "SMA 交叉" },
@@ -13,13 +13,15 @@ const PERIODS = ["1y", "2y", "5y", "max"];
 
 interface Props {
   symbol: string;
-  /** Two panels are mounted (US + A-share workspaces). Only the one whose
-   *  market the user last had open consumes marketplace presets — the queue
-   *  is read-and-clear, so exactly one panel may take it. */
+  /** Which workspace this panel lives in ("us" | "cn"). Presets that name a
+   *  market are claimed by the matching panel. */
+  marketId?: string;
+  /** Fallback claim for presets without an explicit market (marketplace flow):
+   *  true on the panel of the last-active terminal. */
   presetTarget?: boolean;
 }
 
-export function BacktestPanel({ symbol, presetTarget = true }: Props) {
+export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: Props) {
   const [strategy, setStrategy] = useState("sma_cross");
   const [period, setPeriod] = useState("2y");
   const [fast, setFast] = useState(20);
@@ -71,8 +73,7 @@ export function BacktestPanel({ symbol, presetTarget = true }: Props) {
   // marketplace fires the preset event (the panel stays mounted across views).
   useEffect(() => {
     const applyPending = () => {
-      if (!presetTargetRef.current) return; // the other workspace's panel owns it
-      const preset = takeBacktestPreset();
+      const preset = takeBacktestPresetFor(marketId, presetTargetRef.current);
       if (!preset) return;
       const p = preset.payload;
       if (typeof p.strategy === "string") setStrategy(p.strategy);

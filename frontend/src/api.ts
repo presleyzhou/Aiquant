@@ -174,16 +174,36 @@ export const api = {
     fetch(`/api/payments/charges/${encodeURIComponent(charge_id)}`).then(json<Charge>),
 };
 
-/** Stream the NDJSON analysis feed, invoking `onEvent` per parsed line. */
-export async function streamAnalysis(
-  messages: Array<{ role: string; content: string }>,
+export interface StrategyProposal {
+  name: string;
+  symbol: string;
+  strategy: string;
+  params: Record<string, unknown>;
+  rationale: string;
+  in_sample?: Record<string, unknown>;
+  validation?: Record<string, unknown>;
+  risks: string[];
+  beats_buy_hold: boolean;
+}
+
+export interface StrategyForm {
+  symbol: string;
+  objective: string;
+  validation_period: string;
+  notes: string;
+}
+
+/** Stream an NDJSON endpoint, invoking `onEvent` per parsed line. */
+export async function streamNDJSON(
+  url: string,
+  body: unknown,
   onEvent: (event: AIEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch("/api/ai/analyze", {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify(body),
     signal,
   });
 
@@ -221,3 +241,15 @@ export async function streamAnalysis(
     }
   }
 }
+
+export const streamAnalysis = (
+  messages: Array<{ role: string; content: string }>,
+  onEvent: (event: AIEvent) => void,
+  signal?: AbortSignal,
+) => streamNDJSON("/api/ai/analyze", { messages }, onEvent, signal);
+
+export const streamStrategy = (
+  form: StrategyForm,
+  onEvent: (event: AIEvent) => void,
+  signal?: AbortSignal,
+) => streamNDJSON("/api/ai/strategy", form, onEvent, signal);

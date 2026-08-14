@@ -139,6 +139,113 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+STRATEGY_SYSTEM_PROMPT = """You are the strategy design engine of an AI quant terminal. \
+Your job: design ONE runnable strategy for the user's instrument and objective, \
+grounded entirely in real backtests you run yourself.
+
+Required workflow:
+1. Read the instrument's character first: fetch price history and 1-2 indicators \
+(e.g. ATR for volatility, a long SMA for trend) to decide whether it rewards \
+trend-following or mean-reversion.
+2. Search parameters on the IN-SAMPLE window (period "2y") with `run_backtest`. \
+Budget: at most 8 in-sample runs — choose each variant deliberately, do not grid-scan.
+3. Validate the best variant ONCE on the longer out-of-sample window the user \
+specified (default period "5y"). In-sample winners that collapse out-of-sample \
+must be reported as such.
+4. Finish by calling `propose_strategy` exactly once — it is the only delivery \
+channel and it validates your parameters; if it returns an error, fix and re-call.
+
+Honesty rules — these outrank pleasing the user:
+- Every number you cite must come from a tool result in this conversation.
+- If nothing beats buy-and-hold after costs, say so plainly, set \
+`beats_buy_hold=false`, and either recommend buy_and_hold or explain why the \
+instrument doesn't suit the requested style. A negative result delivered \
+honestly is a valid outcome.
+- Name the overfitting risk: parameters tuned on history may not persist. \
+Include it in `risks`.
+- You are not a licensed adviser; the proposal is research, not a recommendation \
+to trade.
+
+Keep interim narration to one short line per step; put the full reasoning in the \
+final proposal's rationale."""
+
+PROPOSE_STRATEGY_TOOL: dict[str, Any] = {
+    "name": "propose_strategy",
+    "description": (
+        "Submit the final strategy proposal. Must be called exactly once, as the last "
+        "step. Parameters are validated against the backtest API contract — an error "
+        "result means the proposal was NOT recorded; fix the fields and call again."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "策略名称（中文，专业、具体，含关键参数）"},
+            "symbol": {"type": "string"},
+            "strategy": {
+                "type": "string",
+                "enum": ["sma_cross", "ema_cross", "rsi_reversion", "buy_and_hold"],
+            },
+            "params": {
+                "type": "object",
+                "description": "回测参数。交叉类含 fast/slow；RSI 类含 rsi_period/rsi_oversold/rsi_overbought；period 为建议运行窗口。",
+                "properties": {
+                    "period": {"type": "string", "enum": ["1y", "2y", "5y", "max"]},
+                    "fast": {"type": "integer"},
+                    "slow": {"type": "integer"},
+                    "rsi_period": {"type": "integer"},
+                    "rsi_oversold": {"type": "number"},
+                    "rsi_overbought": {"type": "number"},
+                },
+            },
+            "rationale": {
+                "type": "string",
+                "description": "为什么这组参数适合该标的——引用本次对话中真实回测数字，说明标的性格判断与参数取舍。",
+            },
+            "in_sample": {
+                "type": "object",
+                "description": "样本内(2y)关键指标：period, total_return_pct, buy_hold_return_pct, sharpe, max_drawdown_pct, win_rate_pct, trade_count",
+            },
+            "validation": {
+                "type": "object",
+                "description": "样本外验证窗口关键指标，字段同 in_sample",
+            },
+            "risks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "2-4 条主要风险与适用边界（必须包含过拟合提示）",
+            },
+            "beats_buy_hold": {
+                "type": "boolean",
+                "description": "验证窗口内是否跑赢买入持有（含成本）。必须与真实数字一致。",
+            },
+        },
+        "required": ["name", "symbol", "strategy", "params", "rationale", "risks", "beats_buy_hold"],
+    },
+}
+
+STRATEGY_TOOLS: list[dict[str, Any]] = [*TOOLS, PROPOSE_STRATEGY_TOOL]
+
+
+def validate_proposal(input_data: dict) -> dict | None:
+    """Check a propose_strategy payload against the real backtest contract.
+
+    Returns an error dict for Claude to fix, or None when valid. Import is
+    local to avoid an api→services→api cycle.
+    """
+    from app.api.analytics import BacktestRequest
+
+    params = dict(input_data.get("params") or {})
+    try:
+        req = BacktestRequest(
+            symbol=input_data["symbol"], strategy=input_data["strategy"], **params
+        )
+    except Exception as exc:
+        return {"error": f"params failed validation: {exc}"}
+    if req.strategy in {"sma_cross", "ema_cross"} and req.fast >= req.slow:
+        return {"error": "fast period must be shorter than slow period"}
+    return None
+
+
 class ClaudeUnavailable(RuntimeError):
     pass
 
@@ -202,6 +309,15 @@ class QuantAnalyst:
                     "indicator": args["indicator"],
                     "params": params,
                     "latest": _tail_indicator(result),
+                }
+
+            if name == "propose_strategy":
+                error = validate_proposal(args)
+                if error:
+                    return error
+                return {
+                    "recorded": True,
+                    "note": "方案已通过参数校验并记录，可以结束回复。",
                 }
 
             if name == "run_backtest":
@@ -269,8 +385,19 @@ class QuantAnalyst:
                     continue
                 raise
 
-    async def stream(self, messages: list[dict]) -> AsyncIterator[dict]:
-        """Yield analysis events. Each event is a dict with a `type` field."""
+    async def stream(
+        self,
+        messages: list[dict],
+        *,
+        system: str | None = None,
+        tools: list[dict] | None = None,
+        max_iterations: int = 8,
+    ) -> AsyncIterator[dict]:
+        """Yield analysis events. Each event is a dict with a `type` field.
+
+        `system`/`tools` default to the analyst persona; the strategy designer
+        passes its own prompt and the propose_strategy delivery tool.
+        """
         if not self.enabled:
             yield {
                 "type": "error",
@@ -278,15 +405,17 @@ class QuantAnalyst:
             }
             return
 
+        system = system or SYSTEM_PROMPT
+        tools = tools or TOOLS
         convo: list[dict] = list(messages)
 
-        for _ in range(8):  # bound the tool loop
+        for _ in range(max_iterations):  # bound the tool loop
             request: dict[str, Any] = {
                 "model": self._settings.claude_model,
                 "max_tokens": self._settings.claude_max_tokens,
-                "system": SYSTEM_PROMPT,
+                "system": system,
                 "messages": convo,
-                "tools": TOOLS,
+                "tools": tools,
                 # Adaptive thinking is the default on Opus 5; ask for the readable
                 # summary so the UI can show progress instead of a silent pause.
                 "thinking": {"type": "adaptive", "display": "summarized"},
@@ -343,7 +472,10 @@ class QuantAnalyst:
 
             convo.append({"role": "user", "content": tool_results})
 
-        yield {"type": "error", "message": "Tool loop exceeded 8 iterations without finishing."}
+        yield {
+            "type": "error",
+            "message": f"Tool loop exceeded {max_iterations} iterations without finishing.",
+        }
 
 
 def _is_fallback_beta_rejection(exc: Exception) -> bool:

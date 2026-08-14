@@ -4,9 +4,11 @@ import { AIPanel } from "./components/AIPanel";
 import { BacktestPanel } from "./components/BacktestPanel";
 import { ChartPanel } from "./components/ChartPanel";
 import { MarketPage } from "./components/MarketPage";
+import { StrategyLab } from "./components/StrategyLab";
 import { TickerTape } from "./components/TickerTape";
 import { Watchlist } from "./components/Watchlist";
 import { useQuoteStream } from "./hooks/useQuoteStream";
+import { queueBacktestPreset } from "./store";
 import {
   MARKETS,
   candlePalette,
@@ -15,7 +17,7 @@ import {
   type MarketProfile,
 } from "./markets";
 
-type View = MarketId | "market";
+type View = MarketId | "lab" | "market";
 
 function loadWatchlist(profile: MarketProfile): string[] {
   try {
@@ -93,9 +95,18 @@ export default function App() {
     setActives((prev) => ({ ...prev, [market]: symbol }));
   };
 
-  const tapeMarket: MarketId = view === "market" ? lastTerminal : view;
+  const tapeMarket: MarketId = view === "us" || view === "cn" ? view : lastTerminal;
   const tapeProfile = MARKETS[tapeMarket];
   const activeQuote: Quote | undefined = quotes[actives[tapeMarket]];
+
+  /** Run an AI-generated strategy: put its symbol in the right workspace,
+   * queue the preset addressed to that workspace, and switch over. */
+  const runGeneratedStrategy = (symbol: string, name: string, payload: Record<string, unknown>) => {
+    const market: MarketId = /\.(SS|SZ)$/i.test(symbol) ? "cn" : "us";
+    add(market, symbol);
+    queueBacktestPreset({ name, payload: { ...payload, symbol }, market });
+    switchView(market);
+  };
 
   return (
     <div className="app">
@@ -109,6 +120,7 @@ export default function App() {
             [
               ["us", MARKETS.us.label],
               ["cn", MARKETS.cn.label],
+              ["lab", "AI 策略"],
               ["market", "市场"],
             ] as Array<[View, string]>
           ).map(([value, label]) => (
@@ -164,10 +176,11 @@ export default function App() {
         }}
       />
 
-      {/* The market page conditionally mounts, but both terminal workspaces
-          only hide: unmounting would wipe each market's AI conversation and
-          chart state on every tab switch. */}
+      {/* The market page conditionally mounts, but the terminal workspaces and
+          the strategy lab only hide: unmounting would wipe AI conversations,
+          chart state, or an in-flight generation on every tab switch. */}
       {view === "market" && <MarketPage onRunStrategy={() => switchView(lastTerminal)} />}
+      <StrategyLab hidden={view !== "lab"} aiEnabled={ai.enabled} onRun={runGeneratedStrategy} />
       {(["us", "cn"] as MarketId[]).map((market) => (
         <TerminalWorkspace
           key={market}
@@ -235,7 +248,7 @@ function TerminalWorkspace({
         {active ? (
           <>
             <ChartPanel symbol={active} palette={candlePalette(profile)} />
-            <BacktestPanel symbol={active} presetTarget={presetTarget} />
+            <BacktestPanel symbol={active} marketId={profile.id} presetTarget={presetTarget} />
           </>
         ) : (
           <div className="panel panel--grow">
