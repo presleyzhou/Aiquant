@@ -111,6 +111,11 @@ class MarketDataService:
     def _fetch_quote_blocking(self, symbol: str) -> dict:
         ticker = yf.Ticker(symbol)
         hist = ticker.history(period="2d", interval="1d")
+        # Off-hours, yfinance can return a trailing row of NaNs. float(nan)
+        # survives every arithmetic step below and json.dumps then emits the
+        # literal `NaN` — invalid JSON that kills the client's parser. Drop
+        # the poison rows before any number leaves this function.
+        hist = hist.dropna(subset=["Close"])
         if hist.empty:
             raise LookupError(f"no market data for symbol {symbol!r}")
 
@@ -133,7 +138,11 @@ class MarketDataService:
             "previous_close": round(prev, 4),
             "day_high": _safe_float(info.get("day_high")) or round(float(hist["High"].iloc[-1]), 4),
             "day_low": _safe_float(info.get("day_low")) or round(float(hist["Low"].iloc[-1]), 4),
-            "volume": int(hist["Volume"].iloc[-1]) if "Volume" in hist else None,
+            "volume": (
+                int(hist["Volume"].iloc[-1])
+                if "Volume" in hist and not pd.isna(hist["Volume"].iloc[-1])
+                else None
+            ),
             "currency": info.get("currency"),
             "as_of": datetime.now(timezone.utc).isoformat(),
         }

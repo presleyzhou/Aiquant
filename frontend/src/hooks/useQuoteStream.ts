@@ -68,8 +68,13 @@ export function useQuoteStream(symbols: string[]) {
       };
 
       ws.onmessage = (event) => {
-        const payload = JSON.parse(event.data);
-        if (payload.type === "quotes") mergeQuotes(payload.quotes as Quote[]);
+        // One malformed frame must not kill the stream for the session.
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === "quotes") mergeQuotes(payload.quotes as Quote[]);
+        } catch {
+          /* skip bad frame; next push recovers */
+        }
       };
 
       ws.onclose = () => {

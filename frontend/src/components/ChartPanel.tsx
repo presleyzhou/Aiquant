@@ -77,6 +77,13 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
         vertLine: { color: "#333d4f", labelBackgroundColor: "#ffb000" },
         horzLine: { color: "#333d4f", labelBackgroundColor: "#ffb000" },
       },
+      watermark: {
+        visible: true,
+        text: "AIQUANT",
+        color: "rgba(126, 135, 153, 0.055)",
+        fontSize: 48,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      },
     });
 
     priceRef.current = chart.addCandlestickSeries({
@@ -258,7 +265,16 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
 
       <div className="chart-host" ref={hostRef}>
         {(loading || error) && (
-          <div className="chart-overlay">{error ? `加载失败：${error}` : "加载中…"}</div>
+          <div className="chart-overlay">
+            {error ? (
+              `加载失败：${error}`
+            ) : (
+              <span className="chart-overlay__inner">
+                <span className="spinner" aria-hidden />
+                加载行情…
+              </span>
+            )}
+          </div>
         )}
       </div>
     </div>
