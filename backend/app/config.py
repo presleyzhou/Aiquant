@@ -4,7 +4,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # The UI tells users to put keys in the PROJECT ROOT .env; uvicorn runs
+    # from backend/, so honour both locations (the later entry wins when a
+    # variable appears in both, making backend/.env the local override).
+    model_config = SettingsConfigDict(env_file=("../.env", ".env"), extra="ignore")
 
     # --- server ---
     cors_origins: str = "http://localhost:5173,http://localhost:8080"

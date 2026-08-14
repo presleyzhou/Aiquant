@@ -29,18 +29,42 @@ body,
 }
 
 body {
-  /* Faint colour wash so the terminal isn't flat black — same family of
-     tints the market hero uses, at a fraction of the intensity. */
+  /* Layered material, top to bottom: corner vignette → warm/cool aurora
+     tints → engineering dot grid → base. The dots read as graph paper in
+     any exposed area; panels sit on top with their own fills. */
   background:
-    radial-gradient(900px 300px at 12% -6%, rgba(255, 176, 0, 0.035), transparent 60%),
-    radial-gradient(800px 300px at 88% -8%, rgba(62, 200, 224, 0.03), transparent 55%),
+    radial-gradient(140% 130% at 50% 42%, transparent 55%, rgba(0, 0, 0, 0.5) 100%),
+    radial-gradient(1100px 460px at 12% -8%, rgba(255, 176, 0, 0.05), transparent 58%),
+    radial-gradient(950px 440px at 88% -10%, rgba(62, 200, 224, 0.045), transparent 55%),
+    radial-gradient(700px 500px at 50% 110%, rgba(167, 139, 250, 0.03), transparent 60%),
+    radial-gradient(rgba(126, 135, 153, 0.075) 1px, transparent 1.3px),
     var(--bg);
+  background-size:
+    auto,
+    auto,
+    auto,
+    auto,
+    22px 22px,
+    auto;
   color: var(--text);
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   font-feature-settings: "tnum";
+}
+
+/* Film grain over everything — the single layer that makes flat fills read
+   as material. Tiled SVG turbulence, ~3.5% opacity, inert to input. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 180px 180px;
 }
 
 ::selection {
@@ -62,11 +86,14 @@ body {
   overflow: hidden;
 }
 
+/* Panels float over the textured backdrop instead of tiling edge-to-edge —
+   the 8px seams are what let the grain/dot-grid/vignette actually show. */
 .workspace {
   display: grid;
   grid-template-columns: 240px 1fr 400px;
-  gap: 1px;
-  background: var(--border);
+  gap: 8px;
+  padding: 8px;
+  background: transparent;
   min-height: 0;
   overflow: hidden;
 }
@@ -74,10 +101,10 @@ body {
 .column {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 8px;
   min-height: 0;
   overflow: hidden;
-  background: var(--border);
+  background: transparent;
 }
 
 @media (max-width: 1400px) {
@@ -106,7 +133,11 @@ body {
   /* A 2% vertical falloff + hairline top highlight reads as machined metal
      instead of flat fill, at zero legibility cost. */
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 40%), var(--panel);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    0 8px 22px -8px rgba(0, 0, 0, 0.5);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -202,7 +233,14 @@ body {
   justify-content: space-between;
   gap: 16px;
   padding: 8px 14px;
-  background: linear-gradient(180deg, #191e27, var(--panel-alt));
+  /* Brushed-metal micro-lines over the gradient — visible only up close. */
+  background:
+    repeating-linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.014) 0 1px,
+      transparent 1px 3px
+    ),
+    linear-gradient(180deg, #191e27, var(--panel-alt));
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
 }
@@ -992,10 +1030,19 @@ tbody tr:hover td {
 .market {
   overflow-y: auto;
   background:
-    radial-gradient(1100px 420px at 18% -8%, rgba(255, 176, 0, 0.07), transparent 60%),
-    radial-gradient(900px 420px at 85% -12%, rgba(167, 139, 250, 0.08), transparent 55%),
-    radial-gradient(700px 380px at 55% 8%, rgba(62, 200, 224, 0.05), transparent 60%),
+    radial-gradient(140% 130% at 50% 40%, transparent 55%, rgba(0, 0, 0, 0.5) 100%),
+    radial-gradient(1100px 420px at 18% -8%, rgba(255, 176, 0, 0.08), transparent 60%),
+    radial-gradient(900px 420px at 85% -12%, rgba(167, 139, 250, 0.09), transparent 55%),
+    radial-gradient(700px 380px at 55% 8%, rgba(62, 200, 224, 0.055), transparent 60%),
+    radial-gradient(rgba(126, 135, 153, 0.075) 1px, transparent 1.3px),
     var(--bg);
+  background-size:
+    auto,
+    auto,
+    auto,
+    auto,
+    22px 22px,
+    auto;
 }
 
 .mk-hero {

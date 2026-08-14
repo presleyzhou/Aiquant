@@ -62,7 +62,13 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
 
     const chart = createChart(hostRef.current, {
       layout: {
-        background: { type: ColorType.Solid, color: "#11141a" },
+        // Vertical falloff instead of a flat fill — the chart is the largest
+        // single surface on screen, so it carries the most perceived texture.
+        background: {
+          type: ColorType.VerticalGradient,
+          topColor: "#151a23",
+          bottomColor: "#0c0f14",
+        },
         textColor: "#7e8799",
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
         fontSize: 11,
