@@ -1,12 +1,15 @@
 # Vercel serverless function dependencies (api/index.py).
 # Deliberately leaner than backend/pyproject.toml: no uvicorn (Vercel runs the
-# ASGI app itself) and no websockets (not supported on Vercel functions —
-# the frontend falls back to REST polling). Keep this list in sync with the
-# runtime deps in backend/pyproject.toml when adding features.
+# ASGI app itself), no websockets (unsupported on Vercel functions — the
+# frontend falls back to REST polling), and no aiohttp (~13MB of wheels; only
+# the vendored async data providers need it, and none of them are wired to
+# serverless endpoints — payments uses httpx, which anthropic ships anyway).
+# The function bundle sits close to Vercel's 225MB uncompressed cap, so any
+# new dependency here must earn its megabytes.
 fastapi>=0.115
 pydantic>=2.9
 pydantic-settings>=2.6
-aiohttp>=3.10
+httpx>=0.27
 yfinance>=0.2.50
 pandas>=2.2
 numpy>=1.26

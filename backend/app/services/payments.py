@@ -23,7 +23,11 @@ import logging
 import uuid
 from typing import Any
 
-import aiohttp
+# httpx rather than aiohttp on purpose: it ships as a dependency of the
+# anthropic SDK anyway, whereas aiohttp adds ~13MB of wheels the serverless
+# bundle can't afford (aiohttp remains available locally/Docker for the
+# vendored async data providers).
+import httpx
 
 from app.config import get_settings
 from app.services import marketplace
@@ -99,15 +103,12 @@ async def create_charge(item_id: str) -> dict[str, Any]:
         "Content-Type": "application/json",
     }
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            f"{COINBASE_API}/charges", json=payload, headers=headers,
-            timeout=aiohttp.ClientTimeout(total=20),
-        ) as resp:
-            body = await resp.json()
-            if resp.status >= 400:
-                message = body.get("error", {}).get("message", str(body)[:200])
-                raise PaymentError(f"Coinbase Commerce rejected the charge: {message}")
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(f"{COINBASE_API}/charges", json=payload, headers=headers)
+        body = resp.json()
+        if resp.status_code >= 400:
+            message = body.get("error", {}).get("message", str(body)[:200])
+            raise PaymentError(f"Coinbase Commerce rejected the charge: {message}")
 
     data = body["data"]
     return {
@@ -138,14 +139,11 @@ async def charge_status(charge_id: str) -> dict[str, Any]:
         raise PaymentError("payment provider is not configured")
 
     headers = {"X-CC-Api-Key": settings.coinbase_commerce_api_key}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            f"{COINBASE_API}/charges/{charge_id}", headers=headers,
-            timeout=aiohttp.ClientTimeout(total=20),
-        ) as resp:
-            body = await resp.json()
-            if resp.status >= 400:
-                raise PaymentError(f"charge {charge_id!r} not found at provider")
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(f"{COINBASE_API}/charges/{charge_id}", headers=headers)
+        body = resp.json()
+        if resp.status_code >= 400:
+            raise PaymentError(f"charge {charge_id!r} not found at provider")
 
     data = body["data"]
     timeline = data.get("timeline") or [{}]
