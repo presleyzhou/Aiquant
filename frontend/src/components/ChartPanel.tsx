@@ -6,7 +6,7 @@ import {
   type LineData,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Candle, type Point } from "../api";
 
 const PERIODS = ["1mo", "3mo", "6mo", "1y", "2y", "5y"] as const;
@@ -41,7 +41,12 @@ interface Props {
   palette?: CandlePalette;
 }
 
-export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
+// memo: the parent workspace re-renders on every quote tick, but the chart only
+// depends on symbol + palette (both stable between ticks) — skip those renders.
+export const ChartPanel = memo(function ChartPanel({
+  symbol,
+  palette = DEFAULT_PALETTE,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -285,4 +290,4 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
       </div>
     </div>
   );
-}
+});

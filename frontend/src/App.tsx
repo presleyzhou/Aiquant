@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type Quote } from "./api";
 import { AIPanel } from "./components/AIPanel";
 import { BacktestPanel } from "./components/BacktestPanel";
@@ -69,31 +69,31 @@ export default function App() {
       .catch(() => setAi({ enabled: false, model: null }));
   }, []);
 
-  const switchView = (next: View) => {
+  const switchView = useCallback((next: View) => {
     setView(next);
     if (next === "us" || next === "cn") setLastTerminal(next);
-  };
+  }, []);
 
-  const add = (market: MarketId, symbol: string) => {
+  const add = useCallback((market: MarketId, symbol: string) => {
     setLists((prev) =>
       prev[market].includes(symbol) ? prev : { ...prev, [market]: [...prev[market], symbol] },
     );
     setActives((prev) => ({ ...prev, [market]: symbol }));
-  };
+  }, []);
 
   const remove = (market: MarketId, symbol: string) => {
-    setLists((prev) => {
-      const next = prev[market].filter((s) => s !== symbol);
-      if (symbol === actives[market]) {
-        setActives((a) => ({ ...a, [market]: next[0] ?? "" }));
-      }
-      return { ...prev, [market]: next };
-    });
+    // Two separate setState calls, not a nested one: updater functions must be
+    // pure (StrictMode double-invokes them; concurrent React may replay them).
+    const next = lists[market].filter((s) => s !== symbol);
+    setLists((prev) => ({ ...prev, [market]: next }));
+    if (symbol === actives[market]) {
+      setActives((a) => ({ ...a, [market]: next[0] ?? "" }));
+    }
   };
 
-  const select = (market: MarketId, symbol: string) => {
+  const select = useCallback((market: MarketId, symbol: string) => {
     setActives((prev) => ({ ...prev, [market]: symbol }));
-  };
+  }, []);
 
   const tapeMarket: MarketId = view === "us" || view === "cn" ? view : lastTerminal;
   const tapeProfile = MARKETS[tapeMarket];
@@ -101,12 +101,17 @@ export default function App() {
 
   /** Run an AI-generated strategy: put its symbol in the right workspace,
    * queue the preset addressed to that workspace, and switch over. */
-  const runGeneratedStrategy = (symbol: string, name: string, payload: Record<string, unknown>) => {
-    const market: MarketId = /\.(SS|SZ)$/i.test(symbol) ? "cn" : "us";
-    add(market, symbol);
-    queueBacktestPreset({ name, payload: { ...payload, symbol }, market });
-    switchView(market);
-  };
+  const runGeneratedStrategy = useCallback(
+    (symbol: string, name: string, payload: Record<string, unknown>) => {
+      const market: MarketId = /\.(SS|SZ)$/i.test(symbol) ? "cn" : "us";
+      add(market, symbol);
+      queueBacktestPreset({ name, payload: { ...payload, symbol }, market });
+      switchView(market);
+    },
+    [add, switchView],
+  );
+
+  const openLastTerminal = useCallback(() => switchView(lastTerminal), [switchView, lastTerminal]);
 
   return (
     <div className="app">
@@ -179,7 +184,7 @@ export default function App() {
       {/* The market page conditionally mounts, but the terminal workspaces and
           the strategy lab only hide: unmounting would wipe AI conversations,
           chart state, or an in-flight generation on every tab switch. */}
-      {view === "market" && <MarketPage onRunStrategy={() => switchView(lastTerminal)} />}
+      {view === "market" && <MarketPage onRunStrategy={openLastTerminal} />}
       <StrategyLab hidden={view !== "lab"} aiEnabled={ai.enabled} onRun={runGeneratedStrategy} />
       {(["us", "cn"] as MarketId[]).map((market) => (
         <TerminalWorkspace

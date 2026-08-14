@@ -7,6 +7,11 @@ const POLL_INTERVAL_MS = 12_000;
 /** WS attempts that fail before ever opening, after which we assume the host
  *  simply has no WebSocket support (e.g. Vercel serverless) and poll instead. */
 const FAILURES_BEFORE_FALLBACK = 2;
+/** With a non-empty watchlist the server refreshes quotes at least every 15s
+ *  (cache TTL), so a healthy socket can't be silent this long. Past it, the
+ *  socket is presumed dead (proxy dropped it without a close frame) and is
+ *  closed to trigger the normal reconnect path. */
+const STALE_AFTER_MS = 45_000;
 
 /**
  * Live quotes for a watchlist, over WebSocket when the backend supports it and
@@ -29,12 +34,24 @@ export function useQuoteStream(symbols: string[]) {
     closedByUs.current = false;
     let reconnectTimer: number | undefined;
     let pollTimer: number | undefined;
+    let watchdogTimer: number | undefined;
+    let lastFrameAt = 0;
 
     const mergeQuotes = (incoming: Quote[]) =>
       setQuotes((prev) => {
+        // Return the SAME object when nothing moved: the server cache TTL
+        // outlives the poll interval, so many frames are repeats, and a fresh
+        // object here would re-render every panel in both terminals for nothing.
+        let changed = false;
         const next = { ...prev };
-        for (const q of incoming) next[q.symbol] = q;
-        return next;
+        for (const q of incoming) {
+          const old = prev[q.symbol];
+          if (!old || old.as_of !== q.as_of || old.price !== q.price || old.error !== q.error) {
+            next[q.symbol] = q;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
       });
 
     const startPolling = () => {
@@ -65,9 +82,18 @@ export function useQuoteStream(symbols: string[]) {
         neverOpenedFailures.current = 0;
         setStatus("open");
         ws.send(JSON.stringify({ symbols: symbolsRef.current }));
+        lastFrameAt = Date.now();
+        watchdogTimer = window.setInterval(() => {
+          // Empty watchlist = the server legitimately pushes nothing; only a
+          // silent socket that SHOULD be delivering counts as dead.
+          if (symbolsRef.current.length > 0 && Date.now() - lastFrameAt > STALE_AFTER_MS) {
+            ws.close();
+          }
+        }, 15_000);
       };
 
       ws.onmessage = (event) => {
+        lastFrameAt = Date.now();
         // One malformed frame must not kill the stream for the session.
         try {
           const payload = JSON.parse(event.data);
@@ -78,6 +104,7 @@ export function useQuoteStream(symbols: string[]) {
       };
 
       ws.onclose = () => {
+        window.clearInterval(watchdogTimer);
         if (closedByUs.current) return;
         if (!opened) {
           neverOpenedFailures.current += 1;
@@ -99,6 +126,7 @@ export function useQuoteStream(symbols: string[]) {
       closedByUs.current = true;
       window.clearTimeout(reconnectTimer);
       window.clearInterval(pollTimer);
+      window.clearInterval(watchdogTimer);
       socketRef.current?.close();
     };
   }, []);

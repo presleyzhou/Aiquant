@@ -31,6 +31,9 @@ class Settings(BaseSettings):
 
     # --- market data ---
     quote_cache_seconds: int = 15
+    # Daily-bar history barely moves intraday; 5 minutes keeps charts fresh
+    # while letting one fetch serve a whole strategy-lab search session.
+    history_cache_seconds: int = 300
     ws_poll_seconds: float = 5.0
 
     @property

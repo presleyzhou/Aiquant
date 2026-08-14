@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import {
   streamStrategy,
   type AIEvent,
@@ -35,7 +35,7 @@ interface Props {
   onRun: (symbol: string, name: string, payload: Record<string, unknown>) => void;
 }
 
-export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
+export const StrategyLab = memo(function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
   const [symbol, setSymbol] = useState("AAPL");
   const [objective, setObjective] = useState("auto");
   const [validationPeriod, setValidationPeriod] = useState("5y");
@@ -53,6 +53,12 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
 
   const abortRef = useRef<AbortController | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  // Whether the stream reached a real terminal event (done/refusal/error) or
+  // at least delivered a validated proposal — anything else that ends the
+  // stream is a truncation (e.g. the serverless function hit its time cap).
+  const sawTerminalRef = useRef(false);
+  const deliveredRef = useRef(false);
+  const scrollQueued = useRef(false);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -63,7 +69,13 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
   }, [running]);
 
   useEffect(() => {
-    timelineRef.current?.scrollTo({ top: timelineRef.current.scrollHeight });
+    // Thinking deltas arrive many times a second; one scroll per frame is enough.
+    if (scrollQueued.current) return;
+    scrollQueued.current = true;
+    requestAnimationFrame(() => {
+      scrollQueued.current = false;
+      timelineRef.current?.scrollTo({ top: timelineRef.current.scrollHeight });
+    });
   }, [steps, thinking]);
 
   const pushStep = (step: TimelineStep) => setSteps((prev) => [...prev, step]);
@@ -132,6 +144,7 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
             setProposal(null); // rejected — Claude will fix and re-submit
           } else {
             attachResult("✓ 通过参数校验");
+            deliveredRef.current = true;
           }
         } else if (r?.error) {
           attachResult(`失败：${r.error}`);
@@ -142,11 +155,14 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
       }
       case "refusal":
         setError(`请求被安全分类器拒绝：${event.message}`);
+        sawTerminalRef.current = true;
         break;
       case "error":
         setError(event.message);
+        sawTerminalRef.current = true;
         break;
       case "done":
+        sawTerminalRef.current = true;
         break;
     }
   };
@@ -166,6 +182,8 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    sawTerminalRef.current = false;
+    deliveredRef.current = false;
 
     const form: StrategyForm = {
       symbol: cleaned,
@@ -176,6 +194,12 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
 
     try {
       await streamStrategy(form, handleEvent, controller.signal);
+      // The stream can end without any terminal event when the serverless
+      // function hits its execution cap mid-run — surface that instead of
+      // leaving a half-drawn timeline with no explanation.
+      if (!sawTerminalRef.current && !deliveredRef.current && !controller.signal.aborted) {
+        setError("生成流意外中断（可能是服务端运行时间上限）。已完成的步骤保留在时间线上，可重试或换更短的验证窗口。");
+      }
     } catch (err) {
       if ((err as Error).name !== "AbortError") setError((err as Error).message);
     } finally {
@@ -472,7 +496,7 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
       </div>
     </div>
   );
-}
+});
 
 function StatRow({ label, s }: { label: string; s: Record<string, unknown> }) {
   const n = (key: string) => {

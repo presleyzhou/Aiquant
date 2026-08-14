@@ -74,19 +74,21 @@ def _signals(df: pd.DataFrame, cfg: BacktestConfig) -> pd.Series:
         rs = gain / loss.replace(0, np.nan)
         rsi = (100 - 100 / (1 + rs)).where(loss != 0, 100.0)
 
-        # Stateful: enter below oversold, hold until above overbought.
-        want = pd.Series(False, index=close.index)
+        # Stateful: enter below oversold, hold until above overbought. The scan
+        # is inherently sequential, but it runs over a plain numpy array — the
+        # per-element `.iloc[i] =` writes this replaced dominated rsi_reversion
+        # backtests, and the strategy lab runs ~10 of those per session.
+        flags = np.zeros(len(close), dtype=bool)
         holding = False
-        for i, value in enumerate(rsi):
+        for i, value in enumerate(rsi.to_numpy()):
             if np.isnan(value):
-                want.iloc[i] = False
-                continue
+                continue  # flags[i] stays False; holding state carries over
             if not holding and value < cfg.rsi_oversold:
                 holding = True
             elif holding and value > cfg.rsi_overbought:
                 holding = False
-            want.iloc[i] = holding
-        return want
+            flags[i] = holding
+        return pd.Series(flags, index=close.index)
 
     if cfg.strategy == "buy_and_hold":
         return pd.Series(True, index=close.index)
@@ -162,6 +164,10 @@ def run(df: pd.DataFrame, cfg: BacktestConfig) -> BacktestResult:
         open_trade.pnl = round(proceeds - cost - gross_entry, 2)
         open_trade.return_pct = round((open_trade.pnl / gross_entry * 100) if gross_entry else 0.0, 3)
         trades.append(open_trade)
+        # Charge the exit on the final equity mark too: the trade record and the
+        # buy-and-hold benchmark both pay it, so an uncharged equity curve would
+        # overstate final_equity/total_return relative to its own trade list.
+        equity_curve[-1] = {"time": times[-1], "value": round(cash + proceeds - cost, 2)}
 
     return BacktestResult(
         equity_curve=equity_curve,

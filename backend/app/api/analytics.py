@@ -1,9 +1,9 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from app.services import backtest as bt
 from app.services import indicators as ind
-from app.services.datasource import market_data
+from app.services.datasource import market_data, resolve_interval
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
@@ -17,16 +17,22 @@ async def list_indicators():
 async def get_indicator(
     symbol: str,
     name: str,
+    response: Response,
     period: int | None = Query(None, ge=2, le=400),
     history: str = Query("1y", description="Price history window to compute over"),
+    interval: str | None = Query(None, description="Bar size; defaults to the candle endpoint's choice for this window"),
 ):
+    # Same period→interval mapping as /market/candles: an overlay computed on
+    # daily bars drawn over an hourly (1mo) or weekly (5y) candle series is
+    # silently wrong, so by default the indicator follows the chart's bar size.
+    interval = interval or resolve_interval(history)
     try:
-        df = await market_data.history_frame(symbol, history, "1d")
+        df = await market_data.history_frame(symbol, history, interval)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     params = {}
-    if period is not None and name.lower() in {"sma", "ema", "rsi", "atr"}:
+    if period is not None and name.lower() in {"sma", "ema", "rsi", "atr", "bollinger"}:
         params["period"] = period
 
     try:
@@ -34,11 +40,13 @@ async def get_indicator(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    response.headers["Cache-Control"] = "public, max-age=60"
     return {
         "symbol": symbol.upper(),
         "indicator": name.lower(),
         "params": params,
         "history": history,
+        "interval": interval,
         "data": result,
     }
 

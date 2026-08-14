@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Charge, type MarketItem, type PaymentConfig } from "../api";
 import {
   installedIds,
-  isPurchased,
   purchases,
   queueBacktestPreset,
   recordPurchase,
   toggleInstall,
+  type PurchaseRecord,
 } from "../store";
 
 const TYPE_META = {
@@ -29,16 +29,16 @@ interface Props {
   onRunStrategy: () => void;
 }
 
-export function MarketPage({ onRunStrategy }: Props) {
+export const MarketPage = memo(function MarketPage({ onRunStrategy }: Props) {
   const [items, setItems] = useState<MarketItem[]>([]);
   const [filter, setFilter] = useState("");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<MarketItem | null>(null);
   const [paying, setPaying] = useState<MarketItem | null>(null);
   const [installed, setInstalled] = useState<string[]>(installedIds);
-  const [owned, setOwned] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(Object.keys(purchases()).map((id) => [id, true])),
-  );
+  // localStorage is read once here, not per card per render: with ~15 cards
+  // that was a synchronous getItem+JSON.parse storm on every keystroke.
+  const [bought, setBought] = useState<Record<string, PurchaseRecord>>(purchases);
   const [payConfig, setPayConfig] = useState<PaymentConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -140,6 +140,7 @@ export function MarketPage({ onRunStrategy }: Props) {
             key={item.id}
             item={item}
             installed={installed.includes(item.id)}
+            purchased={item.id in bought}
             onOpen={() => setSelected(item)}
           />
         ))}
@@ -150,8 +151,8 @@ export function MarketPage({ onRunStrategy }: Props) {
         <DetailModal
           item={selected}
           installed={installed.includes(selected.id)}
-          owned={!selected.price || owned[selected.id] === true}
-          ownedDemo={purchases()[selected.id]?.demo === true}
+          owned={!selected.price || selected.id in bought}
+          ownedDemo={bought[selected.id]?.demo === true}
           onClose={() => setSelected(null)}
           onToggleInstall={() => handleToggleInstall(selected)}
           onRun={() => runStrategy(selected)}
@@ -166,24 +167,26 @@ export function MarketPage({ onRunStrategy }: Props) {
           onClose={() => setPaying(null)}
           onPaid={(record) => {
             recordPurchase(paying.id, record);
-            setOwned((prev) => ({ ...prev, [paying.id]: true }));
+            setBought((prev) => ({ ...prev, [paying.id]: record }));
             setPaying(null);
           }}
         />
       )}
     </div>
   );
-}
+});
 
 /* ------------------------------------------------------------------- card */
 
 function Card({
   item,
   installed,
+  purchased,
   onOpen,
 }: {
   item: MarketItem;
   installed: boolean;
+  purchased: boolean;
   onOpen: () => void;
 }) {
   const meta = TYPE_META[item.type];
@@ -196,7 +199,7 @@ function Card({
         <span className="mk-card__badges">
           {installed && <span className="mk-badge mk-badge--installed">✓ 已安装</span>}
           {item.price &&
-            (isPurchased(item.id) ? (
+            (purchased ? (
               <span className="mk-badge mk-badge--installed">已购买</span>
             ) : (
               <span className="mk-badge mk-badge--price">${item.price.amount}</span>
@@ -398,11 +401,18 @@ function PaymentModal({
   const [charge, setCharge] = useState<Charge | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
-  const pollRef = useRef<number | undefined>(undefined);
+  const [attempt, setAttempt] = useState(0);
+  // The parent passes `onPaid` as an inline arrow, i.e. a new identity every
+  // render. Holding it in a ref keeps it out of the poll effect's deps — with
+  // it in deps, any parent re-render tore down the 4s interval before it fired,
+  // and a real payment could go unconfirmed indefinitely.
+  const onPaidRef = useRef(onPaid);
+  onPaidRef.current = onPaid;
 
-  // Create the charge on open.
+  // Create the charge on open (and on explicit retry after expiry).
   useEffect(() => {
     let cancelled = false;
+    setError(null);
     api
       .createCharge(item.id)
       .then((c) => !cancelled && setCharge(c))
@@ -410,17 +420,23 @@ function PaymentModal({
     return () => {
       cancelled = true;
     };
-  }, [item.id]);
+  }, [item.id, attempt]);
 
-  // Real charges: poll the provider until confirmed/failed.
+  // Real charges: poll the provider until confirmed/failed/expired.
   useEffect(() => {
     if (!charge || charge.demo || confirmed) return;
+    const expiresAt = charge.expires_at ? Date.parse(charge.expires_at) : NaN;
     const poll = async () => {
+      if (!Number.isNaN(expiresAt) && Date.now() > expiresAt) {
+        window.clearInterval(timer);
+        setError("支付窗口已过期，订单未完成。可重新发起支付。");
+        return;
+      }
       try {
         const status = await api.chargeStatus(charge.charge_id);
         if (status.status === "confirmed") {
           setConfirmed(true);
-          onPaid({
+          onPaidRef.current({
             chargeId: charge.charge_id,
             provider: charge.provider,
             demo: false,
@@ -433,9 +449,9 @@ function PaymentModal({
         /* transient — next tick retries */
       }
     };
-    pollRef.current = window.setInterval(poll, 4000);
-    return () => window.clearInterval(pollRef.current);
-  }, [charge, confirmed, onPaid]);
+    const timer = window.setInterval(poll, 4000);
+    return () => window.clearInterval(timer);
+  }, [charge, confirmed]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -465,10 +481,24 @@ function PaymentModal({
         </div>
 
         <div className="mk-modal__body">
-          {error && <div className="err">{error}</div>}
+          {error && (
+            <div className="err">
+              {error}{" "}
+              <button
+                className="btn"
+                style={{ marginLeft: 8 }}
+                onClick={() => {
+                  setCharge(null);
+                  setAttempt((n) => n + 1);
+                }}
+              >
+                重新发起
+              </button>
+            </div>
+          )}
           {!charge && !error && <div className="empty">正在创建订单…</div>}
 
-          {charge && !charge.demo && (
+          {charge && !charge.demo && !error && (
             <div className="pay-panel">
               <p className="mk-desc" style={{ fontSize: 12.5 }}>
                 订单已创建（{charge.charge_id}）。在 Coinbase Commerce

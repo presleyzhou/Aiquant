@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -34,11 +35,20 @@ async def quotes_socket(websocket: WebSocket):
                 log.info("watchlist set to %s", symbols)
 
     async def push_loop():
+        # The quote cache TTL (15s) outlives the push interval (5s), so most
+        # polls return byte-identical data. Skip those frames: each one costs
+        # the client a full quote-merge re-render for no new information.
+        last_sent: str | None = None
         while True:
             if symbols:
                 try:
                     quotes = await market_data.quotes(symbols)
-                    await websocket.send_json({"type": "quotes", "quotes": quotes})
+                    frame = json.dumps(
+                        {"type": "quotes", "quotes": quotes}, separators=(",", ":")
+                    )
+                    if frame != last_sent:
+                        await websocket.send_text(frame)
+                        last_sent = frame
                 except Exception as exc:
                     await websocket.send_json({"type": "error", "message": str(exc)})
             await asyncio.sleep(settings.ws_poll_seconds)

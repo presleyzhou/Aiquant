@@ -128,6 +128,20 @@ def test_open_position_is_marked_to_market_at_the_end():
     assert result.trades[-1]["exit_time"] is not None
 
 
+def test_final_equity_agrees_with_trade_accounting():
+    """The equity curve's last mark must charge the same exit cost the trade
+    record and the buy-and-hold benchmark charge — otherwise total_return
+    overstates the strategy relative to its own trade list."""
+    df = trending()
+    result = bt.run(
+        df, bt.BacktestConfig(strategy="buy_and_hold", commission_bps=25, slippage_bps=25)
+    )
+    trade = result.trades[-1]
+    assert result.stats["final_equity"] == pytest.approx(
+        trade["shares"] * trade["entry_price"] + trade["pnl"], rel=1e-6
+    )
+
+
 def test_stats_are_json_safe():
     """numpy scalars serialise fine in Python but blow up FastAPI's encoder."""
     import json

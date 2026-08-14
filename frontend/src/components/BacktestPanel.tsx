@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { api, type BacktestResult } from "../api";
 import { EVENTS, takeBacktestPresetFor } from "../store";
 
@@ -21,7 +21,11 @@ interface Props {
   presetTarget?: boolean;
 }
 
-export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: Props) {
+export const BacktestPanel = memo(function BacktestPanel({
+  symbol,
+  marketId = "us",
+  presetTarget = true,
+}: Props) {
   const [strategy, setStrategy] = useState("sma_cross");
   const [period, setPeriod] = useState("2y");
   const [fast, setFast] = useState(20);
@@ -37,20 +41,28 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
   symbolRef.current = symbol;
   const presetTargetRef = useRef(presetTarget);
   presetTargetRef.current = presetTarget;
+  const requestSeq = useRef(0);
 
   const isCross = strategy === "sma_cross" || strategy === "ema_cross";
   const isRsi = strategy === "rsi_reversion";
 
   const execute = async (body: Record<string, unknown>) => {
+    // The run button and the marketplace-preset listener can both fire; without
+    // sequencing, whichever response lands LAST wins — a slow earlier run could
+    // overwrite a newer result. Only the latest request may touch state.
+    const id = ++requestSeq.current;
     setRunning(true);
     setError(null);
     try {
-      setResult(await api.backtest(body));
+      const res = await api.backtest(body);
+      if (id !== requestSeq.current) return;
+      setResult(res);
     } catch (err) {
+      if (id !== requestSeq.current) return;
       setError((err as Error).message);
       setResult(null);
     } finally {
-      setRunning(false);
+      if (id === requestSeq.current) setRunning(false);
     }
   };
 
@@ -267,7 +279,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
       )}
     </div>
   );
-}
+});
 
 function Stat({ label, value, tone }: { label: string; value: string; tone?: number }) {
   const cls = tone === undefined ? "" : tone > 0 ? "up" : tone < 0 ? "dn" : "";

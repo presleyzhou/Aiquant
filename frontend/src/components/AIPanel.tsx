@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { streamAnalysis, type AIEvent } from "../api";
 import { EVENTS, installedSkills, type InstalledSkill } from "../store";
 
@@ -22,7 +22,7 @@ interface Props {
   symbol: string;
 }
 
-export function AIPanel({ enabled, model, symbol }: Props) {
+export const AIPanel = memo(function AIPanel({ enabled, model, symbol }: Props) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -30,9 +30,17 @@ export function AIPanel({ enabled, model, symbol }: Props) {
   const [skills, setSkills] = useState<InstalledSkill[]>(installedSkills);
   const logRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const scrollQueued = useRef(false);
 
   useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+    // Streaming fires a state update per token; coalesce the follow-scroll to
+    // one per animation frame instead of forcing layout on every delta.
+    if (scrollQueued.current) return;
+    scrollQueued.current = true;
+    requestAnimationFrame(() => {
+      scrollQueued.current = false;
+      logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+    });
   }, [turns]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -219,14 +227,20 @@ export function AIPanel({ enabled, model, symbol }: Props) {
               placeholder={`问点关于 ${symbol} 的…（⌘/Ctrl + Enter 发送）`}
               disabled={busy}
             />
-            <button className="btn btn--primary" type="submit" disabled={busy || !draft.trim()}>
-              {busy ? "…" : "发送"}
-            </button>
+            {busy ? (
+              <button className="btn" type="button" onClick={() => abortRef.current?.abort()}>
+                停止
+              </button>
+            ) : (
+              <button className="btn btn--primary" type="submit" disabled={!draft.trim()}>
+                发送
+              </button>
+            )}
           </form>
         </div>
       )}
     </div>
   );
-}
+});
 
 const truncate = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);

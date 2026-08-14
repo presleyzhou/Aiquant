@@ -87,11 +87,24 @@ export function marketColorVars(profile: MarketProfile): Record<string, string> 
     : { "--rise": "var(--green)", "--fall": "var(--red)" };
 }
 
+// Module-level constants, not fresh objects per call: the palette is a prop of
+// a memoized ChartPanel, so its identity must be stable across renders.
+const RED_UP_PALETTE = {
+  up: "#ff4d4d",
+  down: "#33d17a",
+  upVol: "rgba(255,77,77,0.28)",
+  downVol: "rgba(51,209,122,0.28)",
+} as const;
+const GREEN_UP_PALETTE = {
+  up: "#33d17a",
+  down: "#ff4d4d",
+  upVol: "rgba(51,209,122,0.28)",
+  downVol: "rgba(255,77,77,0.28)",
+} as const;
+
 /** Candle/volume palette for lightweight-charts, matching the convention. */
 export function candlePalette(profile: MarketProfile) {
-  return profile.upIsRed
-    ? { up: "#ff4d4d", down: "#33d17a", upVol: "rgba(255,77,77,0.28)", downVol: "rgba(51,209,122,0.28)" }
-    : { up: "#33d17a", down: "#ff4d4d", upVol: "rgba(51,209,122,0.28)", downVol: "rgba(255,77,77,0.28)" };
+  return profile.upIsRed ? RED_UP_PALETTE : GREEN_UP_PALETTE;
 }
 
 export function displayName(profile: MarketProfile, symbol: string): string | undefined {
