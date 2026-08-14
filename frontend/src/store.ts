@@ -139,6 +139,7 @@ export interface SavedStrategy {
   beats_buy_hold: boolean;
   in_sample?: Record<string, unknown>;
   validation?: Record<string, unknown>;
+  walk_forward?: Record<string, unknown>;
   savedAt: string;
 }
 

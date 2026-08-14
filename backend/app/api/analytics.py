@@ -92,5 +92,7 @@ async def run_backtest(req: BacktestRequest):
         "period": req.period,
         "stats": result.stats,
         "equity_curve": result.equity_curve,
+        "benchmark_curve": result.benchmark_curve,
+        "drawdown_curve": result.drawdown_curve,
         "trades": result.trades,
     }

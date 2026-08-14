@@ -51,6 +51,8 @@ export interface BacktestResult {
   period: string;
   stats: BacktestStats;
   equity_curve: Point[];
+  benchmark_curve: Point[];
+  drawdown_curve: Point[];
   trades: Array<{
     entry_time: number;
     exit_time: number | null;
@@ -174,6 +176,31 @@ export const api = {
     fetch(`/api/payments/charges/${encodeURIComponent(charge_id)}`).then(json<Charge>),
 };
 
+export interface WalkForwardFold {
+  fold: number;
+  train_start: string;
+  train_end: string;
+  test_start: string;
+  test_end: string;
+  train: Record<string, number>;
+  test: Record<string, number>;
+  beats_benchmark: boolean;
+}
+
+export interface WalkForwardReport {
+  folds: WalkForwardFold[];
+  aggregate: {
+    folds: number;
+    train_years: number;
+    test_years: number;
+    oos_return_pct: number;
+    oos_buy_hold_return_pct: number;
+    mean_test_sharpe: number;
+    worst_fold_return_pct: number;
+    folds_beating_benchmark: number;
+  };
+}
+
 export interface StrategyProposal {
   name: string;
   symbol: string;
@@ -182,6 +209,7 @@ export interface StrategyProposal {
   rationale: string;
   in_sample?: Record<string, unknown>;
   validation?: Record<string, unknown>;
+  walk_forward?: WalkForwardReport;
   risks: string[];
   beats_buy_hold: boolean;
 }

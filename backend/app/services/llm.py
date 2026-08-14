@@ -12,6 +12,7 @@ output to push down the WebSocket anyway.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, AsyncIterator
@@ -147,13 +148,18 @@ Required workflow:
 1. Read the instrument's character first: fetch price history and 1-2 indicators \
 (e.g. ATR for volatility, a long SMA for trend) to decide whether it rewards \
 trend-following or mean-reversion.
-2. Search parameters on the IN-SAMPLE window (period "2y") with `run_backtest`. \
-Budget: at most 8 in-sample runs — choose each variant deliberately, do not grid-scan.
-3. Validate the best variant ONCE on the longer out-of-sample window the user \
-specified (default period "5y"). In-sample winners that collapse out-of-sample \
-must be reported as such.
+2. Screen candidates in-sample (period "2y") with `run_backtest`. Budget: at \
+most 6 screening runs — choose each variant deliberately, do not grid-scan. \
+Shortlist 1-3 parameter sets.
+3. Put each shortlisted set through `walk_forward` (rolling train→test folds; \
+default 3 folds, 2y train / 1y test — one call runs the whole protocol). This \
+is the decision that matters: judge by the AGGREGATE out-of-sample return vs \
+benchmark and by fold consistency (`folds_beating_benchmark`). A set that only \
+wins in one fold is curve-fit, not a strategy. At most 3 walk_forward calls.
 4. Finish by calling `propose_strategy` exactly once — it is the only delivery \
-channel and it validates your parameters; if it returns an error, fix and re-call.
+channel and it validates your parameters; if it returns an error, fix and \
+re-call. Copy the winning walk_forward `folds` and `aggregate` into the \
+proposal's `walk_forward` field verbatim.
 
 Honesty rules — these outrank pleasing the user:
 - Every number you cite must come from a tool result in this conversation.
@@ -168,6 +174,37 @@ to trade.
 
 Keep interim narration to one short line per step; put the full reasoning in the \
 final proposal's rationale."""
+
+WALK_FORWARD_TOOL: dict[str, Any] = {
+    "name": "walk_forward",
+    "description": (
+        "Rolling walk-forward validation — the professional standard for judging a "
+        "parameter set. One call runs the whole protocol server-side: history is "
+        "sliced into consecutive train→test folds anchored to the most recent data, "
+        "the SAME parameters are evaluated in every fold (no per-fold refitting), and "
+        "you get per-fold results plus a compounded out-of-sample aggregate. Judge by "
+        "aggregate OOS return vs benchmark and fold consistency, not by any single fold."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "strategy": {
+                "type": "string",
+                "enum": ["sma_cross", "ema_cross", "rsi_reversion", "buy_and_hold"],
+            },
+            "fast": {"type": "integer"},
+            "slow": {"type": "integer"},
+            "rsi_period": {"type": "integer"},
+            "rsi_oversold": {"type": "number"},
+            "rsi_overbought": {"type": "number"},
+            "folds": {"type": "integer", "description": "2-5, default 3"},
+            "train_years": {"type": "number", "description": "0.5-5, default 2"},
+            "test_years": {"type": "number", "description": "0.25-3, default 1"},
+        },
+        "required": ["symbol", "strategy"],
+    },
+}
 
 PROPOSE_STRATEGY_TOOL: dict[str, Any] = {
     "name": "propose_strategy",
@@ -209,6 +246,13 @@ PROPOSE_STRATEGY_TOOL: dict[str, Any] = {
                 "type": "object",
                 "description": "样本外验证窗口关键指标，字段同 in_sample",
             },
+            "walk_forward": {
+                "type": "object",
+                "description": (
+                    "获胜参数组的滚动验证结果——原样复制 walk_forward 工具返回的 "
+                    "folds 与 aggregate 两个字段，不要改写或省略。"
+                ),
+            },
             "risks": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -223,7 +267,7 @@ PROPOSE_STRATEGY_TOOL: dict[str, Any] = {
     },
 }
 
-STRATEGY_TOOLS: list[dict[str, Any]] = [*TOOLS, PROPOSE_STRATEGY_TOOL]
+STRATEGY_TOOLS: list[dict[str, Any]] = [*TOOLS, WALK_FORWARD_TOOL, PROPOSE_STRATEGY_TOOL]
 
 
 def validate_proposal(input_data: dict) -> dict | None:
@@ -310,6 +354,26 @@ class QuantAnalyst:
                     "params": params,
                     "latest": _tail_indicator(result),
                 }
+
+            if name == "walk_forward":
+                df = await market_data.history_frame(args["symbol"], "max", "1d")
+                cfg = bt.BacktestConfig(
+                    strategy=args["strategy"],
+                    fast=int(args.get("fast", 20)),
+                    slow=int(args.get("slow", 50)),
+                    rsi_period=int(args.get("rsi_period", 14)),
+                    rsi_oversold=float(args.get("rsi_oversold", 30)),
+                    rsi_overbought=float(args.get("rsi_overbought", 70)),
+                )
+                report = await asyncio.to_thread(
+                    bt.walk_forward,
+                    df,
+                    cfg,
+                    int(args.get("folds", 3)),
+                    float(args.get("train_years", 2)),
+                    float(args.get("test_years", 1)),
+                )
+                return {"symbol": args["symbol"].upper(), "strategy": cfg.strategy, **report}
 
             if name == "propose_strategy":
                 error = validate_proposal(args)

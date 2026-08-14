@@ -21,7 +21,7 @@ const OBJECTIVES = [
 ] as const;
 
 interface TimelineStep {
-  kind: "analyze" | "backtest" | "propose" | "note";
+  kind: "analyze" | "backtest" | "walkforward" | "propose" | "note";
   title: string;
   detail?: string;
   result?: string;
@@ -98,6 +98,18 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
             String(input.period ?? ""),
           ].filter(Boolean);
           pushStep({ kind: "backtest", title: `回测 ${input.symbol}`, detail: bits.join(" · ") });
+        } else if (event.name === "walk_forward") {
+          const bits = [
+            String(input.strategy ?? ""),
+            input.fast != null ? `${input.fast}/${input.slow}` : "",
+            input.rsi_period != null ? `RSI${input.rsi_period}` : "",
+            `${input.folds ?? 3} 折 · 训练 ${input.train_years ?? 2}y / 验证 ${input.test_years ?? 1}y`,
+          ].filter(Boolean);
+          pushStep({
+            kind: "walkforward",
+            title: `滚动验证 ${input.symbol}`,
+            detail: bits.join(" · "),
+          });
         } else if (event.name === "propose_strategy") {
           pushStep({ kind: "propose", title: "提交最终方案" });
           setProposal(input as unknown as StrategyProposal);
@@ -125,6 +137,12 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
           attachResult(
             `收益 ${fmtPct(s.total_return_pct)} · 基准 ${fmtPct(s.buy_hold_return_pct)} · ` +
               `夏普 ${s.sharpe} · 回撤 ${fmtPct(s.max_drawdown_pct)} · ${s.trade_count} 笔`,
+          );
+        } else if (event.name === "walk_forward" && r?.aggregate) {
+          const a = r.aggregate as Record<string, number>;
+          attachResult(
+            `样本外 ${fmtPct(a.oos_return_pct)} vs 基准 ${fmtPct(a.oos_buy_hold_return_pct)} · ` +
+              `${a.folds_beating_benchmark}/${a.folds} 折跑赢 · 最差折 ${fmtPct(a.worst_fold_return_pct)}`,
           );
         } else if (event.name === "propose_strategy") {
           if (r?.error) {
@@ -198,6 +216,7 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
       beats_buy_hold: proposal.beats_buy_hold,
       in_sample: proposal.in_sample,
       validation: proposal.validation,
+      walk_forward: proposal.walk_forward as Record<string, unknown> | undefined,
     });
     setSaved(savedStrategies());
     setJustSaved(true);
@@ -363,24 +382,30 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
                         ))}
                       </div>
 
-                      {(proposal.in_sample || proposal.validation) && (
-                        <table className="lab-stats" style={{ marginTop: 12 }}>
-                          <thead>
-                            <tr>
-                              <th>窗口</th>
-                              <th>收益</th>
-                              <th>基准</th>
-                              <th>夏普</th>
-                              <th>回撤</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {proposal.in_sample && <StatRow label="样本内" s={proposal.in_sample} />}
-                            {proposal.validation && (
-                              <StatRow label="验证" s={proposal.validation} />
-                            )}
-                          </tbody>
-                        </table>
+                      {proposal.walk_forward?.folds?.length ? (
+                        <WalkForwardTable report={proposal.walk_forward} />
+                      ) : (
+                        (proposal.in_sample || proposal.validation) && (
+                          <table className="lab-stats" style={{ marginTop: 12 }}>
+                            <thead>
+                              <tr>
+                                <th>窗口</th>
+                                <th>收益</th>
+                                <th>基准</th>
+                                <th>夏普</th>
+                                <th>回撤</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {proposal.in_sample && (
+                                <StatRow label="样本内" s={proposal.in_sample} />
+                              )}
+                              {proposal.validation && (
+                                <StatRow label="验证" s={proposal.validation} />
+                              )}
+                            </tbody>
+                          </table>
+                        )
                       )}
 
                       <p className="lab-proposal__rationale">{proposal.rationale}</p>
@@ -470,6 +495,59 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function WalkForwardTable({ report }: { report: NonNullable<StrategyProposal["walk_forward"]> }) {
+  const a = report.aggregate;
+  return (
+    <div className="lab-wf" style={{ marginTop: 12 }}>
+      <div className="lab-wf__head">
+        <span className="mk-section__title" style={{ margin: 0 }}>
+          滚动验证 · {a.folds} 折（训练 {a.train_years}y / 验证 {a.test_years}y）
+        </span>
+        <span className={a.folds_beating_benchmark >= Math.ceil(a.folds / 2) ? "up" : "dn"}>
+          {a.folds_beating_benchmark}/{a.folds} 折跑赢基准
+        </span>
+      </div>
+      <table className="lab-stats">
+        <thead>
+          <tr>
+            <th>折</th>
+            <th>验证区间</th>
+            <th>收益</th>
+            <th>基准</th>
+            <th>夏普</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {report.folds.map((f) => (
+            <tr key={f.fold}>
+              <td className="dim">{f.fold}</td>
+              <td className="dim" style={{ whiteSpace: "nowrap" }}>
+                {f.test_start} → {f.test_end}
+              </td>
+              <td className={f.beats_benchmark ? "up" : "dn"}>
+                {fmtPct(f.test?.total_return_pct)}
+              </td>
+              <td className="dim">{fmtPct(f.test?.buy_hold_return_pct)}</td>
+              <td>{Number.isFinite(f.test?.sharpe) ? f.test.sharpe.toFixed(2) : "—"}</td>
+              <td>{f.beats_benchmark ? "✓" : "✗"}</td>
+            </tr>
+          ))}
+          <tr className="lab-wf__agg">
+            <td colSpan={2}>样本外合计（复利拼接）</td>
+            <td className={a.oos_return_pct >= a.oos_buy_hold_return_pct ? "up" : "dn"}>
+              {fmtPct(a.oos_return_pct)}
+            </td>
+            <td className="dim">{fmtPct(a.oos_buy_hold_return_pct)}</td>
+            <td>{Number.isFinite(a.mean_test_sharpe) ? a.mean_test_sharpe.toFixed(2) : "—"}</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   );
 }

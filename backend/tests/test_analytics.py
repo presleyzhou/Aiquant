@@ -139,3 +139,67 @@ def test_stats_are_json_safe():
 def test_unknown_strategy_is_rejected():
     with pytest.raises(ValueError, match="unknown strategy"):
         bt.run(trending(), bt.BacktestConfig(strategy="moon_phase"))
+
+
+# --------------------------------------------------------------------- curves
+
+
+def test_result_includes_benchmark_and_drawdown_curves():
+    df = trending()
+    result = bt.run(df, bt.BacktestConfig(strategy="sma_cross"))
+    assert len(result.benchmark_curve) == len(df)
+    assert len(result.drawdown_curve) == len(df)
+    # Drawdown is distance-from-peak: never positive, zero at the first bar.
+    assert result.drawdown_curve[0]["value"] == pytest.approx(0.0)
+    assert all(p["value"] <= 0 for p in result.drawdown_curve)
+    # Benchmark starts at ~initial capital (entry cost only).
+    assert result.benchmark_curve[0]["value"] == pytest.approx(100_000.0, rel=0.02)
+    import json
+
+    json.dumps({"b": result.benchmark_curve, "d": result.drawdown_curve})
+
+
+# --------------------------------------------------------------- walk-forward
+
+
+def long_frame(years: float = 6.5) -> pd.DataFrame:
+    rng = np.random.default_rng(7)
+    n = int(252 * years)
+    noise = rng.normal(0, 1.0, n).cumsum()
+    return make_frame([120.0 + 0.15 * i + noise[i] for i in range(n)])
+
+
+def test_walk_forward_fold_geometry():
+    report = bt.walk_forward(long_frame(), bt.BacktestConfig(strategy="sma_cross"),
+                             folds=3, train_years=2, test_years=1)
+    folds = report["folds"]
+    assert report["aggregate"]["folds"] == 3 and len(folds) == 3
+    # Test windows tile forward without overlap, newest fold ends at data end.
+    for prev, cur in zip(folds, folds[1:]):
+        assert prev["test_end"] <= cur["test_start"]
+    # Same params in every fold — each fold carries train AND test stats.
+    for fold in folds:
+        assert set(fold["test"]) == set(fold["train"])
+
+
+def test_walk_forward_aggregate_compounds_fold_returns():
+    report = bt.walk_forward(long_frame(), bt.BacktestConfig(strategy="buy_and_hold"),
+                             folds=3, train_years=2, test_years=1)
+    manual = 1.0
+    for fold in report["folds"]:
+        manual *= 1 + fold["test"]["total_return_pct"] / 100
+    assert report["aggregate"]["oos_return_pct"] == pytest.approx((manual - 1) * 100, abs=0.01)
+    assert 0 <= report["aggregate"]["folds_beating_benchmark"] <= 3
+
+
+def test_walk_forward_shrinks_folds_when_history_is_short():
+    # ~4.2y supports 2y train + 2×1y test (2 folds), not 3.
+    report = bt.walk_forward(long_frame(4.2), bt.BacktestConfig(), folds=3,
+                             train_years=2, test_years=1)
+    assert report["aggregate"]["folds"] == 2
+
+
+def test_walk_forward_rejects_insufficient_history():
+    with pytest.raises(ValueError, match="insufficient history"):
+        bt.walk_forward(long_frame(2.5), bt.BacktestConfig(), folds=3,
+                        train_years=2, test_years=1)

@@ -46,6 +46,8 @@ class Trade:
 @dataclass
 class BacktestResult:
     equity_curve: list[dict] = field(default_factory=list)
+    benchmark_curve: list[dict] = field(default_factory=list)
+    drawdown_curve: list[dict] = field(default_factory=list)
     trades: list[dict] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
 
@@ -165,9 +167,38 @@ def run(df: pd.DataFrame, cfg: BacktestConfig) -> BacktestResult:
 
     return BacktestResult(
         equity_curve=equity_curve,
+        benchmark_curve=_benchmark_curve(df, cfg, times),
+        drawdown_curve=_drawdown_curve(equity_curve),
         trades=[_trade_dict(t) for t in trades],
         stats=_stats(equity_curve, trades, df, cfg),
     )
+
+
+def _benchmark_curve(df: pd.DataFrame, cfg: BacktestConfig, times: list[int]) -> list[dict]:
+    """Mark-to-market buy-and-hold equity, same capital and entry cost.
+
+    Buys the first bar's open (no signal lag — it's the benchmark, not a
+    strategy) and holds; the exit cost only exists in the stats figure, since
+    an unrealised curve charging a hypothetical exit every day would be wrong.
+    """
+    cost_rate = (cfg.commission_bps + cfg.slippage_bps) / 10_000.0
+    shares = (cfg.initial_capital / (1 + cost_rate)) / float(df["Open"].iloc[0])
+    closes = df["Close"].to_numpy(dtype=float)
+    return [
+        {"time": t, "value": round(shares * float(c), 2)} for t, c in zip(times, closes)
+    ]
+
+
+def _drawdown_curve(equity_curve: list[dict]) -> list[dict]:
+    """Percent distance from the running equity peak (0 at highs, negative in
+    drawdowns) — plotted as the risk strip under the equity lines."""
+    peak = float("-inf")
+    out = []
+    for point in equity_curve:
+        peak = max(peak, point["value"])
+        dd = (point["value"] / peak - 1) * 100 if peak > 0 else 0.0
+        out.append({"time": point["time"], "value": round(dd, 3)})
+    return out
 
 
 def _trade_dict(t: Trade) -> dict:
@@ -236,3 +267,103 @@ def _stats(
         "excess_vs_buy_hold_pct": round(float(total_return - bh_return), 3),
         "bars": len(df),
     }
+
+
+# ---------------------------------------------------------------- walk-forward
+
+def walk_forward(
+    df: pd.DataFrame,
+    cfg: BacktestConfig,
+    folds: int = 3,
+    train_years: float = 2.0,
+    test_years: float = 1.0,
+) -> dict:
+    """Rolling train→test validation over calendar slices.
+
+    Folds are anchored to the END of the data so the most recent regime is
+    always tested. Fold k trains on `train_years` and tests on the following
+    `test_years`; consecutive test windows tile back-to-back (step = test
+    span), so stitched OOS returns never overlap.
+
+    Honesty note: the engine has no per-fold optimisation step — the SAME
+    parameter set is evaluated in every fold. That is the point: parameters
+    that only work in one slice fail here visibly.
+    """
+    folds = max(2, min(int(folds), 5))
+    if not 0.25 <= test_years <= 3 or not 0.5 <= train_years <= 5:
+        raise ValueError("train_years must be 0.5-5 and test_years 0.25-3")
+
+    train_span = pd.Timedelta(days=round(365.25 * train_years))
+    test_span = pd.Timedelta(days=round(365.25 * test_years))
+    end = df.index[-1]
+    start = df.index[0]
+
+    # Shrink the fold count until the oldest fold's training window fits.
+    while folds > 2 and end - (folds - 1) * test_span - test_span - train_span < start:
+        folds -= 1
+    if end - (folds - 1) * test_span - test_span - train_span < start:
+        raise ValueError(
+            f"insufficient history for walk-forward: need about "
+            f"{train_years + folds * test_years:.1f} years, have "
+            f"{(end - start).days / 365.25:.1f}"
+        )
+
+    fold_rows: list[dict] = []
+    for k in range(folds):
+        test_end = end - (folds - 1 - k) * test_span
+        test_start = test_end - test_span
+        train_start = test_start - train_span
+
+        train_df = df[(df.index >= train_start) & (df.index < test_start)]
+        test_df = df[(df.index >= test_start) & (df.index <= test_end)]
+        if len(train_df) < 30 or len(test_df) < 30:
+            raise ValueError("a walk-forward slice has fewer than 30 bars")
+
+        train_stats = run(train_df, cfg).stats
+        test_stats = run(test_df, cfg).stats
+
+        fold_rows.append(
+            {
+                "fold": k + 1,
+                "train_start": str(train_df.index[0].date()),
+                "train_end": str(train_df.index[-1].date()),
+                "test_start": str(test_df.index[0].date()),
+                "test_end": str(test_df.index[-1].date()),
+                "train": _slim(train_stats),
+                "test": _slim(test_stats),
+                "beats_benchmark": test_stats["total_return_pct"]
+                > test_stats["buy_hold_return_pct"],
+            }
+        )
+
+    oos = [row["test"]["total_return_pct"] for row in fold_rows]
+    bench = [row["test"]["buy_hold_return_pct"] for row in fold_rows]
+    compound = lambda returns: (  # noqa: E731 — local one-liner
+        (pd.Series(returns).div(100).add(1).prod() - 1) * 100
+    )
+    return {
+        "folds": fold_rows,
+        "aggregate": {
+            "folds": folds,
+            "train_years": train_years,
+            "test_years": test_years,
+            "oos_return_pct": round(float(compound(oos)), 3),
+            "oos_buy_hold_return_pct": round(float(compound(bench)), 3),
+            "mean_test_sharpe": round(float(pd.Series([r["test"]["sharpe"] for r in fold_rows]).mean()), 3),
+            "worst_fold_return_pct": round(min(oos), 3),
+            "folds_beating_benchmark": sum(r["beats_benchmark"] for r in fold_rows),
+        },
+    }
+
+
+def _slim(stats: dict) -> dict:
+    """The handful of figures a fold comparison actually needs."""
+    keys = (
+        "total_return_pct",
+        "buy_hold_return_pct",
+        "sharpe",
+        "max_drawdown_pct",
+        "win_rate_pct",
+        "trade_count",
+    )
+    return {k: stats[k] for k in keys}

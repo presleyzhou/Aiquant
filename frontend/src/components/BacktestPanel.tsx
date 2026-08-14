@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type BacktestResult } from "../api";
 import { EVENTS, takeBacktestPresetFor } from "../store";
+import { EquityChart } from "./EquityChart";
 
 const STRATEGIES = [
   { value: "sma_cross", label: "SMA 交叉" },
@@ -210,8 +211,14 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
         <div className="empty">选择策略后点“运行回测”。下一根 bar 开盘成交，含手续费与滑点。</div>
       )}
 
-      {s && (
+      {s && result && (
         <>
+          <EquityChart
+            equity={result.equity_curve}
+            benchmark={result.benchmark_curve}
+            drawdown={result.drawdown_curve}
+          />
+
           <div className="stat-grid">
             <Stat label="总收益" value={pct(s.total_return_pct)} tone={s.total_return_pct} />
             <Stat
