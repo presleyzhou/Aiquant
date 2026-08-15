@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { streamAnalysis, type AIEvent } from "../api";
+import { useT } from "../i18n";
 import { EVENTS, installedSkills, type InstalledSkill } from "../store";
 
 interface ToolCall {
@@ -23,6 +24,7 @@ interface Props {
 }
 
 export function AIPanel({ enabled, model, symbol }: Props) {
+  const { t } = useT();
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -50,9 +52,9 @@ export function AIPanel({ enabled, model, symbol }: Props) {
       prompt: s.template.replaceAll("{symbol}", symbol),
       skill: true,
     })),
-    { label: "", prompt: `${symbol} 最近走势如何？关键技术位在哪？` },
-    { label: "", prompt: `对 ${symbol} 跑一次 SMA 交叉回测，和买入持有比一比` },
-    { label: "", prompt: `${symbol} 的 RSI 和 MACD 现在是什么状态？` },
+    { label: "", prompt: t("ai.sugg1", { sym: symbol }) },
+    { label: "", prompt: t("ai.sugg2", { sym: symbol }) },
+    { label: "", prompt: t("ai.sugg3", { sym: symbol }) },
   ];
 
   const send = async (content: string) => {
@@ -131,29 +133,24 @@ export function AIPanel({ enabled, model, symbol }: Props) {
   return (
     <div className="panel panel--grow">
       <div className="panel__head">
-        <span className="panel__title">AI 分析</span>
-        <span className="panel__meta">{enabled ? model : "未启用"}</span>
+        <span className="panel__title">{t("ai.title")}</span>
+        <span className="panel__meta">{enabled ? model : t("ai.disabled")}</span>
       </div>
 
       {!enabled ? (
         <div className="panel__body">
-          <div className="notice">
-            AI 分析未启用。在项目根目录 <code>.env</code> 里设置 <code>ANTHROPIC_API_KEY</code>
-            ，然后重启后端即可。行情、指标、回测不受影响，可以正常使用。
-          </div>
+          <div className="notice">{t("ai.notice")}</div>
         </div>
       ) : (
         <div className="chat">
           <div className="chat__log" ref={logRef}>
             {turns.length === 0 && (
-              <div className="empty">
-                向 Claude 提问。它会实际调用行情、指标和回测工具，基于真实数字回答。
-              </div>
+              <div className="empty">{t("ai.empty")}</div>
             )}
 
             {turns.map((turn, i) => (
               <div key={i} className={`msg msg--${turn.role}`}>
-                <div className="msg__role">{turn.role === "user" ? "你" : "Claude"}</div>
+                <div className="msg__role">{turn.role === "user" ? t("ai.you") : "Claude"}</div>
 
                 {turn.thinking && <div className="msg__thinking">{turn.thinking}</div>}
 
@@ -189,7 +186,7 @@ export function AIPanel({ enabled, model, symbol }: Props) {
                     <span className="skill-chip">
                       <span className="skill-chip__dot" />
                       <b>{s.label}</b>
-                      <span className="dim">技能</span>
+                      <span className="dim">{t("ai.skill")}</span>
                     </span>
                   ) : (
                     s.prompt
@@ -216,11 +213,11 @@ export function AIPanel({ enabled, model, symbol }: Props) {
                   send(draft);
                 }
               }}
-              placeholder={`问点关于 ${symbol} 的…（⌘/Ctrl + Enter 发送）`}
+              placeholder={t("ai.ph", { sym: symbol })}
               disabled={busy}
             />
             <button className="btn btn--primary" type="submit" disabled={busy || !draft.trim()}>
-              {busy ? "…" : "发送"}
+              {busy ? "…" : t("ai.send")}
             </button>
           </form>
         </div>

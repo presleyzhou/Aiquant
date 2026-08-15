@@ -7,6 +7,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useT } from "../i18n";
 import { api, type Candle, type Point } from "../api";
 
 const PERIODS = ["1mo", "3mo", "6mo", "1y", "2y", "5y"] as const;
@@ -42,6 +43,7 @@ interface Props {
 }
 
 export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
+  const { t } = useT();
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -50,7 +52,7 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
 
   const [period, setPeriod] = useState<string>("6mo");
   const [enabled, setEnabled] = useState<OverlayKey[]>(["sma"]);
-  const [meta, setMeta] = useState("");
+  const [meta, setMeta] = useState<{ bars: number; interval: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -165,12 +167,12 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
           })),
         );
         chartRef.current?.timeScale().fitContent();
-        setMeta(`${res.candles.length} 根 · ${res.interval}`);
+        setMeta({ bars: res.candles.length, interval: res.interval });
       })
       .catch((err: Error) => {
         if (!cancelled) {
           setError(err.message);
-          setMeta("");
+          setMeta(null);
         }
       })
       .finally(() => !cancelled && setLoading(false));
@@ -243,8 +245,8 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
   return (
     <div className="panel panel--grow panel--chart">
       <div className="panel__head">
-        <span className="panel__title">{symbol} · 走势</span>
-        <span className="panel__meta">{meta}</span>
+        <span className="panel__title">{symbol} · {t("chart.trend")}</span>
+        <span className="panel__meta">{meta ? `${meta.bars} ${t("chart.bars")} · ${meta.interval}` : ""}</span>
       </div>
 
       <div className="chip-row">
@@ -273,11 +275,11 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
         {(loading || error) && (
           <div className="chart-overlay">
             {error ? (
-              `加载失败：${error}`
+              `${t("chart.failed")}: ${error}`
             ) : (
               <span className="chart-overlay__inner">
                 <span className="spinner" aria-hidden />
-                加载行情…
+                {t("chart.loading")}
               </span>
             )}
           </div>

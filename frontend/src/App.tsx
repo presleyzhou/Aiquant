@@ -8,6 +8,7 @@ import { StrategyLab } from "./components/StrategyLab";
 import { TickerTape } from "./components/TickerTape";
 import { Watchlist } from "./components/Watchlist";
 import { useQuoteStream } from "./hooks/useQuoteStream";
+import { useT } from "./i18n";
 import { queueBacktestPreset } from "./store";
 import {
   MARKETS,
@@ -36,6 +37,7 @@ interface AiState {
 }
 
 export default function App() {
+  const { t, lang, setLang } = useT();
   const [view, setView] = useState<View>("us");
   // Which terminal the marketplace should act on (and the tape should show)
   // while the user is browsing the market page.
@@ -115,13 +117,13 @@ export default function App() {
           <span className="brand__mark">AIQUANT</span>
           <span className="brand__sub">TERMINAL</span>
         </div>
-        <nav className="nav-tabs" aria-label="页面切换">
+        <nav className="nav-tabs" aria-label="views">
           {(
             [
-              ["us", MARKETS.us.label],
-              ["cn", MARKETS.cn.label],
-              ["lab", "AI 策略"],
-              ["market", "市场"],
+              ["us", t("nav.us")],
+              ["cn", t("nav.cn")],
+              ["lab", t("nav.lab")],
+              ["market", t("nav.market")],
             ] as Array<[View, string]>
           ).map(([value, label]) => (
             <button
@@ -144,24 +146,31 @@ export default function App() {
                     : "dot--off"
               }`}
             />
-            行情{" "}
+            {t("status.quotes")}{" "}
             {status === "open"
-              ? "已连接"
+              ? t("status.connected")
               : status === "polling"
-                ? "轮询模式"
+                ? t("status.polling")
                 : status === "connecting"
-                  ? "连接中"
-                  : "已断开"}
+                  ? t("status.connecting")
+                  : t("status.closed")}
           </span>
           <span className="status">
             <span className={`dot ${ai.enabled ? "dot--on" : "dot--off"}`} />
-            AI {ai.enabled ? (ai.model ?? "在线") : "未配置"}
+            AI {ai.enabled ? (ai.model ?? "on") : t("status.ai.off")}
           </span>
           {activeQuote?.as_of && (
             <span className="status dim">
-              更新于 {new Date(activeQuote.as_of).toLocaleTimeString()}
+              {t("status.updated")} {new Date(activeQuote.as_of).toLocaleTimeString()}
             </span>
           )}
+          <button
+            className="lang-toggle"
+            onClick={() => setLang(lang === "zh" ? "en" : "zh")}
+            title={lang === "zh" ? "Switch to English" : "切换为中文"}
+          >
+            {lang === "zh" ? "EN" : "中"}
+          </button>
         </div>
       </header>
 
@@ -197,25 +206,12 @@ export default function App() {
         />
       ))}
 
-      <div className="disclaimer">
-        本站仅供研究与教育用途，不构成投资建议。行情数据来自公开数据源，可能存在延迟或误差；回测结果不代表未来收益。
-      </div>
+      <div className="disclaimer">{t("app.disclaimer")}</div>
     </div>
   );
 }
 
-function TerminalWorkspace({
-  profile,
-  hidden,
-  symbols,
-  quotes,
-  active,
-  ai,
-  presetTarget,
-  onSelect,
-  onAdd,
-  onRemove,
-}: {
+function TerminalWorkspace(props: {
   profile: MarketProfile;
   hidden: boolean;
   symbols: string[];
@@ -227,6 +223,9 @@ function TerminalWorkspace({
   onAdd: (symbol: string) => void;
   onRemove: (symbol: string) => void;
 }) {
+  const { profile, hidden, symbols, quotes, active, ai, presetTarget, onSelect, onAdd, onRemove } =
+    props;
+  const { t } = useT();
   return (
     <div
       className="workspace"
@@ -252,13 +251,13 @@ function TerminalWorkspace({
           </>
         ) : (
           <div className="panel panel--grow">
-            <div className="empty">先在左侧添加一个标的</div>
+            <div className="empty">{t("app.addFirst")}</div>
           </div>
         )}
       </div>
 
       <div className="column">
-        <AIPanel enabled={ai.enabled} model={ai.model} symbol={active || "市场"} />
+        <AIPanel enabled={ai.enabled} model={ai.model} symbol={active || "SPY"} />
       </div>
     </div>
   );

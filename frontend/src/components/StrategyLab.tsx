@@ -11,14 +11,10 @@ import {
   saveStrategy,
   type SavedStrategy,
 } from "../store";
+import { SymbolSearch } from "./SymbolSearch";
+import { useT, type MsgKey } from "../i18n";
 
-const OBJECTIVES = [
-  { value: "auto", label: "自动判断", hint: "先分析标的性格再选风格（推荐）" },
-  { value: "trend", label: "稳健趋势", hint: "宁少交易，不追噪音" },
-  { value: "momentum", label: "激进动量", hint: "接受高换手与回撤" },
-  { value: "reversion", label: "均值回归", hint: "高胜率短持仓" },
-  { value: "low_drawdown", label: "低回撤优先", hint: "回撤是第一约束" },
-] as const;
+const OBJECTIVE_VALUES = ["auto", "trend", "momentum", "reversion", "low_drawdown"] as const;
 
 interface TimelineStep {
   kind: "analyze" | "backtest" | "walkforward" | "propose" | "note";
@@ -36,6 +32,7 @@ interface Props {
 }
 
 export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
+  const { t } = useT();
   const [symbol, setSymbol] = useState("AAPL");
   const [objective, setObjective] = useState("auto");
   const [validationPeriod, setValidationPeriod] = useState("5y");
@@ -97,32 +94,32 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
             input.rsi_period != null ? `RSI${input.rsi_period}` : "",
             String(input.period ?? ""),
           ].filter(Boolean);
-          pushStep({ kind: "backtest", title: `回测 ${input.symbol}`, detail: bits.join(" · ") });
+          pushStep({ kind: "backtest", title: `${t("lab.step.backtest")} ${input.symbol}`, detail: bits.join(" · ") });
         } else if (event.name === "walk_forward") {
           const bits = [
             String(input.strategy ?? ""),
             input.fast != null ? `${input.fast}/${input.slow}` : "",
             input.rsi_period != null ? `RSI${input.rsi_period}` : "",
-            `${input.folds ?? 3} 折 · 训练 ${input.train_years ?? 2}y / 验证 ${input.test_years ?? 1}y`,
+            `${input.folds ?? 3} ${t("lab.step.folds")} · ${t("lab.step.train")} ${input.train_years ?? 2}y / ${t("lab.step.test")} ${input.test_years ?? 1}y`,
           ].filter(Boolean);
           pushStep({
             kind: "walkforward",
-            title: `滚动验证 ${input.symbol}`,
+            title: `${t("lab.step.wf")} ${input.symbol}`,
             detail: bits.join(" · "),
           });
         } else if (event.name === "propose_strategy") {
-          pushStep({ kind: "propose", title: "提交最终方案" });
+          pushStep({ kind: "propose", title: t("lab.step.propose") });
           setProposal(input as unknown as StrategyProposal);
         } else if (event.name === "compute_indicator") {
           pushStep({
             kind: "analyze",
-            title: `计算 ${String(input.indicator ?? "").toUpperCase()}`,
+            title: `${t("lab.step.indicator")} ${String(input.indicator ?? "").toUpperCase()}`,
             detail: String(input.symbol ?? ""),
           });
         } else if (event.name === "get_price_history") {
           pushStep({
             kind: "analyze",
-            title: "读取价格历史",
+            title: t("lab.step.history"),
             detail: `${input.symbol} · ${input.period ?? "6mo"}`,
           });
         } else {
@@ -135,31 +132,31 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
         if (event.name === "run_backtest" && r?.stats) {
           const s = r.stats as Record<string, number>;
           attachResult(
-            `收益 ${fmtPct(s.total_return_pct)} · 基准 ${fmtPct(s.buy_hold_return_pct)} · ` +
-              `夏普 ${s.sharpe} · 回撤 ${fmtPct(s.max_drawdown_pct)} · ${s.trade_count} 笔`,
+            `${t("lab.r.return")} ${fmtPct(s.total_return_pct)} · ${t("lab.r.bench")} ${fmtPct(s.buy_hold_return_pct)} · ` +
+              `${t("lab.r.sharpe")} ${s.sharpe} · ${t("lab.r.dd")} ${fmtPct(s.max_drawdown_pct)} · ${s.trade_count} ${t("lab.r.trades")}`,
           );
         } else if (event.name === "walk_forward" && r?.aggregate) {
           const a = r.aggregate as Record<string, number>;
           attachResult(
-            `样本外 ${fmtPct(a.oos_return_pct)} vs 基准 ${fmtPct(a.oos_buy_hold_return_pct)} · ` +
-              `${a.folds_beating_benchmark}/${a.folds} 折跑赢 · 最差折 ${fmtPct(a.worst_fold_return_pct)}`,
+            `${t("lab.r.oos")} ${fmtPct(a.oos_return_pct)} vs ${t("lab.r.bench")} ${fmtPct(a.oos_buy_hold_return_pct)} · ` +
+              `${a.folds_beating_benchmark}/${a.folds} ${t("lab.r.beat")} · ${t("lab.r.worst")} ${fmtPct(a.worst_fold_return_pct)}`,
           );
         } else if (event.name === "propose_strategy") {
           if (r?.error) {
-            attachResult(`参数校验失败：${r.error}`);
+            attachResult(`${t("lab.r.fail")}: ${r.error}`);
             setProposal(null); // rejected — Claude will fix and re-submit
           } else {
-            attachResult("✓ 通过参数校验");
+            attachResult(t("lab.r.pass"));
           }
         } else if (r?.error) {
-          attachResult(`失败：${r.error}`);
+          attachResult(`${t("lab.r.err")}: ${r.error}`);
         } else {
           attachResult("✓");
         }
         break;
       }
       case "refusal":
-        setError(`请求被安全分类器拒绝：${event.message}`);
+        setError(`${t("ai.refusal")}: ${event.message}`);
         break;
       case "error":
         setError(event.message);
@@ -233,67 +230,65 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
     <div className="lab" style={hidden ? { display: "none" } : undefined}>
       <div className="lab__inner">
         <section className="lab-hero">
-          <h1 className="lab-hero__title">AI 策略工坊</h1>
+          <h1 className="lab-hero__title">{t("lab.title")}</h1>
           <p className="lab-hero__sub">
-            描述目标，Claude 会先判断标的性格，在样本内窗口用<b>真实回测引擎</b>
-            搜索参数，再做样本外验证 —— 每一次回测都在下方时间线上可见，跑不赢买入持有会如实告诉你。
+            {t("lab.sub1")}<b>{t("lab.sub.b")}</b>{t("lab.sub2")}
           </p>
         </section>
 
         {!aiEnabled ? (
           <div className="notice" style={{ maxWidth: 560 }}>
-            AI 未启用。在项目根目录 <code>.env</code> 设置 <code>ANTHROPIC_API_KEY</code>{" "}
-            并重启后端后，此栏目即可使用。
+            {t("lab.aiOff")}
           </div>
         ) : (
           <>
             <div className="lab-form panel">
               <div className="control-grid" style={{ borderBottom: "none" }}>
                 <label className="field">
-                  <span className="field__label">标的代码</span>
-                  <input
-                    className="input"
+                  <span className="field__label">{t("lab.symbol")}</span>
+                  <SymbolSearch
                     value={symbol}
-                    onChange={(e) => setSymbol(e.target.value)}
-                    placeholder="AAPL / 600519.SS"
+                    onChange={setSymbol}
+                    onPick={(hit) => setSymbol(hit.symbol.toUpperCase())}
+                    placeholder={t("lab.symbolPh")}
                     disabled={running}
                   />
                 </label>
                 <label className="field">
-                  <span className="field__label">目标风格</span>
+                  <span className="field__label">{t("lab.objective")}</span>
                   <select
                     className="select"
                     value={objective}
                     onChange={(e) => setObjective(e.target.value)}
                     disabled={running}
                   >
-                    {OBJECTIVES.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label} — {o.hint}
+                    {OBJECTIVE_VALUES.map((v) => (
+                      <option key={v} value={v}>
+                        {t(`lab.obj.${v}` as MsgKey)} — {t(`lab.obj.${v}.h` as MsgKey)}
                       </option>
                     ))}
                   </select>
                 </label>
                 <label className="field">
-                  <span className="field__label">验证窗口</span>
+                  <span className="field__label">{t("lab.validation")}</span>
                   <select
                     className="select"
                     value={validationPeriod}
                     onChange={(e) => setValidationPeriod(e.target.value)}
                     disabled={running}
                   >
-                    <option value="5y">5 年（推荐）</option>
-                    <option value="max">全部历史</option>
-                    <option value="2y">2 年</option>
+                    <option value="5y">{t("lab.v5y")}</option>
+                    <option value="max">{t("lab.vmax")}</option>
+                    <option value="2y">{t("lab.v2y")}</option>
                   </select>
                 </label>
                 <label className="field" style={{ gridColumn: "span 2" }}>
-                  <span className="field__label">补充要求（可选）</span>
+                  <span className="field__label">{t("lab.notes")}</span>
                   <input
                     className="input"
                     value={notes}
                     onChange={(e) => setNotes(e.target.value)}
-                    placeholder="如：最大回撤不超过 20%；交易别太频繁"
+                    placeholder={t("lab.notesPh")}
                     maxLength={200}
                     disabled={running}
                   />
@@ -302,33 +297,30 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
                   <span className="field__label">&nbsp;</span>
                   {running ? (
                     <button className="btn" onClick={stop}>
-                      停止（{elapsed}s）
+                      {t("lab.stop")}（{elapsed}s）
                     </button>
                   ) : (
                     <button className="btn btn--primary" onClick={generate}>
-                      ⚡ 生成策略
+                      {t("lab.generate")}
                     </button>
                   )}
                 </label>
               </div>
-              <div className="lab-form__hint">
-                单次生成会运行约 6–10 次真实回测（样本内 2y 搜索 + {validationPeriod}{" "}
-                验证），耗时 1–4 分钟，消耗你账户的 API token。
-              </div>
+              <div className="lab-form__hint">{t("lab.hint")}</div>
             </div>
 
             <div className="lab-grid">
               {/* ------------------------------------------------ process */}
               <div className="panel lab-panel">
                 <div className="panel__head">
-                  <span className="panel__title">设计过程</span>
+                  <span className="panel__title">{t("lab.process")}</span>
                   <span className="panel__meta">
-                    {running ? `进行中 · ${elapsed}s` : steps.length ? "已完成" : "待开始"}
+                    {running ? `${t("lab.state.running")} · ${elapsed}s` : steps.length ? t("lab.state.done") : t("lab.state.idle")}
                   </span>
                 </div>
                 <div className="lab-timeline" ref={timelineRef}>
                   {steps.length === 0 && !running && (
-                    <div className="empty">点击「生成策略」，设计过程会实时显示在这里。</div>
+                    <div className="empty">{t("lab.timeline.empty")}</div>
                   )}
                   {steps.map((step, i) => (
                     <div key={i} className={`lab-step lab-step--${step.kind}`}>
@@ -340,7 +332,7 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
                         </div>
                         {step.result && <div className="lab-step__result">{step.result}</div>}
                         {step.result === undefined && running && i === steps.length - 1 && (
-                          <div className="lab-step__result dim">运行中…</div>
+                          <div className="lab-step__result dim">{t("lab.step.running")}</div>
                         )}
                       </div>
                     </div>
@@ -361,11 +353,11 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
                 {proposal ? (
                   <div className="panel lab-proposal">
                     <div className="panel__head">
-                      <span className="panel__title">策略方案</span>
+                      <span className="panel__title">{t("lab.proposal")}</span>
                       <span
                         className={`mk-badge ${proposal.beats_buy_hold ? "mk-badge--installed" : "mk-badge--warn"}`}
                       >
-                        {proposal.beats_buy_hold ? "✓ 验证期跑赢基准" : "✗ 未跑赢买入持有"}
+                        {proposal.beats_buy_hold ? t("lab.beats") : t("lab.trails")}
                       </span>
                     </div>
                     <div className="lab-proposal__body">
@@ -389,19 +381,19 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
                           <table className="lab-stats" style={{ marginTop: 12 }}>
                             <thead>
                               <tr>
-                                <th>窗口</th>
-                                <th>收益</th>
-                                <th>基准</th>
-                                <th>夏普</th>
-                                <th>回撤</th>
+                                <th>{t("lab.tbl.window")}</th>
+                                <th>{t("lab.r.return")}</th>
+                                <th>{t("lab.r.bench")}</th>
+                                <th>{t("lab.r.sharpe")}</th>
+                                <th>{t("lab.r.dd")}</th>
                               </tr>
                             </thead>
                             <tbody>
                               {proposal.in_sample && (
-                                <StatRow label="样本内" s={proposal.in_sample} />
+                                <StatRow label={t("lab.tbl.insample")} s={proposal.in_sample} />
                               )}
                               {proposal.validation && (
-                                <StatRow label="验证" s={proposal.validation} />
+                                <StatRow label={t("lab.tbl.valid")} s={proposal.validation} />
                               )}
                             </tbody>
                           </table>
@@ -430,10 +422,10 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
                             })
                           }
                         >
-                          ▶ 在回测中运行
+                          {t("lab.run")}
                         </button>
                         <button className="btn" onClick={handleSave} disabled={justSaved}>
-                          {justSaved ? "✓ 已保存" : "保存到我的策略"}
+                          {justSaved ? t("lab.saved") : t("lab.save")}
                         </button>
                       </div>
                     </div>
@@ -441,10 +433,10 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
                 ) : (
                   <div className="panel lab-proposal lab-proposal--empty">
                     <div className="panel__head">
-                      <span className="panel__title">策略方案</span>
+                      <span className="panel__title">{t("lab.proposal")}</span>
                     </div>
                     <div className="empty" style={{ padding: 24 }}>
-                      {running ? "设计中，方案将在验证完成后出现…" : "生成完成后，结构化方案会显示在这里。"}
+                      {running ? t("lab.proposal.wait") : t("lab.proposal.empty")}
                     </div>
                   </div>
                 )}
@@ -452,8 +444,8 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
                 {saved.length > 0 && (
                   <div className="panel">
                     <div className="panel__head">
-                      <span className="panel__title">我的策略</span>
-                      <span className="panel__meta">{saved.length} · 存于本浏览器</span>
+                      <span className="panel__title">{t("lab.mine")}</span>
+                      <span className="panel__meta">{saved.length} · {t("lab.mine.meta")}</span>
                     </div>
                     <ul className="lab-saved">
                       {saved.map((s) => (
@@ -462,16 +454,16 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
                             <div className="lab-saved__name">{s.name}</div>
                             <div className="dim" style={{ fontSize: 11 }}>
                               {s.symbol} · {s.strategy}
-                              {!s.beats_buy_hold && " · 未跑赢基准"}
+                              {!s.beats_buy_hold && ` · ${t("lab.mine.trails")}`}
                             </div>
                           </div>
                           <div className="lab-saved__actions">
                             <button className="btn" onClick={() => runProposal(s)}>
-                              运行
+                              {t("lab.mine.run")}
                             </button>
                             <button
                               className="watch-row__x"
-                              title="删除"
+                              title={t("lab.mine.del")}
                               onClick={() => {
                                 deleteStrategy(s.id);
                                 setSaved(savedStrategies());
@@ -488,10 +480,7 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
               </div>
             </div>
 
-            <p className="lab-disclaimer">
-              生成的策略基于历史数据调参，存在过拟合风险；回测含手续费与滑点但不含税费与流动性冲击。
-              本栏目为研究工具，不构成投资建议。
-            </p>
+            <p className="lab-disclaimer">{t("lab.disclaimer")}</p>
           </>
         )}
       </div>
@@ -500,25 +489,26 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
 }
 
 function WalkForwardTable({ report }: { report: NonNullable<StrategyProposal["walk_forward"]> }) {
+  const { t } = useT();
   const a = report.aggregate;
   return (
     <div className="lab-wf" style={{ marginTop: 12 }}>
       <div className="lab-wf__head">
         <span className="mk-section__title" style={{ margin: 0 }}>
-          滚动验证 · {a.folds} 折（训练 {a.train_years}y / 验证 {a.test_years}y）
+          {t("lab.wf.head", { n: String(a.folds), tr: String(a.train_years), te: String(a.test_years) })}
         </span>
         <span className={a.folds_beating_benchmark >= Math.ceil(a.folds / 2) ? "up" : "dn"}>
-          {a.folds_beating_benchmark}/{a.folds} 折跑赢基准
+          {t("lab.wf.beat", { a: String(a.folds_beating_benchmark), b: String(a.folds) })}
         </span>
       </div>
       <table className="lab-stats">
         <thead>
           <tr>
-            <th>折</th>
-            <th>验证区间</th>
-            <th>收益</th>
-            <th>基准</th>
-            <th>夏普</th>
+            <th>{t("lab.wf.fold")}</th>
+            <th>{t("lab.wf.window")}</th>
+            <th>{t("lab.r.return")}</th>
+            <th>{t("lab.r.bench")}</th>
+            <th>{t("lab.r.sharpe")}</th>
             <th></th>
           </tr>
         </thead>
@@ -538,7 +528,7 @@ function WalkForwardTable({ report }: { report: NonNullable<StrategyProposal["wa
             </tr>
           ))}
           <tr className="lab-wf__agg">
-            <td colSpan={2}>样本外合计（复利拼接）</td>
+            <td colSpan={2}>{t("lab.wf.total")}</td>
             <td className={a.oos_return_pct >= a.oos_buy_hold_return_pct ? "up" : "dn"}>
               {fmtPct(a.oos_return_pct)}
             </td>

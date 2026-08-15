@@ -6,6 +6,7 @@ import {
 } from "lightweight-charts";
 import { useEffect, useRef } from "react";
 import type { Point } from "../api";
+import { useT } from "../i18n";
 
 interface Props {
   equity: Point[];
@@ -17,6 +18,7 @@ interface Props {
  * along the bottom quarter (same overlay trick the price chart uses for
  * volume — one chart, no second pane needed). */
 export function EquityChart({ equity, benchmark, drawdown }: Props) {
+  const { t } = useT();
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -133,15 +135,15 @@ export function EquityChart({ equity, benchmark, drawdown }: Props) {
       <div className="equity-chart__legend">
         <span className="legend-item">
           <span className="legend-swatch" style={{ background: "#ffb000" }} />
-          策略净值
+          {t("bt.legend.equity")}
         </span>
         <span className="legend-item">
           <span className="legend-swatch legend-swatch--dashed" />
-          买入持有
+          {t("bt.legend.bench")}
         </span>
         <span className="legend-item">
           <span className="legend-swatch" style={{ background: "rgba(255,77,77,0.7)" }} />
-          回撤
+          {t("bt.legend.dd")}
         </span>
       </div>
       <div ref={hostRef} />

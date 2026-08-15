@@ -1,0 +1,488 @@
+/* Lightweight i18n — a context, two dictionaries, string interpolation.
+ *
+ * Scope: the UI chrome is fully bilingual. Backend-authored content
+ * (marketplace catalog copy, payment provider notes, AI output) stays in its
+ * source language — translating content is an authoring task, not a lookup.
+ */
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
+
+export type Lang = "zh" | "en";
+
+const LANG_KEY = "aiquant.lang";
+
+const zh = {
+  // header / app
+  "nav.us": "美股",
+  "nav.cn": "A股",
+  "nav.lab": "AI 策略",
+  "nav.market": "市场",
+  "status.quotes": "行情",
+  "status.connected": "已连接",
+  "status.polling": "轮询模式",
+  "status.connecting": "连接中",
+  "status.closed": "已断开",
+  "status.ai.off": "未配置",
+  "status.updated": "更新于",
+  "app.disclaimer":
+    "本站仅供研究与教育用途，不构成投资建议。行情数据来自公开数据源，可能存在延迟或误差；回测结果不代表未来收益。",
+  "app.addFirst": "先在左侧添加一个标的",
+  // watchlist
+  "watch.title": "自选列表",
+  "watch.add": "添加",
+  "watch.empty": "自选列表为空",
+  "watch.remove": "移除",
+  "watch.ph.us": "代码 / 名称，如 TSLA、苹果",
+  "watch.ph.cn": "代码 / 名称 / 拼音，如 gzmt",
+  "watch.hint.cn": "沪市 .SS / 深市 .SZ，支持中文名与拼音首字母，数据来自 Yahoo（延时约 15 分钟）",
+  // chart
+  "chart.trend": "走势",
+  "chart.loading": "加载行情…",
+  "chart.failed": "加载失败",
+  "chart.bars": "根",
+  // backtest
+  "bt.title": "策略回测",
+  "bt.strategy": "策略",
+  "bt.window": "区间",
+  "bt.fast": "快线",
+  "bt.slow": "慢线",
+  "bt.rsiPeriod": "RSI 周期",
+  "bt.oversold": "超卖",
+  "bt.overbought": "超买",
+  "bt.run": "运行回测",
+  "bt.running": "计算中…",
+  "bt.hint": "选择策略后点“运行回测”。下一根 bar 开盘成交，含手续费与滑点。",
+  "bt.strat.sma": "SMA 交叉",
+  "bt.strat.ema": "EMA 交叉",
+  "bt.strat.rsi": "RSI 均值回归",
+  "bt.strat.bh": "买入持有",
+  "bt.totalReturn": "总收益",
+  "bt.excess": "超额 vs 买入持有",
+  "bt.cagr": "年化",
+  "bt.sharpe": "夏普",
+  "bt.sortino": "索提诺",
+  "bt.maxdd": "最大回撤",
+  "bt.winrate": "胜率",
+  "bt.pf": "盈亏比",
+  "bt.trades": "交易次数",
+  "bt.bh": "买入持有",
+  "bt.entry": "入场",
+  "bt.exit": "出场",
+  "bt.pnl": "盈亏",
+  "bt.return": "收益",
+  "bt.open": "持仓中",
+  "bt.legend.equity": "策略净值",
+  "bt.legend.bench": "买入持有",
+  "bt.legend.dd": "回撤",
+  // AI panel
+  "ai.title": "AI 分析",
+  "ai.disabled": "未启用",
+  "ai.notice":
+    "AI 分析未启用。在项目根目录 .env 里设置 ANTHROPIC_API_KEY，然后重启后端即可。行情、指标、回测不受影响，可以正常使用。",
+  "ai.you": "你",
+  "ai.empty": "向 Claude 提问。它会实际调用行情、指标和回测工具，基于真实数字回答。",
+  "ai.skill": "技能",
+  "ai.send": "发送",
+  "ai.ph": "问点关于 {sym} 的…（⌘/Ctrl + Enter 发送）",
+  "ai.sugg1": "{sym} 最近走势如何？关键技术位在哪？",
+  "ai.sugg2": "对 {sym} 跑一次 SMA 交叉回测，和买入持有比一比",
+  "ai.sugg3": "{sym} 的 RSI 和 MACD 现在是什么状态？",
+  "ai.refusal": "请求被安全分类器拒绝",
+  // market page
+  "mk.title": "市场",
+  "mk.sub":
+    "策略、AI 技能与数据源 —— 每一项都接在真实引擎上：策略一键进回测，技能进 AI 面板，数据源显示当前进程的实时接入状态。",
+  "mk.stat.strategies": "可运行策略",
+  "mk.stat.skills": "AI 技能",
+  "mk.stat.data": "数据源",
+  "mk.filter.all": "全部",
+  "mk.search.ph": "搜索名称、简介或标签…",
+  "mk.type.strategy": "策略",
+  "mk.type.skill": "AI 技能",
+  "mk.type.data": "数据源",
+  "mk.installed": "✓ 已安装",
+  "mk.purchased": "已购买",
+  "mk.risk.low": "低风险",
+  "mk.risk.medium": "中风险",
+  "mk.risk.high": "高风险",
+  "mk.params": "参数",
+  "mk.costNote": "下一根 bar 开盘成交，双边计手续费与滑点；报告自带买入持有基准。",
+  "mk.template": "提示词模板（{symbol} 自动替换为当前标的）",
+  "mk.status": "接入状态",
+  "mk.envPrefix": "在",
+  "mk.envSuffix": "中设置后重启后端即可启用。",
+  "mk.run": "▶ 在回测中运行",
+  "mk.remove": "移除",
+  "mk.install": "安装到 AI 面板",
+  "mk.fav": "收藏",
+  "mk.demoBadge": "演示购买",
+  "mk.demoTitle": "通过演示流程解锁，未发生真实支付",
+  "mk.activeNote": "该数据源正在驱动本站行情，无需操作。",
+  "mk.buy": "以 ${amt} {ccy} 购买 · 加密支付",
+  "mk.unlock.strategy": "购买后解锁回测运行",
+  "mk.unlock.skill": "购买后解锁安装",
+  "mk.empty": "没有匹配的条目",
+  "mk.loadFail": "市场目录加载失败",
+  "mk.close": "关闭",
+  "mk.contentLang": "目录内容为中文原文。",
+  // payment modal
+  "pay.title": "购买",
+  "pay.crypto": "加密货币支付",
+  "pay.creating": "正在创建订单…",
+  "pay.created": "订单已创建（{id}）。在 Coinbase Commerce 托管页面完成支付后，本页会自动确认并解锁——请保持此窗口打开。",
+  "pay.goto": "前往支付页面 ↗",
+  "pay.waiting": "等待链上确认中…（每 4 秒查询一次订单状态）",
+  "pay.demoFlag": "演示模式",
+  "pay.demoNote": "未配置支付通道，当前为演示流程：不展示收款地址，不会发生任何真实转账。",
+  "pay.demoHint": "站长在 .env 配置 COINBASE_COMMERCE_API_KEY 后，此处会变为真实的托管加密支付页面。",
+  "pay.demoConfirm": "模拟支付完成（演示解锁）",
+  "pay.expired": "支付已过期或被取消，请重新发起。",
+  // strategy lab
+  "lab.title": "AI 策略工坊",
+  "lab.sub1": "描述目标，Claude 会先判断标的性格，在样本内窗口用",
+  "lab.sub.b": "真实回测引擎",
+  "lab.sub2":
+    "搜索参数，再做多折滚动验证 —— 每一次回测都在下方时间线上可见，跑不赢买入持有会如实告诉你。",
+  "lab.aiOff":
+    "AI 未启用。在项目根目录 .env 设置 ANTHROPIC_API_KEY 并重启后端后，此栏目即可使用。",
+  "lab.symbol": "标的代码",
+  "lab.symbolPh": "代码 / 名称 / 拼音首字母",
+  "lab.objective": "目标风格",
+  "lab.validation": "验证窗口",
+  "lab.v5y": "5 年（推荐）",
+  "lab.vmax": "全部历史",
+  "lab.v2y": "2 年",
+  "lab.notes": "补充要求（可选）",
+  "lab.notesPh": "如：最大回撤不超过 20%；交易别太频繁",
+  "lab.generate": "⚡ 生成策略",
+  "lab.stop": "停止",
+  "lab.hint":
+    "单次生成会运行约 6–10 次真实回测与多折滚动验证，耗时 1–4 分钟，消耗你账户的 API token。",
+  "lab.obj.auto": "自动判断",
+  "lab.obj.auto.h": "先分析标的性格再选风格（推荐）",
+  "lab.obj.trend": "稳健趋势",
+  "lab.obj.trend.h": "宁少交易，不追噪音",
+  "lab.obj.momentum": "激进动量",
+  "lab.obj.momentum.h": "接受高换手与回撤",
+  "lab.obj.reversion": "均值回归",
+  "lab.obj.reversion.h": "高胜率短持仓",
+  "lab.obj.low_drawdown": "低回撤优先",
+  "lab.obj.low_drawdown.h": "回撤是第一约束",
+  "lab.process": "设计过程",
+  "lab.proposal": "策略方案",
+  "lab.state.running": "进行中",
+  "lab.state.done": "已完成",
+  "lab.state.idle": "待开始",
+  "lab.timeline.empty": "点击「生成策略」，设计过程会实时显示在这里。",
+  "lab.step.running": "运行中…",
+  "lab.step.backtest": "回测",
+  "lab.step.wf": "滚动验证",
+  "lab.step.history": "读取价格历史",
+  "lab.step.indicator": "计算",
+  "lab.step.propose": "提交最终方案",
+  "lab.step.folds": "折",
+  "lab.step.train": "训练",
+  "lab.step.test": "验证",
+  "lab.r.return": "收益",
+  "lab.r.bench": "基准",
+  "lab.r.sharpe": "夏普",
+  "lab.r.dd": "回撤",
+  "lab.r.trades": "笔",
+  "lab.r.oos": "样本外",
+  "lab.r.beat": "折跑赢",
+  "lab.r.worst": "最差折",
+  "lab.r.pass": "✓ 通过参数校验",
+  "lab.r.fail": "参数校验失败",
+  "lab.r.err": "失败",
+  "lab.beats": "✓ 验证期跑赢基准",
+  "lab.trails": "✗ 未跑赢买入持有",
+  "lab.wf.head": "滚动验证 · {n} 折（训练 {tr}y / 验证 {te}y）",
+  "lab.wf.beat": "{a}/{b} 折跑赢基准",
+  "lab.wf.window": "验证区间",
+  "lab.wf.total": "样本外合计（复利拼接）",
+  "lab.wf.fold": "折",
+  "lab.tbl.window": "窗口",
+  "lab.tbl.insample": "样本内",
+  "lab.tbl.valid": "验证",
+  "lab.run": "▶ 在回测中运行",
+  "lab.save": "保存到我的策略",
+  "lab.saved": "✓ 已保存",
+  "lab.mine": "我的策略",
+  "lab.mine.meta": "存于本浏览器",
+  "lab.mine.run": "运行",
+  "lab.mine.del": "删除",
+  "lab.mine.trails": "未跑赢基准",
+  "lab.proposal.wait": "设计中，方案将在验证完成后出现…",
+  "lab.proposal.empty": "生成完成后，结构化方案会显示在这里。",
+  "lab.disclaimer":
+    "生成的策略基于历史数据调参，存在过拟合风险；回测含手续费与滑点但不含税费与流动性冲击。本栏目为研究工具，不构成投资建议。",
+} as const;
+
+export type MsgKey = keyof typeof zh;
+
+const en: Record<MsgKey, string> = {
+  "nav.us": "US",
+  "nav.cn": "A-Shares",
+  "nav.lab": "AI Lab",
+  "nav.market": "Market",
+  "status.quotes": "Quotes",
+  "status.connected": "live",
+  "status.polling": "polling",
+  "status.connecting": "connecting",
+  "status.closed": "offline",
+  "status.ai.off": "not configured",
+  "status.updated": "updated",
+  "app.disclaimer":
+    "For research and education only — not investment advice. Quotes come from public sources and may be delayed or inaccurate; backtests do not predict future returns.",
+  "app.addFirst": "Add a symbol on the left to begin",
+  "watch.title": "Watchlist",
+  "watch.add": "Add",
+  "watch.empty": "Watchlist is empty",
+  "watch.remove": "Remove",
+  "watch.ph.us": "Symbol or name, e.g. TSLA / Apple",
+  "watch.ph.cn": "Code / name / pinyin, e.g. gzmt",
+  "watch.hint.cn":
+    "Shanghai .SS / Shenzhen .SZ — Chinese names and pinyin initials supported. Yahoo data, ~15 min delay.",
+  "chart.trend": "Chart",
+  "chart.loading": "Loading…",
+  "chart.failed": "Failed to load",
+  "chart.bars": "bars",
+  "bt.title": "Backtest",
+  "bt.strategy": "Strategy",
+  "bt.window": "Window",
+  "bt.fast": "Fast",
+  "bt.slow": "Slow",
+  "bt.rsiPeriod": "RSI period",
+  "bt.oversold": "Oversold",
+  "bt.overbought": "Overbought",
+  "bt.run": "Run backtest",
+  "bt.running": "Running…",
+  "bt.hint": "Pick a strategy and hit Run. Fills at the next bar's open, costs included.",
+  "bt.strat.sma": "SMA cross",
+  "bt.strat.ema": "EMA cross",
+  "bt.strat.rsi": "RSI reversion",
+  "bt.strat.bh": "Buy & hold",
+  "bt.totalReturn": "Total return",
+  "bt.excess": "Excess vs B&H",
+  "bt.cagr": "CAGR",
+  "bt.sharpe": "Sharpe",
+  "bt.sortino": "Sortino",
+  "bt.maxdd": "Max drawdown",
+  "bt.winrate": "Win rate",
+  "bt.pf": "Profit factor",
+  "bt.trades": "Trades",
+  "bt.bh": "Buy & hold",
+  "bt.entry": "Entry",
+  "bt.exit": "Exit",
+  "bt.pnl": "PnL",
+  "bt.return": "Return",
+  "bt.open": "Open",
+  "bt.legend.equity": "Strategy equity",
+  "bt.legend.bench": "Buy & hold",
+  "bt.legend.dd": "Drawdown",
+  "ai.title": "AI Analyst",
+  "ai.disabled": "disabled",
+  "ai.notice":
+    "AI analysis is disabled. Set ANTHROPIC_API_KEY in the project root .env and restart the backend. Quotes, indicators and backtests keep working without it.",
+  "ai.you": "You",
+  "ai.empty":
+    "Ask Claude anything — it calls the real quote, indicator and backtest tools and answers from actual numbers.",
+  "ai.skill": "skill",
+  "ai.send": "Send",
+  "ai.ph": "Ask about {sym}… (⌘/Ctrl + Enter to send)",
+  "ai.sugg1": "How has {sym} been trading lately? Where are the key levels?",
+  "ai.sugg2": "Backtest an SMA cross on {sym} and compare it with buy-and-hold",
+  "ai.sugg3": "What are RSI and MACD saying about {sym} right now?",
+  "ai.refusal": "Request declined by safety classifiers",
+  "mk.title": "Market",
+  "mk.sub":
+    "Strategies, AI skills and data connectors — every item is wired to the real engine: strategies run in the backtester, skills install into the AI panel, connectors report live status.",
+  "mk.stat.strategies": "runnable strategies",
+  "mk.stat.skills": "AI skills",
+  "mk.stat.data": "data connectors",
+  "mk.filter.all": "All",
+  "mk.search.ph": "Search name, tagline or tags…",
+  "mk.type.strategy": "Strategy",
+  "mk.type.skill": "AI Skill",
+  "mk.type.data": "Data",
+  "mk.installed": "✓ Installed",
+  "mk.purchased": "Purchased",
+  "mk.risk.low": "Low risk",
+  "mk.risk.medium": "Medium risk",
+  "mk.risk.high": "High risk",
+  "mk.params": "Parameters",
+  "mk.costNote": "Fills at the next bar's open with commission and slippage; reports include a buy-and-hold benchmark.",
+  "mk.template": "Prompt template ({symbol} is replaced with the active symbol)",
+  "mk.status": "Status",
+  "mk.envPrefix": "Set",
+  "mk.envSuffix": "in .env and restart the backend to enable.",
+  "mk.run": "▶ Run in backtester",
+  "mk.remove": "Remove",
+  "mk.install": "Install to AI panel",
+  "mk.fav": "Save",
+  "mk.demoBadge": "Demo purchase",
+  "mk.demoTitle": "Unlocked via the demo flow — no real payment occurred",
+  "mk.activeNote": "This connector is already powering the site's quotes.",
+  "mk.buy": "Buy for ${amt} {ccy} · crypto",
+  "mk.unlock.strategy": "Purchase to unlock backtesting",
+  "mk.unlock.skill": "Purchase to unlock install",
+  "mk.empty": "No matching items",
+  "mk.loadFail": "Failed to load the catalog",
+  "mk.close": "Close",
+  "mk.contentLang": "Catalog copy is authored in Chinese.",
+  "pay.title": "Buy",
+  "pay.crypto": "crypto payment",
+  "pay.creating": "Creating the order…",
+  "pay.created":
+    "Order created ({id}). Complete the payment on the Coinbase Commerce page — this window confirms and unlocks automatically, keep it open.",
+  "pay.goto": "Open payment page ↗",
+  "pay.waiting": "Waiting for on-chain confirmation… (polling every 4s)",
+  "pay.demoFlag": "Demo mode",
+  "pay.demoNote":
+    "No payment provider is configured — this is a demo flow: no receiving address is shown and no value moves.",
+  "pay.demoHint":
+    "Once the operator sets COINBASE_COMMERCE_API_KEY in .env, this becomes a real hosted crypto checkout.",
+  "pay.demoConfirm": "Simulate payment (demo unlock)",
+  "pay.expired": "The charge expired or was cancelled — start again.",
+  "lab.title": "AI Strategy Lab",
+  "lab.sub1": "Describe your goal. Claude reads the instrument's character, searches parameters in-sample with the ",
+  "lab.sub.b": "real backtest engine",
+  "lab.sub2":
+    ", then walk-forward validates across rolling folds — every run shows on the timeline, and it will tell you plainly when nothing beats buy-and-hold.",
+  "lab.aiOff":
+    "AI is disabled. Set ANTHROPIC_API_KEY in the project root .env and restart the backend to use the lab.",
+  "lab.symbol": "Symbol",
+  "lab.symbolPh": "Code / name / pinyin initials",
+  "lab.objective": "Objective",
+  "lab.validation": "Validation window",
+  "lab.v5y": "5 years (recommended)",
+  "lab.vmax": "Full history",
+  "lab.v2y": "2 years",
+  "lab.notes": "Extra requirements (optional)",
+  "lab.notesPh": "e.g. keep max drawdown under 20%; trade infrequently",
+  "lab.generate": "⚡ Generate strategy",
+  "lab.stop": "Stop",
+  "lab.hint":
+    "One generation runs ~6–10 real backtests plus rolling validation, takes 1–4 minutes, and spends your API tokens.",
+  "lab.obj.auto": "Auto",
+  "lab.obj.auto.h": "read the instrument first (recommended)",
+  "lab.obj.trend": "Steady trend",
+  "lab.obj.trend.h": "fewer trades, ignore noise",
+  "lab.obj.momentum": "Aggressive momentum",
+  "lab.obj.momentum.h": "accept turnover and drawdown",
+  "lab.obj.reversion": "Mean reversion",
+  "lab.obj.reversion.h": "high win-rate, short holds",
+  "lab.obj.low_drawdown": "Low drawdown",
+  "lab.obj.low_drawdown.h": "drawdown is the binding constraint",
+  "lab.process": "Process",
+  "lab.proposal": "Proposal",
+  "lab.state.running": "Running",
+  "lab.state.done": "Done",
+  "lab.state.idle": "Idle",
+  "lab.timeline.empty": "Hit “Generate strategy” — the design process streams here live.",
+  "lab.step.running": "running…",
+  "lab.step.backtest": "Backtest",
+  "lab.step.wf": "Walk-forward",
+  "lab.step.history": "Read price history",
+  "lab.step.indicator": "Compute",
+  "lab.step.propose": "Submit final proposal",
+  "lab.step.folds": "folds",
+  "lab.step.train": "train",
+  "lab.step.test": "test",
+  "lab.r.return": "ret",
+  "lab.r.bench": "bench",
+  "lab.r.sharpe": "Sharpe",
+  "lab.r.dd": "DD",
+  "lab.r.trades": "trades",
+  "lab.r.oos": "OOS",
+  "lab.r.beat": "folds beat",
+  "lab.r.worst": "worst fold",
+  "lab.r.pass": "✓ passed validation",
+  "lab.r.fail": "parameter validation failed",
+  "lab.r.err": "failed",
+  "lab.beats": "✓ Beats benchmark out-of-sample",
+  "lab.trails": "✗ Trails buy & hold",
+  "lab.wf.head": "Walk-forward · {n} folds (train {tr}y / test {te}y)",
+  "lab.wf.beat": "{a}/{b} folds beat benchmark",
+  "lab.wf.window": "Test window",
+  "lab.wf.total": "OOS total (compounded)",
+  "lab.wf.fold": "Fold",
+  "lab.tbl.window": "Window",
+  "lab.tbl.insample": "In-sample",
+  "lab.tbl.valid": "Validation",
+  "lab.run": "▶ Run in backtester",
+  "lab.save": "Save to my strategies",
+  "lab.saved": "✓ Saved",
+  "lab.mine": "My strategies",
+  "lab.mine.meta": "stored in this browser",
+  "lab.mine.run": "Run",
+  "lab.mine.del": "Delete",
+  "lab.mine.trails": "trails benchmark",
+  "lab.proposal.wait": "Designing — the proposal appears once validation finishes…",
+  "lab.proposal.empty": "The structured proposal will appear here after generation.",
+  "lab.disclaimer":
+    "Generated strategies are fitted to history and may be overfit; backtests include commission and slippage but not taxes or market impact. This is a research tool, not investment advice.",
+};
+
+const MESSAGES: Record<Lang, Record<MsgKey, string>> = { zh, en };
+
+function initialLang(): Lang {
+  try {
+    const saved = localStorage.getItem(LANG_KEY);
+    if (saved === "zh" || saved === "en") return saved;
+  } catch {
+    /* ignore */
+  }
+  return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+interface I18n {
+  lang: Lang;
+  setLang: (lang: Lang) => void;
+  t: (key: MsgKey, vars?: Record<string, string | number>) => string;
+}
+
+const LangContext = createContext<I18n>({
+  lang: "zh",
+  setLang: () => {},
+  t: (key) => zh[key],
+});
+
+export function LangProvider({ children }: { children: ReactNode }) {
+  const [lang, setLangState] = useState<Lang>(initialLang);
+
+  useEffect(() => {
+    document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+    try {
+      localStorage.setItem(LANG_KEY, lang);
+    } catch {
+      /* ignore */
+    }
+  }, [lang]);
+
+  const t = useCallback(
+    (key: MsgKey, vars?: Record<string, string | number>) => {
+      let text: string = MESSAGES[lang][key] ?? zh[key] ?? key;
+      if (vars) {
+        for (const [name, value] of Object.entries(vars)) {
+          text = text.replaceAll(`{${name}}`, String(value));
+        }
+      }
+      return text;
+    },
+    [lang],
+  );
+
+  return <LangContext.Provider value={{ lang, setLang: setLangState, t }}>{children}</LangContext.Provider>;
+}
+
+export function useT(): I18n {
+  return useContext(LangContext);
+}

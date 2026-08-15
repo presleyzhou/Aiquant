@@ -85,6 +85,13 @@ export interface MarketItem {
   price: { amount: string; currency: string } | null;
 }
 
+export interface SymbolHit {
+  symbol: string;
+  name: string;
+  exchange: string;
+  source: "local" | "yahoo";
+}
+
 export interface PaymentConfig {
   provider: string;
   real: boolean;
@@ -162,6 +169,11 @@ export const api = {
       json<{ count: number; items: MarketItem[] }>,
     );
   },
+
+  searchSymbols: (q: string, limit = 8) =>
+    fetch(`/api/market/search?q=${encodeURIComponent(q)}&limit=${limit}`).then(
+      json<{ query: string; results: SymbolHit[] }>,
+    ),
 
   paymentConfig: () => fetch("/api/payments/config").then(json<PaymentConfig>),
 

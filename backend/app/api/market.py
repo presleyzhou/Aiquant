@@ -1,8 +1,23 @@
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Query
 
+from app.services import symbol_search
 from app.services.datasource import market_data
 
 router = APIRouter(prefix="/api/market", tags=["market"])
+
+
+@router.get("/search")
+async def search_symbols(
+    q: str = Query(..., min_length=1, max_length=40),
+    limit: int = Query(8, ge=1, le=20),
+):
+    """Fuzzy symbol lookup: curated CN/US name dictionary (instant, supports
+    Chinese names and pinyin initials) merged with Yahoo's search API."""
+    local = symbol_search.search_local(q, limit)
+    remote = await asyncio.to_thread(symbol_search.search_remote, q, limit)
+    return {"query": q, "results": symbol_search.merge_results(local, remote, limit)}
 
 
 @router.get("/quote/{symbol}")

@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type BacktestResult } from "../api";
+import { useT } from "../i18n";
 import { EVENTS, takeBacktestPresetFor } from "../store";
 import { EquityChart } from "./EquityChart";
 
-const STRATEGIES = [
-  { value: "sma_cross", label: "SMA 交叉" },
-  { value: "ema_cross", label: "EMA 交叉" },
-  { value: "rsi_reversion", label: "RSI 均值回归" },
-  { value: "buy_and_hold", label: "买入持有" },
-];
+const STRATEGY_KEYS = [
+  ["sma_cross", "bt.strat.sma"],
+  ["ema_cross", "bt.strat.ema"],
+  ["rsi_reversion", "bt.strat.rsi"],
+  ["buy_and_hold", "bt.strat.bh"],
+] as const;
 
 const PERIODS = ["1y", "2y", "5y", "max"];
 
@@ -23,6 +24,7 @@ interface Props {
 }
 
 export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: Props) {
+  const { t } = useT();
   const [strategy, setStrategy] = useState("sma_cross");
   const [period, setPeriod] = useState("2y");
   const [fast, setFast] = useState(20);
@@ -99,7 +101,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
     <div className="panel panel--results">
       <div className="panel__head">
         <span className="panel__title">
-          策略回测
+          {t("bt.title")}
           {presetName && <span style={{ color: "var(--cyan)" }}> · {presetName}</span>}
         </span>
         <span className="panel__meta">{result ? `${result.symbol} · ${result.period}` : symbol}</span>
@@ -107,22 +109,22 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
 
       <div className="control-grid">
         <label className="field">
-          <span className="field__label">策略</span>
+          <span className="field__label">{t("bt.strategy")}</span>
           <select
             className="select"
             value={strategy}
             onChange={(e) => setStrategy(e.target.value)}
           >
-            {STRATEGIES.map((x) => (
-              <option key={x.value} value={x.value}>
-                {x.label}
+            {STRATEGY_KEYS.map(([value, key]) => (
+              <option key={value} value={value}>
+                {t(key)}
               </option>
             ))}
           </select>
         </label>
 
         <label className="field">
-          <span className="field__label">区间</span>
+          <span className="field__label">{t("bt.window")}</span>
           <select className="select" value={period} onChange={(e) => setPeriod(e.target.value)}>
             {PERIODS.map((p) => (
               <option key={p} value={p}>
@@ -135,7 +137,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
         {isCross && (
           <>
             <label className="field">
-              <span className="field__label">快线</span>
+              <span className="field__label">{t("bt.fast")}</span>
               <input
                 className="input"
                 type="number"
@@ -146,7 +148,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
               />
             </label>
             <label className="field">
-              <span className="field__label">慢线</span>
+              <span className="field__label">{t("bt.slow")}</span>
               <input
                 className="input"
                 type="number"
@@ -162,7 +164,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
         {isRsi && (
           <>
             <label className="field">
-              <span className="field__label">RSI 周期</span>
+              <span className="field__label">{t("bt.rsiPeriod")}</span>
               <input
                 className="input"
                 type="number"
@@ -173,7 +175,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
               />
             </label>
             <label className="field">
-              <span className="field__label">超卖</span>
+              <span className="field__label">{t("bt.oversold")}</span>
               <input
                 className="input"
                 type="number"
@@ -184,7 +186,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
               />
             </label>
             <label className="field">
-              <span className="field__label">超买</span>
+              <span className="field__label">{t("bt.overbought")}</span>
               <input
                 className="input"
                 type="number"
@@ -200,7 +202,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
         <label className="field">
           <span className="field__label">&nbsp;</span>
           <button className="btn btn--primary" onClick={run} disabled={running}>
-            {running ? "计算中…" : "运行回测"}
+            {running ? t("bt.running") : t("bt.run")}
           </button>
         </label>
       </div>
@@ -208,7 +210,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
       {error && <div className="err">{error}</div>}
 
       {!result && !error && (
-        <div className="empty">选择策略后点“运行回测”。下一根 bar 开盘成交，含手续费与滑点。</div>
+        <div className="empty">{t("bt.hint")}</div>
       )}
 
       {s && result && (
@@ -220,20 +222,20 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
           />
 
           <div className="stat-grid">
-            <Stat label="总收益" value={pct(s.total_return_pct)} tone={s.total_return_pct} />
+            <Stat label={t("bt.totalReturn")} value={pct(s.total_return_pct)} tone={s.total_return_pct} />
             <Stat
-              label="超额 vs 买入持有"
+              label={t("bt.excess")}
               value={pct(s.excess_vs_buy_hold_pct)}
               tone={s.excess_vs_buy_hold_pct}
             />
-            <Stat label="年化" value={pct(s.cagr_pct)} tone={s.cagr_pct} />
-            <Stat label="夏普" value={s.sharpe.toFixed(2)} tone={s.sharpe} />
-            <Stat label="索提诺" value={s.sortino.toFixed(2)} tone={s.sortino} />
-            <Stat label="最大回撤" value={pct(s.max_drawdown_pct)} tone={-1} />
-            <Stat label="胜率" value={`${s.win_rate_pct.toFixed(1)}%`} />
-            <Stat label="盈亏比" value={s.profit_factor?.toFixed(2) ?? "—"} />
-            <Stat label="交易次数" value={String(s.trade_count)} />
-            <Stat label="买入持有" value={pct(s.buy_hold_return_pct)} tone={s.buy_hold_return_pct} />
+            <Stat label={t("bt.cagr")} value={pct(s.cagr_pct)} tone={s.cagr_pct} />
+            <Stat label={t("bt.sharpe")} value={s.sharpe.toFixed(2)} tone={s.sharpe} />
+            <Stat label={t("bt.sortino")} value={s.sortino.toFixed(2)} tone={s.sortino} />
+            <Stat label={t("bt.maxdd")} value={pct(s.max_drawdown_pct)} tone={-1} />
+            <Stat label={t("bt.winrate")} value={`${s.win_rate_pct.toFixed(1)}%`} />
+            <Stat label={t("bt.pf")} value={s.profit_factor?.toFixed(2) ?? "—"} />
+            <Stat label={t("bt.trades")} value={String(s.trade_count)} />
+            <Stat label={t("bt.bh")} value={pct(s.buy_hold_return_pct)} tone={s.buy_hold_return_pct} />
           </div>
 
           {result.trades.length > 0 && (
@@ -241,28 +243,28 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
               <table>
                 <thead>
                   <tr>
-                    <th>入场</th>
-                    <th>出场</th>
-                    <th style={{ textAlign: "right" }}>盈亏</th>
-                    <th style={{ textAlign: "right" }}>收益</th>
+                    <th>{t("bt.entry")}</th>
+                    <th>{t("bt.exit")}</th>
+                    <th style={{ textAlign: "right" }}>{t("bt.pnl")}</th>
+                    <th style={{ textAlign: "right" }}>{t("bt.return")}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {[...result.trades].reverse().map((t, i) => (
+                  {[...result.trades].reverse().map((trade, i) => (
                     <tr key={i}>
-                      <td>{day(t.entry_time)}</td>
-                      <td>{t.exit_time ? day(t.exit_time) : "持仓中"}</td>
+                      <td>{day(trade.entry_time)}</td>
+                      <td>{trade.exit_time ? day(trade.exit_time) : t("bt.open")}</td>
                       <td
                         style={{ textAlign: "right" }}
-                        className={(t.pnl ?? 0) >= 0 ? "up" : "dn"}
+                        className={(trade.pnl ?? 0) >= 0 ? "up" : "dn"}
                       >
-                        {t.pnl?.toLocaleString(undefined, { maximumFractionDigits: 0 }) ?? "—"}
+                        {trade.pnl?.toLocaleString(undefined, { maximumFractionDigits: 0 }) ?? "—"}
                       </td>
                       <td
                         style={{ textAlign: "right" }}
-                        className={(t.return_pct ?? 0) >= 0 ? "up" : "dn"}
+                        className={(trade.return_pct ?? 0) >= 0 ? "up" : "dn"}
                       >
-                        {t.return_pct !== null ? `${t.return_pct.toFixed(2)}%` : "—"}
+                        {trade.return_pct !== null ? `${trade.return_pct.toFixed(2)}%` : "—"}
                       </td>
                     </tr>
                   ))}

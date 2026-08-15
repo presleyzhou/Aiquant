@@ -1,7 +1,9 @@
 import { useState } from "react";
 import type { Quote } from "../api";
 import { usePriceFlash } from "../hooks/usePriceFlash";
+import { useT } from "../i18n";
 import { displayName, type MarketProfile } from "../markets";
+import { SymbolSearch } from "./SymbolSearch";
 
 interface Props {
   profile: MarketProfile;
@@ -14,6 +16,7 @@ interface Props {
 }
 
 export function Watchlist({ profile, symbols, quotes, active, onSelect, onAdd, onRemove }: Props) {
+  const { t } = useT();
   const [draft, setDraft] = useState("");
   const flash = usePriceFlash(quotes);
 
@@ -28,28 +31,38 @@ export function Watchlist({ profile, symbols, quotes, active, onSelect, onAdd, o
   return (
     <div className="panel panel--grow">
       <div className="panel__head">
-        <span className="panel__title">自选列表</span>
+        <span className="panel__title">{t("watch.title")}</span>
         <span className="panel__meta">{symbols.length}</span>
       </div>
 
       <form className="watch-form" onSubmit={submit}>
-        <input
-          className="input"
-          style={{ flex: 1 }}
+        <SymbolSearch
+          className="watch-form__search"
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={profile.placeholder}
-          aria-label="添加标的"
+          onChange={setDraft}
+          marketBias={profile.id}
+          placeholder={t(profile.id === "cn" ? "watch.ph.cn" : "watch.ph.us")}
+          onPick={(hit) => {
+            onAdd(hit.symbol.toUpperCase());
+            setDraft("");
+          }}
+          onSubmit={() => {
+            const symbol = draft.trim().toUpperCase();
+            if (symbol) {
+              onAdd(symbol);
+              setDraft("");
+            }
+          }}
         />
         <button className="btn" type="submit">
-          添加
+          {t("watch.add")}
         </button>
       </form>
-      {profile.hint && <div className="watch-hint">{profile.hint}</div>}
+      {profile.id === "cn" && <div className="watch-hint">{t("watch.hint.cn")}</div>}
 
       <div className="panel__body panel__body--flush">
         {symbols.length === 0 ? (
-          <div className="empty">自选列表为空</div>
+          <div className="empty">{t("watch.empty")}</div>
         ) : (
           <ul className="watch-list">
             {symbols.map((symbol) => {
@@ -78,8 +91,8 @@ export function Watchlist({ profile, symbols, quotes, active, onSelect, onAdd, o
                   </span>
                   <button
                     className="watch-row__x"
-                    title={`移除 ${symbol}`}
-                    aria-label={`移除 ${symbol}`}
+                    title={`${t("watch.remove")} ${symbol}`}
+                    aria-label={`${t("watch.remove")} ${symbol}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       onRemove(symbol);

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useT, type MsgKey } from "../i18n";
 import { api, type Charge, type MarketItem, type PaymentConfig } from "../api";
 import {
   installedIds,
@@ -10,18 +11,22 @@ import {
 } from "../store";
 
 const TYPE_META = {
-  strategy: { label: "策略", color: "var(--amber)", rgb: "255, 176, 0" },
-  skill: { label: "AI 技能", color: "var(--violet)", rgb: "167, 139, 250" },
-  data: { label: "数据源", color: "var(--cyan)", rgb: "62, 200, 224" },
+  strategy: { labelKey: "mk.type.strategy" as MsgKey, color: "var(--amber)", rgb: "255, 176, 0" },
+  skill: { labelKey: "mk.type.skill" as MsgKey, color: "var(--violet)", rgb: "167, 139, 250" },
+  data: { labelKey: "mk.type.data" as MsgKey, color: "var(--cyan)", rgb: "62, 200, 224" },
 } as const;
 
-const RISK_LABEL = { low: "低风险", medium: "中风险", high: "高风险" } as const;
+const RISK_KEY = {
+  low: "mk.risk.low",
+  medium: "mk.risk.medium",
+  high: "mk.risk.high",
+} as const satisfies Record<string, MsgKey>;
 
 const FILTERS = [
-  { value: "", label: "全部" },
-  { value: "strategy", label: "策略" },
-  { value: "skill", label: "AI 技能" },
-  { value: "data", label: "数据源" },
+  { value: "", labelKey: "mk.filter.all" as MsgKey },
+  { value: "strategy", labelKey: "mk.type.strategy" as MsgKey },
+  { value: "skill", labelKey: "mk.type.skill" as MsgKey },
+  { value: "data", labelKey: "mk.type.data" as MsgKey },
 ] as const;
 
 interface Props {
@@ -30,6 +35,7 @@ interface Props {
 }
 
 export function MarketPage({ onRunStrategy }: Props) {
+  const { t, lang } = useT();
   const [items, setItems] = useState<MarketItem[]>([]);
   const [filter, setFilter] = useState("");
   const [query, setQuery] = useState("");
@@ -92,21 +98,21 @@ export function MarketPage({ onRunStrategy }: Props) {
       <section className="mk-hero">
         <div className="mk-hero__glow" aria-hidden />
         <h1 className="mk-hero__title">
-          市场 <span className="mk-hero__cursor">▮</span>
+          {t("mk.title")} <span className="mk-hero__cursor">▮</span>
         </h1>
         <p className="mk-hero__sub">
-          策略、AI 技能与数据源 —— 每一项都接在真实引擎上：策略一键进回测，技能进 AI
-          面板，数据源显示当前进程的实时接入状态。
+          {t("mk.sub")}
+          {lang === "en" && <span className="dim"> {t("mk.contentLang")}</span>}
         </p>
         <div className="mk-hero__stats">
           <span className="mk-stat" style={{ "--tint": TYPE_META.strategy.rgb } as never}>
-            <b>{counts.strategy}</b> 可运行策略
+            <b>{counts.strategy}</b> {t("mk.stat.strategies")}
           </span>
           <span className="mk-stat" style={{ "--tint": TYPE_META.skill.rgb } as never}>
-            <b>{counts.skill}</b> AI 技能
+            <b>{counts.skill}</b> {t("mk.stat.skills")}
           </span>
           <span className="mk-stat" style={{ "--tint": TYPE_META.data.rgb } as never}>
-            <b>{counts.data}</b> 数据源
+            <b>{counts.data}</b> {t("mk.stat.data")}
           </span>
         </div>
       </section>
@@ -119,20 +125,20 @@ export function MarketPage({ onRunStrategy }: Props) {
               className={`chip${filter === f.value ? " is-on" : ""}`}
               onClick={() => setFilter(f.value)}
             >
-              {f.label}
+              {t(f.labelKey)}
             </button>
           ))}
         </div>
         <input
           className="input mk-search"
-          placeholder="搜索名称、简介或标签…"
+          placeholder={t("mk.search.ph")}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          aria-label="搜索市场"
+          aria-label={t("mk.search.ph")}
         />
       </div>
 
-      {error && <div className="err">市场目录加载失败：{error}</div>}
+      {error && <div className="err">{t("mk.loadFail")}: {error}</div>}
 
       <div className="mk-grid">
         {visible.map((item) => (
@@ -143,7 +149,7 @@ export function MarketPage({ onRunStrategy }: Props) {
             onOpen={() => setSelected(item)}
           />
         ))}
-        {!error && visible.length === 0 && <div className="empty">没有匹配的条目</div>}
+        {!error && visible.length === 0 && <div className="empty">{t("mk.empty")}</div>}
       </div>
 
       {selected && (
@@ -186,6 +192,7 @@ function Card({
   installed: boolean;
   onOpen: () => void;
 }) {
+  const { t } = useT();
   const meta = TYPE_META[item.type];
   return (
     <button className="mk-card" style={{ "--tint": meta.rgb } as never} onClick={onOpen}>
@@ -194,15 +201,15 @@ function Card({
           <TypeIcon type={item.type} />
         </span>
         <span className="mk-card__badges">
-          {installed && <span className="mk-badge mk-badge--installed">✓ 已安装</span>}
+          {installed && <span className="mk-badge mk-badge--installed">{t("mk.installed")}</span>}
           {item.price &&
             (isPurchased(item.id) ? (
-              <span className="mk-badge mk-badge--installed">已购买</span>
+              <span className="mk-badge mk-badge--installed">{t("mk.purchased")}</span>
             ) : (
               <span className="mk-badge mk-badge--price">${item.price.amount}</span>
             ))}
           <span className="mk-badge" style={{ color: meta.color }}>
-            {meta.label}
+            {t(meta.labelKey)}
           </span>
         </span>
       </div>
@@ -229,8 +236,9 @@ function Card({
 }
 
 function FootBadge({ item }: { item: MarketItem }) {
+  const { t } = useT();
   if (item.type === "strategy" && item.risk) {
-    return <span className={`mk-risk mk-risk--${item.risk}`}>{RISK_LABEL[item.risk]}</span>;
+    return <span className={`mk-risk mk-risk--${item.risk}`}>{t(RISK_KEY[item.risk])}</span>;
   }
   if (item.type === "data" && item.status) {
     return <span className={`mk-state mk-state--${item.status.state}`}>{item.status.label}</span>;
@@ -260,6 +268,7 @@ function DetailModal({
   onRun: () => void;
   onBuy: () => void;
 }) {
+  const { t } = useT();
   const meta = TYPE_META[item.type];
 
   useEffect(() => {
@@ -287,7 +296,7 @@ function DetailModal({
             <div className="mk-modal__name">{item.name}</div>
             <div className="mk-card__tagline">{item.tagline}</div>
           </div>
-          <button className="mk-close" onClick={onClose} aria-label="关闭">
+          <button className="mk-close" onClick={onClose} aria-label={t("mk.close")}>
             ✕
           </button>
         </div>
@@ -297,7 +306,7 @@ function DetailModal({
 
           {item.type === "strategy" && backtest && (
             <div className="mk-section">
-              <div className="mk-section__title">参数</div>
+              <div className="mk-section__title">{t("mk.params")}</div>
               <div className="mk-params">
                 {Object.entries(backtest).map(([key, value]) => (
                   <span key={key} className="mk-param">
@@ -306,21 +315,21 @@ function DetailModal({
                 ))}
               </div>
               <p className="dim" style={{ fontSize: 11.5, margin: "8px 0 0" }}>
-                下一根 bar 开盘成交，双边计手续费与滑点；报告自带买入持有基准。
+                {t("mk.costNote")}
               </p>
             </div>
           )}
 
           {item.type === "skill" && item.integration.prompt_template && (
             <div className="mk-section">
-              <div className="mk-section__title">提示词模板（{"{symbol}"} 自动替换为当前标的）</div>
+              <div className="mk-section__title">{t("mk.template")}</div>
               <pre className="mk-code">{item.integration.prompt_template}</pre>
             </div>
           )}
 
           {item.type === "data" && (
             <div className="mk-section">
-              <div className="mk-section__title">接入状态</div>
+              <div className="mk-section__title">{t("mk.status")}</div>
               {item.status && (
                 <span className={`mk-state mk-state--${item.status.state}`}>
                   {item.status.label}
@@ -328,9 +337,9 @@ function DetailModal({
               )}
               {item.integration.env_key && (
                 <p className="dim" style={{ fontSize: 12, margin: "10px 0 0" }}>
-                  在 <code className="mk-inline-code">.env</code> 中设置{" "}
+                  {t("mk.envPrefix")}{" "}
                   <code className="mk-inline-code">{item.integration.env_key}=…</code>{" "}
-                  并重启后端即可启用。
+                  {t("mk.envSuffix")}
                 </p>
               )}
             </div>
@@ -341,32 +350,32 @@ function DetailModal({
           {!owned ? (
             <>
               <button className="btn btn--primary" onClick={onBuy}>
-                以 ${item.price!.amount} {item.price!.currency} 购买 · 加密支付
+                {t("mk.buy", { amt: item.price!.amount, ccy: item.price!.currency })}
               </button>
               <span className="dim" style={{ fontSize: 11.5 }}>
-                购买后解锁{item.type === "strategy" ? "回测运行" : "安装"}
+                {t(item.type === "strategy" ? "mk.unlock.strategy" : "mk.unlock.skill")}
               </span>
             </>
           ) : (
             <>
               {item.type === "strategy" && (
                 <button className="btn btn--primary" onClick={onRun}>
-                  ▶ 在回测中运行
+                  {t("mk.run")}
                 </button>
               )}
               {item.type !== "data" && (
                 <button className="btn" onClick={onToggleInstall}>
-                  {installed ? "移除" : item.type === "skill" ? "安装到 AI 面板" : "收藏"}
+                  {installed ? t("mk.remove") : item.type === "skill" ? t("mk.install") : t("mk.fav")}
                 </button>
               )}
               {ownedDemo && (
-                <span className="mk-badge mk-badge--demo" title="通过演示流程解锁，未发生真实支付">
-                  演示购买
+                <span className="mk-badge mk-badge--demo" title={t("mk.demoTitle")}>
+                  {t("mk.demoBadge")}
                 </span>
               )}
               {item.type === "data" && item.status?.state === "active" && (
                 <span className="dim" style={{ fontSize: 12 }}>
-                  该数据源正在驱动本站行情，无需操作。
+                  {t("mk.activeNote")}
                 </span>
               )}
             </>
@@ -395,6 +404,7 @@ function PaymentModal({
     at: string;
   }) => void;
 }) {
+  const { t } = useT();
   const [charge, setCharge] = useState<Charge | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -427,7 +437,7 @@ function PaymentModal({
             at: new Date().toISOString(),
           });
         } else if (status.status === "failed") {
-          setError("支付已过期或被取消，请重新发起。");
+          setError(t("pay.expired"));
         }
       } catch {
         /* transient — next tick retries */
@@ -450,29 +460,28 @@ function PaymentModal({
         style={{ "--tint": "255, 176, 0" } as never}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
-        aria-label={`购买 ${item.name}`}
+        aria-label={`${t("pay.title")} ${item.name}`}
       >
         <div className="mk-modal__head">
           <div style={{ minWidth: 0 }}>
-            <div className="mk-modal__name">购买 · {item.name}</div>
+            <div className="mk-modal__name">{t("pay.title")} · {item.name}</div>
             <div className="mk-card__tagline">
-              ${item.price?.amount} {item.price?.currency} · 加密货币支付
+              ${item.price?.amount} {item.price?.currency} · {t("pay.crypto")}
             </div>
           </div>
-          <button className="mk-close" onClick={onClose} aria-label="关闭">
+          <button className="mk-close" onClick={onClose} aria-label={t("mk.close")}>
             ✕
           </button>
         </div>
 
         <div className="mk-modal__body">
           {error && <div className="err">{error}</div>}
-          {!charge && !error && <div className="empty">正在创建订单…</div>}
+          {!charge && !error && <div className="empty">{t("pay.creating")}</div>}
 
           {charge && !charge.demo && (
             <div className="pay-panel">
               <p className="mk-desc" style={{ fontSize: 12.5 }}>
-                订单已创建（{charge.charge_id}）。在 Coinbase Commerce
-                托管页面完成支付后，本页会自动确认并解锁——请保持此窗口打开。
+                {t("pay.created", { id: charge.charge_id })}
               </p>
               <a
                 className="btn btn--primary"
@@ -481,25 +490,22 @@ function PaymentModal({
                 rel="noreferrer"
                 style={{ display: "inline-block", textDecoration: "none", marginTop: 10 }}
               >
-                前往支付页面 ↗
+                {t("pay.goto")}
               </a>
               <p className="dim" style={{ fontSize: 11.5, marginTop: 10 }}>
-                等待链上确认中…（每 4 秒查询一次订单状态）
+                {t("pay.waiting")}
               </p>
             </div>
           )}
 
           {charge?.demo && (
             <div className="pay-panel pay-panel--demo">
-              <div className="pay-demo-flag">演示模式</div>
+              <div className="pay-demo-flag">{t("pay.demoFlag")}</div>
               <p className="mk-desc" style={{ fontSize: 12.5 }}>
-                {config?.note ??
-                  "未配置支付通道，当前为演示流程：不展示收款地址，不会发生任何真实转账。"}
+                {config?.note ?? t("pay.demoNote")}
               </p>
               <p className="dim" style={{ fontSize: 11.5, margin: "8px 0 0" }}>
-                站长在 <code className="mk-inline-code">.env</code> 配置{" "}
-                <code className="mk-inline-code">COINBASE_COMMERCE_API_KEY</code>{" "}
-                后，此处会变为真实的托管加密支付页面。
+                {t("pay.demoHint")}
               </p>
               <button
                 className="btn btn--primary"
@@ -513,7 +519,7 @@ function PaymentModal({
                   })
                 }
               >
-                模拟支付完成（演示解锁）
+                {t("pay.demoConfirm")}
               </button>
             </div>
           )}
