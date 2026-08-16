@@ -19,7 +19,9 @@ RUN git clone --depth 1 --branch ${REPO_REF} ${REPO_URL} app-src
 
 WORKDIR /srv/app-src/backend
 
-RUN pip install --no-cache-dir -r ../requirements.txt -r requirements-kronos.txt \
+# The root requirements.txt is Vercel-lean and omits the ASGI server on
+# purpose — this container runs its own, so add uvicorn explicitly.
+RUN pip install --no-cache-dir -r ../requirements.txt -r requirements-kronos.txt "uvicorn[standard]>=0.32" \
     # CPU-only torch is enough here and keeps the image several GB smaller.
     && pip install --no-cache-dir --force-reinstall torch --index-url https://download.pytorch.org/whl/cpu
 
