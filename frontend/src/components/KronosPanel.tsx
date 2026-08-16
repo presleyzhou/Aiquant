@@ -5,7 +5,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import { useEffect, useRef, useState } from "react";
-import { api, type KronosForecast, type KronosStatus } from "../api";
+import { api, type KronosEvaluation, type KronosForecast, type KronosStatus } from "../api";
 import { useT } from "../i18n";
 
 const HORIZONS = [7, 14, 30, 60];
@@ -30,6 +30,9 @@ export function KronosPanel({ symbol, marketId }: Props) {
   const [result, setResult] = useState<KronosForecast | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [evaluation, setEvaluation] = useState<KronosEvaluation | null>(null);
+  const [evaluating, setEvaluating] = useState(false);
+  const [evalError, setEvalError] = useState<string | null>(null);
 
   useEffect(() => {
     getStatus().then(setStatus).catch(() => setStatus(null));
@@ -49,8 +52,23 @@ export function KronosPanel({ symbol, marketId }: Props) {
     }
   };
 
+  const evaluate = async () => {
+    if (evaluating) return;
+    setEvaluating(true);
+    setEvalError(null);
+    try {
+      setEvaluation(await api.kronosEvaluate(symbol, horizon <= 30 ? 14 : 30));
+    } catch (err) {
+      setEvalError((err as Error).message);
+      setEvaluation(null);
+    } finally {
+      setEvaluating(false);
+    }
+  };
+
   const s = result?.summary;
   const stale = result !== null && result.symbol !== symbol;
+  const evalStale = evaluation !== null && evaluation.symbol !== symbol;
 
   return (
     <div className="panel">
@@ -123,11 +141,94 @@ export function KronosPanel({ symbol, marketId }: Props) {
               <div className="kr-disclaimer dim">{t("kr.disclaimer")}</div>
             </>
           )}
+
+          {/* ------------------------------------------ honest evaluation */}
+          <div className="kr-eval">
+            <div className="kr-eval__head">
+              <span className="mk-section__title" style={{ margin: 0 }}>{t("kr.eval.title")}</span>
+              <button className="btn" onClick={evaluate} disabled={evaluating}>
+                {evaluating ? t("kr.eval.running") : t("kr.eval.run")}
+              </button>
+            </div>
+
+            {evalError && <div className="err">{evalError}</div>}
+            {!evaluation && !evalError && !evaluating && (
+              <div className="kr-eval__hint dim">{t("kr.eval.hint")}</div>
+            )}
+
+            {evaluation && (
+              <>
+                {evalStale && (
+                  <div className="notice">{t("kr.stale", { sym: evaluation.symbol })}</div>
+                )}
+                <div className="stat-grid">
+                  <Stat
+                    label={t("kr.eval.hit")}
+                    value={`${evaluation.hit_rate_pct.toFixed(1)}%`}
+                    tone={evaluation.hit_rate_pct - evaluation.always_up_hit_rate_pct}
+                  />
+                  <Stat
+                    label={t("kr.eval.base")}
+                    value={`${evaluation.always_up_hit_rate_pct.toFixed(1)}%`}
+                  />
+                  <Stat label={t("kr.eval.mae")} value={`${evaluation.mae_pct_points.toFixed(1)} pp`} />
+                  <Stat
+                    label={t("kr.eval.n")}
+                    value={`${evaluation.n} × ${evaluation.horizon}d`}
+                  />
+                </div>
+                <div className="kr-eval__verdict">
+                  {evaluation.hit_rate_pct > evaluation.always_up_hit_rate_pct ? (
+                    <span className="up">
+                      {t("kr.eval.beats", {
+                        d: (evaluation.hit_rate_pct - evaluation.always_up_hit_rate_pct).toFixed(1),
+                      })}
+                    </span>
+                  ) : (
+                    <span className="dn">{t("kr.eval.trails")}</span>
+                  )}
+                  <span className="dim">
+                    {" "}
+                    · {evaluation.span.from} → {evaluation.span.to}
+                  </span>
+                </div>
+                <div className="table-scroll kr-eval__table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("kr.eval.date")}</th>
+                        <th style={{ textAlign: "right" }}>{t("kr.eval.pred")}</th>
+                        <th style={{ textAlign: "right" }}>{t("kr.eval.actual")}</th>
+                        <th style={{ textAlign: "center" }}>{t("kr.eval.ok")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...evaluation.rows].reverse().slice(0, 12).map((row) => (
+                        <tr key={row.date}>
+                          <td className="dim">{row.date}</td>
+                          <td style={{ textAlign: "right" }} className={row.pred_change_pct >= 0 ? "up" : "dn"}>
+                            {fmtSigned(row.pred_change_pct)}
+                          </td>
+                          <td style={{ textAlign: "right" }} className={row.actual_change_pct >= 0 ? "up" : "dn"}>
+                            {fmtSigned(row.actual_change_pct)}
+                          </td>
+                          <td style={{ textAlign: "center" }}>{row.hit ? "✓" : "✗"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="kr-disclaimer dim">{t("kr.eval.note")}</div>
+              </>
+            )}
+          </div>
         </>
       )}
     </div>
   );
 }
+
+const fmtSigned = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
 
 /** History close (solid) + forecast close (amber) + envelope edges (dashed). */
 function ForecastChart({ data }: { data: KronosForecast }) {

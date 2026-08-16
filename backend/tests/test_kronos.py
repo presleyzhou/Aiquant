@@ -56,20 +56,30 @@ class _FakePredictor:
     """Stands in for KronosPredictor: returns a flat continuation."""
 
     device = "cpu"
+    # multiplier applied to the predicted close (1.0 = flat forecast)
+    drift = 1.0
 
-    def predict(self, df, x_timestamp, y_timestamp, pred_len, **kwargs):
+    def _one(self, df, y_timestamp, pred_len):
         last = float(df["close"].iloc[-1])
         return pd.DataFrame(
             {
                 "open": last,
-                "high": last * 1.02,
-                "low": last * 0.98,
-                "close": last,
+                "high": last * max(1.02, self.drift),
+                "low": last * min(0.98, self.drift),
+                "close": last * self.drift,
                 "volume": 1e6,
                 "amount": 1e8,
             },
             index=y_timestamp,
         )
+
+    def predict(self, df, x_timestamp, y_timestamp, pred_len, **kwargs):
+        return self._one(df, y_timestamp, pred_len)
+
+    def predict_batch(self, df_list, x_timestamp_list, y_timestamp_list, pred_len, **kwargs):
+        return [
+            self._one(df, y, pred_len) for df, y in zip(df_list, y_timestamp_list)
+        ]
 
 
 @pytest.fixture()
@@ -224,3 +234,61 @@ def test_status_remote_unreachable_degrades(remote_mode):
     assert body["enabled"] is False
     assert body["mode"] == "remote"
     assert "unreachable" in body["error"]
+
+
+# --------------------------------------------------------- evaluate / signal
+
+
+def test_evaluate_bullish_fake_matches_baseline(fake_service):
+    """A permanently-bullish predictor must score exactly the always-up
+    baseline — the honesty property the panel is built on."""
+    fake_service._predictor.drift = 1.05
+    out = fake_service.evaluate_blocking(_history(400), "AAPL", "us", 14)
+    assert out["n"] >= 8
+    assert out["hit_rate_pct"] == out["always_up_hit_rate_pct"]
+    assert all(r["pred_change_pct"] > 0 for r in out["rows"])
+
+
+def test_evaluate_needs_enough_history(fake_service):
+    with pytest.raises(LookupError):
+        fake_service.evaluate_blocking(_history(200), "AAPL", "us", 14)
+
+
+def test_signal_points_shape_and_no_lookahead(fake_service):
+    fake_service._predictor.drift = 1.05
+    df = _history(400)
+    points = fake_service.signal_points_blocking(df, "crypto", 14)
+    assert points, "expected at least one anchor"
+    assert all(p["long"] for p in points)  # bullish fake → always long
+    last_date = str(df.index[-1].date())
+    assert all(p["date"] < last_date for p in points)  # anchors strictly before the end
+
+
+def test_points_to_series_forward_fills():
+    from app.api.analytics import kronos_points_to_series
+
+    df = _history(30)
+    d = lambda i: str(df.index[i].date())  # noqa: E731
+    points = [
+        {"date": d(5), "long": True},
+        {"date": d(15), "long": False},
+        {"date": d(25), "long": True},
+    ]
+    series = kronos_points_to_series(df, points)
+    assert not series.iloc[0]          # flat before the first anchor
+    assert series.iloc[5] and series.iloc[14]   # holds between anchors
+    assert not series.iloc[15] and not series.iloc[24]
+    assert series.iloc[25] and series.iloc[29]
+
+
+def test_backtest_run_accepts_precomputed_series():
+    from app.services import backtest as bt
+
+    df = _history(120)
+    cfg = bt.BacktestConfig(strategy="kronos_signal")
+    want = pd.Series([i >= 60 for i in range(len(df))], index=df.index)
+    result = bt.run(df, cfg, want_long=want)
+    assert result.stats["trade_count"] >= 1
+    # without the series the engine must refuse rather than guess
+    with pytest.raises(ValueError):
+        bt.run(df, cfg)

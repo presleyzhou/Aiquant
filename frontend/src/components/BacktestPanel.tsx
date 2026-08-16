@@ -8,6 +8,7 @@ const STRATEGY_KEYS = [
   ["sma_cross", "bt.strat.sma"],
   ["ema_cross", "bt.strat.ema"],
   ["rsi_reversion", "bt.strat.rsi"],
+  ["kronos_signal", "bt.strat.kronos"],
   ["buy_and_hold", "bt.strat.bh"],
 ] as const;
 
@@ -32,6 +33,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
   const [rsiPeriod, setRsiPeriod] = useState(14);
   const [rsiOversold, setRsiOversold] = useState(30);
   const [rsiOverbought, setRsiOverbought] = useState(70);
+  const [kronosHorizon, setKronosHorizon] = useState(14);
   const [presetName, setPresetName] = useState<string | null>(null);
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [running, setRunning] = useState(false);
@@ -43,6 +45,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
 
   const isCross = strategy === "sma_cross" || strategy === "ema_cross";
   const isRsi = strategy === "rsi_reversion";
+  const isKronos = strategy === "kronos_signal";
 
   const execute = async (body: Record<string, unknown>) => {
     setRunning(true);
@@ -68,6 +71,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
       rsi_period: rsiPeriod,
       rsi_oversold: rsiOversold,
       rsi_overbought: rsiOverbought,
+      kronos_horizon: kronosHorizon,
     });
   };
 
@@ -86,6 +90,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
       if (typeof p.rsi_period === "number") setRsiPeriod(p.rsi_period);
       if (typeof p.rsi_oversold === "number") setRsiOversold(p.rsi_oversold);
       if (typeof p.rsi_overbought === "number") setRsiOverbought(p.rsi_overbought);
+      if (typeof p.kronos_horizon === "number") setKronosHorizon(p.kronos_horizon);
       setPresetName(preset.name);
       void execute({ symbol: symbolRef.current, ...p });
     };
@@ -159,6 +164,20 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
               />
             </label>
           </>
+        )}
+
+        {isKronos && (
+          <label className="field">
+            <span className="field__label">{t("bt.kronosHorizon")}</span>
+            <input
+              className="input"
+              type="number"
+              min={5}
+              max={60}
+              value={kronosHorizon}
+              onChange={(e) => setKronosHorizon(Number(e.target.value))}
+            />
+          </label>
         )}
 
         {isRsi && (

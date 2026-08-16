@@ -1563,6 +1563,33 @@ tbody tr:hover td {
   opacity: 0.75;
 }
 
+.kr-eval {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.kr-eval__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 4px;
+}
+
+.kr-eval__hint {
+  padding: 4px 14px 12px;
+  font-size: 12px;
+}
+
+.kr-eval__verdict {
+  padding: 6px 14px 2px;
+  font-size: 12px;
+}
+
+.kr-eval__table {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
 .skill-chip {
   display: inline-flex;
   align-items: center;

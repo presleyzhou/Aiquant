@@ -38,6 +38,17 @@ class ForecastRequest(BaseModel):
     market: str | None = None  # "us" | "crypto"; inferred from the symbol if absent
 
 
+class EvaluateRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=20)
+    horizon: int = Field(default=14, ge=5, le=60)
+
+
+class SignalRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=20)
+    period: str = Field(default="2y")
+    horizon: int = Field(default=14, ge=5, le=60)
+
+
 def _remote_base() -> str | None:
     url = get_settings().kronos_remote_url
     return url.rstrip("/") if url else None
@@ -111,6 +122,87 @@ async def _forecast_remote(remote: str, req: ForecastRequest) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Kronos remote unreachable: {exc}") from exc
 
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return resp.json()
+
+
+@router.post("/evaluate")
+async def kronos_evaluate(req: EvaluateRequest) -> dict:
+    """Rolling honest evaluation: weekly historical forecasts vs what happened."""
+    symbol = req.symbol.upper().strip()
+
+    if kronos_service.enabled():
+        market = infer_market(symbol)
+        try:
+            df = await market_data.history_frame(symbol, period="5y", interval="1d")
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        try:
+            return await asyncio.to_thread(
+                kronos_service.evaluate_blocking, df, symbol, market, req.horizon
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Kronos evaluation failed: {exc}") from exc
+
+    remote = _remote_base()
+    if remote:
+        return await _proxy_post(remote, "/api/kronos/evaluate", req.model_dump())
+
+    raise HTTPException(status_code=503, detail="Kronos is not enabled on this deployment.")
+
+
+@router.post("/signal")
+async def kronos_signal(req: SignalRequest) -> dict:
+    """Long/flat anchors for the kronos_signal backtest strategy."""
+    symbol = req.symbol.upper().strip()
+    points = await signal_points(symbol, req.period, req.horizon)
+    return {"symbol": symbol, "period": req.period, "horizon": req.horizon, "points": points}
+
+
+async def signal_points(symbol: str, period: str, horizon: int, df=None) -> list[dict]:
+    """Kronos signal anchors — local inference, or the remote service when
+    torch is absent. Shared by the endpoint above, the analytics backtest and
+    the strategy-lab tools."""
+    if kronos_service.enabled():
+        if df is None:
+            try:
+                df = await market_data.history_frame(symbol, period, "1d")
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        market = infer_market(symbol)
+        try:
+            return await asyncio.to_thread(
+                kronos_service.signal_points_blocking, df, market, horizon
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    remote = _remote_base()
+    if remote:
+        body = await _proxy_post(
+            remote, "/api/kronos/signal", {"symbol": symbol, "period": period, "horizon": horizon}
+        )
+        return body["points"]
+
+    raise HTTPException(
+        status_code=503,
+        detail="kronos_signal needs Kronos inference (torch locally, or KRONOS_REMOTE_URL).",
+    )
+
+
+async def _proxy_post(remote: str, path: str, payload: dict) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=_REMOTE_TIMEOUT) as client:
+            resp = await client.post(f"{remote}{path}", json=payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Kronos remote unreachable: {exc}") from exc
     if resp.status_code != 200:
         try:
             detail = resp.json().get("detail", resp.text)

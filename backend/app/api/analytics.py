@@ -1,6 +1,9 @@
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+import pandas as pd
+
+from app.api.kronos import signal_points
 from app.services import backtest as bt
 from app.services import indicators as ind
 from app.services.datasource import market_data
@@ -45,7 +48,10 @@ async def get_indicator(
 
 class BacktestRequest(BaseModel):
     symbol: str
-    strategy: str = Field("sma_cross", description="sma_cross | ema_cross | rsi_reversion | buy_and_hold")
+    strategy: str = Field(
+        "sma_cross",
+        description="sma_cross | ema_cross | rsi_reversion | buy_and_hold | kronos_signal",
+    )
     period: str = Field("2y", description="1y 2y 5y max")
     fast: int = Field(20, ge=2, le=200)
     slow: int = Field(50, ge=3, le=400)
@@ -57,6 +63,8 @@ class BacktestRequest(BaseModel):
     initial_capital: float = Field(100_000.0, gt=0)
     commission_bps: float = Field(5.0, ge=0, le=100)
     slippage_bps: float = Field(2.0, ge=0, le=100)
+    # kronos_signal: forecast horizon (= rebalance cadence, in bars)
+    kronos_horizon: int = Field(14, ge=5, le=60)
 
 
 @router.post("/backtest")
@@ -79,10 +87,16 @@ async def run_backtest(req: BacktestRequest):
         initial_capital=req.initial_capital,
         commission_bps=req.commission_bps,
         slippage_bps=req.slippage_bps,
+        kronos_horizon=req.kronos_horizon,
     )
 
+    want_long = None
+    if req.strategy == "kronos_signal":
+        points = await signal_points(req.symbol.upper(), req.period, req.kronos_horizon, df=df)
+        want_long = kronos_points_to_series(df, points)
+
     try:
-        result = bt.run(df, cfg)
+        result = bt.run(df, cfg, want_long=want_long)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -96,3 +110,20 @@ async def run_backtest(req: BacktestRequest):
         "drawdown_curve": result.drawdown_curve,
         "trades": result.trades,
     }
+
+
+def kronos_points_to_series(df, points: list[dict]) -> "pd.Series":
+    """Turn dated long/flat anchors into a bar-aligned signal series.
+
+    Matching is by calendar date so a locally-fetched frame and one fetched by
+    the remote inference service line up even if their tz handling differs.
+    The signal holds (forward-fills) between anchors and is flat before the
+    first one.
+    """
+    sig_map = {p["date"]: bool(p["long"]) for p in points}
+    current = False
+    values = []
+    for ts in df.index:
+        current = sig_map.get(str(ts.date()), current)
+        values.append(current)
+    return pd.Series(values, index=df.index)

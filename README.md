@@ -130,11 +130,13 @@ Vercel 后端会把 `/api/kronos/*` 服务器侧转发过去（无 CORS、前端
 | GET | `/api/market/sources` | 内嵌数据层健康状况与当前数据源映射 |
 | GET | `/api/analytics/indicators` | 可用指标列表 |
 | GET | `/api/analytics/indicator/{symbol}/{name}` | 计算指标 |
-| POST | `/api/analytics/backtest` | 运行回测 |
+| POST | `/api/analytics/backtest` | 运行回测（含 `kronos_signal` 模型信号策略） |
 | GET | `/api/marketplace/items?type=&q=` | 市场目录（策略/技能/数据，支持筛选搜索） |
 | GET | `/api/marketplace/items/{id}` | 单个条目详情 |
 | GET | `/api/kronos/status` | Kronos 预测是否可用、模型与设备 |
 | POST | `/api/kronos/forecast` | K线预测 `{symbol, horizon?}`（美股/加密自动分流参数） |
+| POST | `/api/kronos/evaluate` | 滚动历史评估：方向命中率 vs「永远看涨」基线 |
+| POST | `/api/kronos/signal` | kronos_signal 策略的多空锚点（供回测引擎使用） |
 | GET | `/api/ai/status` | AI 是否可用、用的哪个模型 |
 | POST | `/api/ai/analyze` | 流式分析（NDJSON） |
 | WS | `/ws/quotes` | 实时报价推送 |

@@ -124,7 +124,7 @@ TOOLS: list[dict[str, Any]] = [
                 "symbol": {"type": "string"},
                 "strategy": {
                     "type": "string",
-                    "enum": ["sma_cross", "ema_cross", "rsi_reversion", "buy_and_hold"],
+                    "enum": ["sma_cross", "ema_cross", "rsi_reversion", "buy_and_hold", "kronos_signal"],
                 },
                 "period": {
                     "type": "string",
@@ -133,6 +133,10 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "fast": {"type": "integer", "description": "Fast MA length for cross strategies."},
                 "slow": {"type": "integer", "description": "Slow MA length for cross strategies."},
+                "kronos_horizon": {
+                    "type": "integer",
+                    "description": "kronos_signal only: forecast horizon / rebalance cadence in bars (5-60, default 14).",
+                },
             },
             "required": ["symbol", "strategy"],
         },
@@ -150,7 +154,11 @@ Required workflow:
 trend-following or mean-reversion.
 2. Screen candidates in-sample (period "2y") with `run_backtest`. Budget: at \
 most 6 screening runs — choose each variant deliberately, do not grid-scan. \
-Shortlist 1-3 parameter sets.
+Shortlist 1-3 parameter sets. The `kronos_signal` strategy (long when the \
+Kronos K-line foundation model predicts a higher close `kronos_horizon` bars \
+out, flat otherwise) runs ~30 model inferences per backtest and may be \
+unavailable on some deployments — if a kronos_signal call errors, drop it and \
+continue with the classical strategies; use it for at most 2 of your runs.
 3. Put each shortlisted set through `walk_forward` (rolling train→test folds; \
 default 3 folds, 2y train / 1y test — one call runs the whole protocol). This \
 is the decision that matters: judge by the AGGREGATE out-of-sample return vs \
@@ -191,10 +199,11 @@ WALK_FORWARD_TOOL: dict[str, Any] = {
             "symbol": {"type": "string"},
             "strategy": {
                 "type": "string",
-                "enum": ["sma_cross", "ema_cross", "rsi_reversion", "buy_and_hold"],
+                "enum": ["sma_cross", "ema_cross", "rsi_reversion", "buy_and_hold", "kronos_signal"],
             },
             "fast": {"type": "integer"},
             "slow": {"type": "integer"},
+            "kronos_horizon": {"type": "integer", "description": "kronos_signal only: 5-60, default 14"},
             "rsi_period": {"type": "integer"},
             "rsi_oversold": {"type": "number"},
             "rsi_overbought": {"type": "number"},
@@ -220,7 +229,7 @@ PROPOSE_STRATEGY_TOOL: dict[str, Any] = {
             "symbol": {"type": "string"},
             "strategy": {
                 "type": "string",
-                "enum": ["sma_cross", "ema_cross", "rsi_reversion", "buy_and_hold"],
+                "enum": ["sma_cross", "ema_cross", "rsi_reversion", "buy_and_hold", "kronos_signal"],
             },
             "params": {
                 "type": "object",
@@ -323,6 +332,16 @@ class QuantAnalyst:
 
     # ---------------------------------------------------------------- tool exec
 
+    async def _kronos_want_long(self, symbol: str, period: str, df, cfg):
+        """Precompute the kronos_signal series (None for classical strategies)."""
+        if cfg.strategy != "kronos_signal":
+            return None
+        from app.api.kronos import signal_points
+        from app.api.analytics import kronos_points_to_series
+
+        points = await signal_points(symbol.upper(), period, cfg.kronos_horizon, df=df)
+        return kronos_points_to_series(df, points)
+
     async def _run_tool(self, name: str, args: dict) -> dict:
         try:
             if name == "get_quote":
@@ -364,7 +383,9 @@ class QuantAnalyst:
                     rsi_period=int(args.get("rsi_period", 14)),
                     rsi_oversold=float(args.get("rsi_oversold", 30)),
                     rsi_overbought=float(args.get("rsi_overbought", 70)),
+                    kronos_horizon=int(args.get("kronos_horizon", 14)),
                 )
+                want_long = await self._kronos_want_long(args["symbol"], "max", df, cfg)
                 report = await asyncio.to_thread(
                     bt.walk_forward,
                     df,
@@ -372,6 +393,7 @@ class QuantAnalyst:
                     int(args.get("folds", 3)),
                     float(args.get("train_years", 2)),
                     float(args.get("test_years", 1)),
+                    want_long,
                 )
                 return {"symbol": args["symbol"].upper(), "strategy": cfg.strategy, **report}
 
@@ -391,8 +413,10 @@ class QuantAnalyst:
                     strategy=args["strategy"],
                     fast=int(args.get("fast", 20)),
                     slow=int(args.get("slow", 50)),
+                    kronos_horizon=int(args.get("kronos_horizon", 14)),
                 )
-                result = bt.run(df, cfg)
+                want_long = await self._kronos_want_long(args["symbol"], period, df, cfg)
+                result = bt.run(df, cfg, want_long=want_long)
                 return {
                     "symbol": args["symbol"].upper(),
                     "strategy": cfg.strategy,

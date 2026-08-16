@@ -53,6 +53,26 @@ export interface KronosForecast {
   };
 }
 
+export interface KronosEvalRow {
+  date: string;
+  pred_change_pct: number;
+  actual_change_pct: number;
+  hit: boolean;
+}
+
+export interface KronosEvaluation {
+  symbol: string;
+  market: string;
+  model: string;
+  horizon: number;
+  n: number;
+  span: { from: string; to: string };
+  hit_rate_pct: number;
+  always_up_hit_rate_pct: number;
+  mae_pct_points: number;
+  rows: KronosEvalRow[];
+}
+
 export interface KronosStatus {
   enabled: boolean;
   loaded: boolean;
@@ -196,6 +216,13 @@ export const api = {
     }).then(json<BacktestResult>),
 
   kronosStatus: () => fetch("/api/kronos/status").then(json<KronosStatus>),
+
+  kronosEvaluate: (symbol: string, horizon?: number) =>
+    fetch("/api/kronos/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(horizon ? { symbol, horizon } : { symbol }),
+    }).then(json<KronosEvaluation>),
 
   kronosForecast: (symbol: string, horizon?: number) =>
     fetch("/api/kronos/forecast", {

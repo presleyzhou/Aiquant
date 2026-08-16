@@ -8,6 +8,7 @@ import { MarketPage } from "./components/MarketPage";
 import { StrategyLab } from "./components/StrategyLab";
 import { TickerTape } from "./components/TickerTape";
 import { Watchlist } from "./components/Watchlist";
+import { useBinanceStream } from "./hooks/useBinanceStream";
 import { useQuoteStream } from "./hooks/useQuoteStream";
 import { useT } from "./i18n";
 import { queueBacktestPreset } from "./store";
@@ -58,7 +59,14 @@ export default function App() {
     () => [...new Set([...lists.us, ...lists.crypto])].slice(0, 25),
     [lists],
   );
-  const { quotes, status } = useQuoteStream(allSymbols);
+  const { quotes: yahooQuotes, status } = useQuoteStream(allSymbols);
+  // Crypto pairs get true second-level quotes straight from Binance; the
+  // merge overrides Yahoo only for symbols that actually emitted a tick.
+  const binanceQuotes = useBinanceStream(allSymbols);
+  const quotes = useMemo(
+    () => ({ ...yahooQuotes, ...binanceQuotes }),
+    [yahooQuotes, binanceQuotes],
+  );
 
   useEffect(() => {
     localStorage.setItem(MARKETS.us.storageKey, JSON.stringify(lists.us));

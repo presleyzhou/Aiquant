@@ -30,6 +30,8 @@ class BacktestConfig:
     initial_capital: float = 100_000.0
     commission_bps: float = 5.0  # 0.05% per side
     slippage_bps: float = 2.0  # 0.02% per side
+    # kronos_signal: forecast horizon = rebalance cadence, in bars.
+    kronos_horizon: int = 14
 
 
 @dataclass
@@ -93,17 +95,25 @@ def _signals(df: pd.DataFrame, cfg: BacktestConfig) -> pd.Series:
     if cfg.strategy == "buy_and_hold":
         return pd.Series(True, index=close.index)
 
+    if cfg.strategy == "kronos_signal":
+        # Signals come from model inference, which is async and lives in the
+        # Kronos service — callers must precompute them and pass `want_long`.
+        raise ValueError("kronos_signal requires a precomputed signal series")
+
     raise ValueError(
         f"unknown strategy {cfg.strategy!r}; available: "
-        "sma_cross, ema_cross, rsi_reversion, buy_and_hold"
+        "sma_cross, ema_cross, rsi_reversion, buy_and_hold, kronos_signal"
     )
 
 
-def run(df: pd.DataFrame, cfg: BacktestConfig) -> BacktestResult:
+def run(
+    df: pd.DataFrame, cfg: BacktestConfig, want_long: pd.Series | None = None
+) -> BacktestResult:
     if len(df) < 30:
         raise ValueError("need at least 30 bars to backtest")
 
-    want_long = _signals(df, cfg)
+    if want_long is None:
+        want_long = _signals(df, cfg)
     cost_rate = (cfg.commission_bps + cfg.slippage_bps) / 10_000.0
 
     cash = cfg.initial_capital
@@ -277,6 +287,7 @@ def walk_forward(
     folds: int = 3,
     train_years: float = 2.0,
     test_years: float = 1.0,
+    want_long: pd.Series | None = None,
 ) -> dict:
     """Rolling train→test validation over calendar slices.
 
@@ -319,8 +330,12 @@ def walk_forward(
         if len(train_df) < 30 or len(test_df) < 30:
             raise ValueError("a walk-forward slice has fewer than 30 bars")
 
-        train_stats = run(train_df, cfg).stats
-        test_stats = run(test_df, cfg).stats
+        train_stats = run(
+            train_df, cfg, want_long.loc[train_df.index] if want_long is not None else None
+        ).stats
+        test_stats = run(
+            test_df, cfg, want_long.loc[test_df.index] if want_long is not None else None
+        ).stats
 
         fold_rows.append(
             {
