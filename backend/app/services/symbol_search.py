@@ -126,6 +126,30 @@ US_ALIASES: list[tuple[str, str, str]] = [
     ("ETH-USD", "以太坊", "ytf"),
 ]
 
+# Crypto pairs for the 数字货币 workspace — same tuple shape, Yahoo -USD quotes.
+CRYPTO_PAIRS: list[tuple[str, str, str]] = [
+    ("SOL-USD", "索拉纳", "sln"),
+    ("BNB-USD", "币安币", "bab"),
+    ("XRP-USD", "瑞波币", "rbb"),
+    ("DOGE-USD", "狗狗币", "ggb"),
+    ("ADA-USD", "艾达币", "adb"),
+    ("AVAX-USD", "雪崩", "xb"),
+    ("DOT-USD", "波卡", "bk"),
+    ("LTC-USD", "莱特币", "ltb"),
+    ("LINK-USD", "Chainlink", "link"),
+    ("TRX-USD", "波场", "bc"),
+    ("SHIB-USD", "柴犬币", "cqb"),
+    ("TON-USD", "Toncoin", "ton"),
+    ("NEAR-USD", "NEAR", "near"),
+    ("UNI-USD", "Uniswap", "uni"),
+    ("ATOM-USD", "Cosmos", "atom"),
+    ("XLM-USD", "恒星币", "hxb"),
+    ("ETC-USD", "以太经典", "ytjd"),
+    ("FIL-USD", "Filecoin", "fil"),
+    ("APT-USD", "Aptos", "apt"),
+    ("ARB-USD", "Arbitrum", "arb"),
+]
+
 _CJK = re.compile(r"[一-鿿]")
 
 
@@ -152,7 +176,7 @@ def search_local(query: str, limit: int = 8) -> list[dict]:
     q_lower = q.lower()
 
     scored: list[tuple[int, dict]] = []
-    for symbol, name, abbr in [*CN_STOCKS, *US_ALIASES]:
+    for symbol, name, abbr in [*CN_STOCKS, *US_ALIASES, *CRYPTO_PAIRS]:
         code = symbol.split(".")[0]
         score = None
         if q_upper == symbol or q_upper == code:

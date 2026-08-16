@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     quote_cache_seconds: int = 15
     ws_poll_seconds: float = 5.0
 
+    # --- Kronos K-line forecasting (optional; needs torch installed) ---
+    # "auto" = enabled whenever torch imports (local dev / Docker with the
+    # kronos extra); "0" = force off. Vercel ships without torch, so the
+    # feature reports disabled there instead of breaking the deploy.
+    kronos_enabled: str = "auto"
+    kronos_model: str = "NeoQuasar/Kronos-small"
+    kronos_tokenizer: str = "NeoQuasar/Kronos-Tokenizer-base"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

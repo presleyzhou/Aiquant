@@ -10,8 +10,8 @@ interface Props {
   onSubmit?: () => void;
   placeholder?: string;
   disabled?: boolean;
-  /** Rank this market's symbols first ("cn" → .SS/.SZ on top). */
-  marketBias?: "us" | "cn";
+  /** Rank this market's symbols first ("crypto" → -USD pairs on top). */
+  marketBias?: "us" | "crypto";
   className?: string;
 }
 
@@ -39,10 +39,10 @@ export function SymbolSearch({
 
   const rank = (results: SymbolHit[]): SymbolHit[] => {
     if (!marketBias) return results;
-    const isCN = (s: string) => /\.(SS|SZ)$/i.test(s);
+    const isCrypto = (s: string) => /-(USD|USDT)$/i.test(s);
     return [...results].sort((a, b) => {
-      const aMine = isCN(a.symbol) === (marketBias === "cn") ? 0 : 1;
-      const bMine = isCN(b.symbol) === (marketBias === "cn") ? 0 : 1;
+      const aMine = isCrypto(a.symbol) === (marketBias === "crypto") ? 0 : 1;
+      const bMine = isCrypto(b.symbol) === (marketBias === "crypto") ? 0 : 1;
       return aMine - bMine;
     });
   };

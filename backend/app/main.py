@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import ai, analytics, market, marketplace, payments, ws
+from app.api import ai, analytics, kronos, market, marketplace, payments, ws
 from app.config import get_settings
 
 logging.basicConfig(
@@ -36,6 +36,7 @@ app.include_router(analytics.router)
 app.include_router(marketplace.router)
 app.include_router(payments.router)
 app.include_router(ai.router)
+app.include_router(kronos.router)
 app.include_router(ws.router)
 
 

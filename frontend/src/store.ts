@@ -95,7 +95,7 @@ export function recordPurchase(itemId: string, record: PurchaseRecord): void {
 export interface BacktestPreset {
   name: string;
   payload: Record<string, unknown>;
-  /** Explicit target workspace ("us" | "cn"). Absent = whichever terminal the
+  /** Explicit target workspace ("us" | "crypto"). Absent = whichever terminal the
    * user last had open (marketplace flow). */
   market?: string;
 }

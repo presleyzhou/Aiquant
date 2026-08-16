@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, type Quote } from "./api";
 import { AIPanel } from "./components/AIPanel";
 import { BacktestPanel } from "./components/BacktestPanel";
+import { KronosPanel } from "./components/KronosPanel";
 import { ChartPanel } from "./components/ChartPanel";
 import { MarketPage } from "./components/MarketPage";
 import { StrategyLab } from "./components/StrategyLab";
@@ -44,24 +45,24 @@ export default function App() {
   const [lastTerminal, setLastTerminal] = useState<MarketId>("us");
   const [lists, setLists] = useState<Record<MarketId, string[]>>(() => ({
     us: loadWatchlist(MARKETS.us),
-    cn: loadWatchlist(MARKETS.cn),
+    crypto: loadWatchlist(MARKETS.crypto),
   }));
   const [actives, setActives] = useState<Record<MarketId, string>>(() => ({
     us: loadWatchlist(MARKETS.us)[0] ?? "AAPL",
-    cn: loadWatchlist(MARKETS.cn)[0] ?? "600519.SS",
+    crypto: loadWatchlist(MARKETS.crypto)[0] ?? "BTC-USD",
   }));
   const [ai, setAi] = useState<AiState>({ enabled: false, model: null });
 
   // One socket / poll loop for both markets.
   const allSymbols = useMemo(
-    () => [...new Set([...lists.us, ...lists.cn])].slice(0, 25),
+    () => [...new Set([...lists.us, ...lists.crypto])].slice(0, 25),
     [lists],
   );
   const { quotes, status } = useQuoteStream(allSymbols);
 
   useEffect(() => {
     localStorage.setItem(MARKETS.us.storageKey, JSON.stringify(lists.us));
-    localStorage.setItem(MARKETS.cn.storageKey, JSON.stringify(lists.cn));
+    localStorage.setItem(MARKETS.crypto.storageKey, JSON.stringify(lists.crypto));
   }, [lists]);
 
   useEffect(() => {
@@ -73,7 +74,7 @@ export default function App() {
 
   const switchView = (next: View) => {
     setView(next);
-    if (next === "us" || next === "cn") setLastTerminal(next);
+    if (next === "us" || next === "crypto") setLastTerminal(next);
   };
 
   const add = (market: MarketId, symbol: string) => {
@@ -97,14 +98,14 @@ export default function App() {
     setActives((prev) => ({ ...prev, [market]: symbol }));
   };
 
-  const tapeMarket: MarketId = view === "us" || view === "cn" ? view : lastTerminal;
+  const tapeMarket: MarketId = view === "us" || view === "crypto" ? view : lastTerminal;
   const tapeProfile = MARKETS[tapeMarket];
   const activeQuote: Quote | undefined = quotes[actives[tapeMarket]];
 
   /** Run an AI-generated strategy: put its symbol in the right workspace,
    * queue the preset addressed to that workspace, and switch over. */
   const runGeneratedStrategy = (symbol: string, name: string, payload: Record<string, unknown>) => {
-    const market: MarketId = /\.(SS|SZ)$/i.test(symbol) ? "cn" : "us";
+    const market: MarketId = /-(USD|USDT)$/i.test(symbol) ? "crypto" : "us";
     add(market, symbol);
     queueBacktestPreset({ name, payload: { ...payload, symbol }, market });
     switchView(market);
@@ -121,7 +122,7 @@ export default function App() {
           {(
             [
               ["us", t("nav.us")],
-              ["cn", t("nav.cn")],
+              ["crypto", t("nav.crypto")],
               ["lab", t("nav.lab")],
               ["market", t("nav.market")],
             ] as Array<[View, string]>
@@ -190,7 +191,7 @@ export default function App() {
           chart state, or an in-flight generation on every tab switch. */}
       {view === "market" && <MarketPage onRunStrategy={() => switchView(lastTerminal)} />}
       <StrategyLab hidden={view !== "lab"} aiEnabled={ai.enabled} onRun={runGeneratedStrategy} />
-      {(["us", "cn"] as MarketId[]).map((market) => (
+      {(["us", "crypto"] as MarketId[]).map((market) => (
         <TerminalWorkspace
           key={market}
           profile={MARKETS[market]}
@@ -247,6 +248,7 @@ function TerminalWorkspace(props: {
         {active ? (
           <>
             <ChartPanel symbol={active} palette={candlePalette(profile)} />
+            <KronosPanel symbol={active} marketId={profile.id} />
             <BacktestPanel symbol={active} marketId={profile.id} presetTarget={presetTarget} />
           </>
         ) : (

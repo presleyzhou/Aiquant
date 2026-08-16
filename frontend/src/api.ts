@@ -21,6 +21,46 @@ export interface Candle {
   volume: number;
 }
 
+export interface KronosBar {
+  time: number;
+  close: number;
+  high: number;
+  low: number;
+}
+
+export interface KronosForecast {
+  symbol: string;
+  market: "us" | "crypto";
+  model: string;
+  device: string;
+  horizon: number;
+  preset: {
+    calendar: string;
+    temperature: number;
+    top_p: number;
+    sample_count: number;
+    context_bars: number;
+  };
+  history: Array<{ time: number; close: number }>;
+  forecast: KronosBar[];
+  summary: {
+    last_close: number;
+    pred_close: number;
+    change_pct: number | null;
+    pred_max: number;
+    pred_min: number;
+    up_days: number;
+  };
+}
+
+export interface KronosStatus {
+  enabled: boolean;
+  loaded: boolean;
+  model: string | null;
+  device: string | null;
+  error: string | null;
+}
+
 export interface Point {
   time: number;
   value: number;
@@ -154,6 +194,15 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(json<BacktestResult>),
+
+  kronosStatus: () => fetch("/api/kronos/status").then(json<KronosStatus>),
+
+  kronosForecast: (symbol: string, horizon?: number) =>
+    fetch("/api/kronos/forecast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(horizon ? { symbol, horizon } : { symbol }),
+    }).then(json<KronosForecast>),
 
   aiStatus: () =>
     fetch("/api/ai/status").then(

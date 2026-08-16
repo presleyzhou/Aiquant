@@ -95,6 +95,19 @@ vercel --prod   # 生产环境
 | `CLAUDE_EFFORT` | `high` | `low`/`medium`/`high`/`xhigh`/`max`，控制思考深度与花费 |
 | `ALPHA_VANTAGE_KEY` | 空 | 仅供内嵌的 Alpha Vantage provider 使用；yfinance 无需 key |
 | `CORS_ORIGINS` | localhost | 仅当前后端不同源时才需要 |
+| `KRONOS_ENABLED` | `auto` | Kronos K线预测；`auto` = 装了 torch 就启用，`0` 强制关闭 |
+| `KRONOS_MODEL` | `NeoQuasar/Kronos-small` | 也可换 `NeoQuasar/Kronos-mini`（更快）或 `-base`（更准） |
+
+**Kronos K线预测（可选，本地/Docker）**：开源 K线基础模型
+[shiyu-coder/Kronos](https://github.com/shiyu-coder/Kronos)（MIT，已 vendor 到
+`backend/vendor/kronos/`）。需要 torch，故不进 Vercel 打包（超 225MB 上限），线上会显示"未启用"：
+
+```bash
+uv pip install -r backend/requirements-kronos.txt
+```
+
+首次预测会从 HuggingFace 下载 checkpoint（约 100MB），之后常驻内存。美股用工作日历、
+低温采样（T=0.7）；数字货币用 7×24 日历、高温宽核采样（T=1.0, top_p=0.95）并多取一次采样平均。
 
 ---
 
@@ -113,6 +126,8 @@ vercel --prod   # 生产环境
 | POST | `/api/analytics/backtest` | 运行回测 |
 | GET | `/api/marketplace/items?type=&q=` | 市场目录（策略/技能/数据，支持筛选搜索） |
 | GET | `/api/marketplace/items/{id}` | 单个条目详情 |
+| GET | `/api/kronos/status` | Kronos 预测是否可用、模型与设备 |
+| POST | `/api/kronos/forecast` | K线预测 `{symbol, horizon?}`（美股/加密自动分流参数） |
 | GET | `/api/ai/status` | AI 是否可用、用的哪个模型 |
 | POST | `/api/ai/analyze` | 流式分析（NDJSON） |
 | WS | `/ws/quotes` | 实时报价推送 |

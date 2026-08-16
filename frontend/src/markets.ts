@@ -1,13 +1,10 @@
-/** Market profiles: the US terminal and the A-share terminal share every
+/** Market profiles: the US terminal and the crypto terminal share every
  * component; only the defaults, storage keys, and colour convention differ.
- *
- * Colour convention matters: mainland China charts draw gains in red and
- * losses in green — the exact opposite of US convention. Each workspace sets
- * `--rise`/`--fall` CSS variables so the same `.up`/`.dn` classes (and the
- * candle palette) render correctly inside either tab.
+ * `upIsRed` survives for any future market with the mainland-China红涨绿跌
+ * convention; both current workspaces use green-up.
  */
 
-export type MarketId = "us" | "cn";
+export type MarketId = "us" | "crypto";
 
 export interface MarketProfile {
   id: MarketId;
@@ -44,39 +41,39 @@ export const MARKETS: Record<MarketId, MarketProfile> = {
     placeholder: "代码，如 TSLA",
     hint: "",
   },
-  cn: {
-    id: "cn",
-    label: "A股",
-    storageKey: "aiquant.watchlist.cn",
+  crypto: {
+    id: "crypto",
+    label: "数字货币",
+    storageKey: "aiquant.watchlist.crypto",
     defaults: [
-      "000001.SS",
-      "600519.SS",
-      "300750.SZ",
-      "002594.SZ",
-      "601318.SS",
-      "000858.SZ",
-      "600036.SS",
+      "BTC-USD",
+      "ETH-USD",
+      "SOL-USD",
+      "BNB-USD",
+      "XRP-USD",
+      "DOGE-USD",
+      "ADA-USD",
     ],
     names: {
-      "000001.SS": "上证指数",
-      "399001.SZ": "深证成指",
-      "600519.SS": "贵州茅台",
-      "300750.SZ": "宁德时代",
-      "002594.SZ": "比亚迪",
-      "601318.SS": "中国平安",
-      "000858.SZ": "五粮液",
-      "600036.SS": "招商银行",
-      "601899.SS": "紫金矿业",
-      "600900.SS": "长江电力",
-      "000333.SZ": "美的集团",
-      "002415.SZ": "海康威视",
-      "600030.SS": "中信证券",
-      "601888.SS": "中国中免",
-      "603259.SS": "药明康德",
+      "BTC-USD": "比特币",
+      "ETH-USD": "以太坊",
+      "SOL-USD": "索拉纳",
+      "BNB-USD": "币安币",
+      "XRP-USD": "瑞波币",
+      "DOGE-USD": "狗狗币",
+      "ADA-USD": "艾达币",
+      "AVAX-USD": "雪崩",
+      "DOT-USD": "波卡",
+      "LTC-USD": "莱特币",
+      "LINK-USD": "Chainlink",
+      "TRX-USD": "波场",
+      "SHIB-USD": "柴犬币",
+      "TON-USD": "Toncoin",
+      "NEAR-USD": "NEAR",
     },
-    upIsRed: true,
-    placeholder: "代码，如 600519.SS",
-    hint: "沪市 .SS / 深市 .SZ，数据来自 Yahoo（延时约 15 分钟）",
+    upIsRed: false,
+    placeholder: "代码，如 ETH-USD",
+    hint: "Yahoo 行情，7×24 小时交易，波动远大于股票",
   },
 };
 

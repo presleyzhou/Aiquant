@@ -15,7 +15,7 @@ const PERIODS = ["1y", "2y", "5y", "max"];
 
 interface Props {
   symbol: string;
-  /** Which workspace this panel lives in ("us" | "cn"). Presets that name a
+  /** Which workspace this panel lives in ("us" | "crypto"). Presets that name a
    *  market are claimed by the matching panel. */
   marketId?: string;
   /** Fallback claim for presets without an explicit market (marketplace flow):

@@ -1547,6 +1547,22 @@ tbody tr:hover td {
   background: rgba(255, 176, 0, 0.06);
 }
 
+.kr-chart {
+  padding: 6px 10px 0;
+}
+
+.kr-preset {
+  padding: 8px 14px 0;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.kr-disclaimer {
+  padding: 4px 14px 12px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
 .skill-chip {
   display: inline-flex;
   align-items: center;

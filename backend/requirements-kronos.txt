@@ -1,0 +1,14 @@
+# Optional extra: Kronos K-line forecasting (local dev / Docker only).
+#
+# Deliberately NOT part of the root requirements.txt — torch alone is far
+# beyond Vercel's 225MB serverless bundle cap, so production reports the
+# feature as disabled while local runs get real inference:
+#
+#   uv pip install -r backend/requirements-kronos.txt
+#
+# First forecast downloads the checkpoint (~100MB) from HuggingFace
+# (NeoQuasar/Kronos-small + NeoQuasar/Kronos-Tokenizer-base).
+torch>=2.0
+einops>=0.8
+huggingface_hub>=0.30
+safetensors>=0.4

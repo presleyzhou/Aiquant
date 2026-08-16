@@ -41,7 +41,7 @@ export function Watchlist({ profile, symbols, quotes, active, onSelect, onAdd, o
           value={draft}
           onChange={setDraft}
           marketBias={profile.id}
-          placeholder={t(profile.id === "cn" ? "watch.ph.cn" : "watch.ph.us")}
+          placeholder={t(profile.id === "crypto" ? "watch.ph.crypto" : "watch.ph.us")}
           onPick={(hit) => {
             onAdd(hit.symbol.toUpperCase());
             setDraft("");
@@ -58,7 +58,7 @@ export function Watchlist({ profile, symbols, quotes, active, onSelect, onAdd, o
           {t("watch.add")}
         </button>
       </form>
-      {profile.id === "cn" && <div className="watch-hint">{t("watch.hint.cn")}</div>}
+      {profile.id === "crypto" && <div className="watch-hint">{t("watch.hint.crypto")}</div>}
 
       <div className="panel__body panel__body--flush">
         {symbols.length === 0 ? (

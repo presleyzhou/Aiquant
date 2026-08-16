@@ -21,7 +21,7 @@ const LANG_KEY = "aiquant.lang";
 const zh = {
   // header / app
   "nav.us": "美股",
-  "nav.cn": "A股",
+  "nav.crypto": "数字货币",
   "nav.lab": "AI 策略",
   "nav.market": "市场",
   "status.quotes": "行情",
@@ -40,8 +40,8 @@ const zh = {
   "watch.empty": "自选列表为空",
   "watch.remove": "移除",
   "watch.ph.us": "代码 / 名称，如 TSLA、苹果",
-  "watch.ph.cn": "代码 / 名称 / 拼音，如 gzmt",
-  "watch.hint.cn": "沪市 .SS / 深市 .SZ，支持中文名与拼音首字母，数据来自 Yahoo（延时约 15 分钟）",
+  "watch.ph.crypto": "代码 / 名称，如 ETH-USD、以太坊",
+  "watch.hint.crypto": "-USD 计价对，7×24 小时交易；支持中文名搜索，行情来自 Yahoo",
   // chart
   "chart.trend": "走势",
   "chart.loading": "加载行情…",
@@ -144,6 +144,29 @@ const zh = {
   "pay.demoHint": "站长在 .env 配置 COINBASE_COMMERCE_API_KEY 后，此处会变为真实的托管加密支付页面。",
   "pay.demoConfirm": "模拟支付完成（演示解锁）",
   "pay.expired": "支付已过期或被取消，请重新发起。",
+  // kronos forecast
+  "kr.title": "Kronos K线预测",
+  "kr.off": "未启用",
+  "kr.notice":
+    "Kronos 预测未启用：需要安装 torch（backend/requirements-kronos.txt），线上 Serverless 环境不包含该模型，本地或 Docker 运行时可用。",
+  "kr.horizon": "预测窗口",
+  "kr.days": "{n} 天",
+  "kr.bdays": "{n} 个交易日",
+  "kr.run": "生成预测",
+  "kr.running": "推理中…",
+  "kr.hint":
+    "Kronos 是开源 K线基础模型（450+ 交易所数据预训练）。点击「生成预测」，模型将基于最近 400 根日线外推未来走势。",
+  "kr.stale": "结果对应 {sym}，切换标的后请重新生成。",
+  "kr.predClose": "{n} 日后预测收盘",
+  "kr.change": "预测涨跌",
+  "kr.range": "预测区间",
+  "kr.upDays": "预测上涨天数",
+  "kr.preset.us": "美股参数：工作日历",
+  "kr.preset.crypto": "加密参数：7×24 日历",
+  "kr.samples": "{n} 次采样平均",
+  "kr.context": "上下文 {n} 根",
+  "kr.disclaimer":
+    "模型输出为概率采样结果，每次生成都会不同，不构成投资建议。",
   // strategy lab
   "lab.title": "AI 策略工坊",
   "lab.sub1": "描述目标，Claude 会先判断标的性格，在样本内窗口用",
@@ -229,7 +252,7 @@ export type MsgKey = keyof typeof zh;
 
 const en: Record<MsgKey, string> = {
   "nav.us": "US",
-  "nav.cn": "A-Shares",
+  "nav.crypto": "Crypto",
   "nav.lab": "AI Lab",
   "nav.market": "Market",
   "status.quotes": "Quotes",
@@ -247,9 +270,9 @@ const en: Record<MsgKey, string> = {
   "watch.empty": "Watchlist is empty",
   "watch.remove": "Remove",
   "watch.ph.us": "Symbol or name, e.g. TSLA / Apple",
-  "watch.ph.cn": "Code / name / pinyin, e.g. gzmt",
-  "watch.hint.cn":
-    "Shanghai .SS / Shenzhen .SZ — Chinese names and pinyin initials supported. Yahoo data, ~15 min delay.",
+  "watch.ph.crypto": "Symbol or name, e.g. ETH-USD / Ethereum",
+  "watch.hint.crypto":
+    "-USD pairs, trading 24×7 — far more volatile than equities. Yahoo quotes.",
   "chart.trend": "Chart",
   "chart.loading": "Loading…",
   "chart.failed": "Failed to load",
@@ -351,6 +374,28 @@ const en: Record<MsgKey, string> = {
     "Once the operator sets COINBASE_COMMERCE_API_KEY in .env, this becomes a real hosted crypto checkout.",
   "pay.demoConfirm": "Simulate payment (demo unlock)",
   "pay.expired": "The charge expired or was cancelled — start again.",
+  "kr.title": "Kronos Forecast",
+  "kr.off": "disabled",
+  "kr.notice":
+    "Kronos forecasting is disabled: it needs torch (backend/requirements-kronos.txt). The serverless deployment ships without the model; run locally or in Docker to enable it.",
+  "kr.horizon": "Horizon",
+  "kr.days": "{n} days",
+  "kr.bdays": "{n} trading days",
+  "kr.run": "Forecast",
+  "kr.running": "Inferring…",
+  "kr.hint":
+    "Kronos is an open-source K-line foundation model (pretrained on 45+ exchanges). Hit Forecast and it extrapolates from the last 400 daily bars.",
+  "kr.stale": "Result is for {sym} — regenerate after switching symbols.",
+  "kr.predClose": "Close in {n} bars",
+  "kr.change": "Predicted change",
+  "kr.range": "Predicted range",
+  "kr.upDays": "Up days",
+  "kr.preset.us": "US preset: business-day calendar",
+  "kr.preset.crypto": "Crypto preset: 24×7 calendar",
+  "kr.samples": "avg of {n} samples",
+  "kr.context": "{n}-bar context",
+  "kr.disclaimer":
+    "Model output is a probabilistic sample — every run differs. Not investment advice.",
   "lab.title": "AI Strategy Lab",
   "lab.sub1": "Describe your goal. Claude reads the instrument's character, searches parameters in-sample with the ",
   "lab.sub.b": "real backtest engine",
