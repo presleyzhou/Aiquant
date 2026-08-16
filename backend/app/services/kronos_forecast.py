@@ -114,7 +114,9 @@ class KronosService:
         try:
             tokenizer = KronosTokenizer.from_pretrained(get_settings().kronos_tokenizer)
             model = Kronos.from_pretrained(get_settings().kronos_model)
-            self._predictor = KronosPredictor(model, tokenizer, max_context=512)
+            self._predictor = KronosPredictor(
+                model, tokenizer, device=get_settings().kronos_device or None, max_context=512
+            )
             log.info(
                 "Kronos loaded: %s on %s", get_settings().kronos_model, self._predictor.device
             )

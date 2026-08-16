@@ -97,6 +97,8 @@ vercel --prod   # 生产环境
 | `CORS_ORIGINS` | localhost | 仅当前后端不同源时才需要 |
 | `KRONOS_ENABLED` | `auto` | Kronos K线预测；`auto` = 装了 torch 就启用，`0` 强制关闭 |
 | `KRONOS_MODEL` | `NeoQuasar/Kronos-small` | 也可换 `NeoQuasar/Kronos-mini`（更快）或 `-base`（更准） |
+| `KRONOS_REMOTE_URL` | 空 | 远程 Kronos 推理服务地址；本地无 torch 时（如 Vercel）自动转发 |
+| `KRONOS_DEVICE` | 自动 | 强制推理设备：`cpu` / `mps` / `cuda:0` |
 
 **Kronos K线预测（可选，本地/Docker）**：开源 K线基础模型
 [shiyu-coder/Kronos](https://github.com/shiyu-coder/Kronos)（MIT，已 vendor 到
@@ -108,6 +110,11 @@ uv pip install -r backend/requirements-kronos.txt
 
 首次预测会从 HuggingFace 下载 checkpoint（约 100MB），之后常驻内存。美股用工作日历、
 低温采样（T=0.7）；数字货币用 7×24 日历、高温宽核采样（T=1.0, top_p=0.95）并多取一次采样平均。
+
+**让 Vercel 线上也能预测**：把 `deploy/kronos-space/` 部署到 HuggingFace Spaces
+（免费 CPU）或 Fly/Railway，再在 Vercel 配 `KRONOS_REMOTE_URL=<服务地址>` 即可 ——
+Vercel 后端会把 `/api/kronos/*` 服务器侧转发过去（无 CORS、前端零改动）。
+详见 [deploy/kronos-space/README.md](deploy/kronos-space/README.md)。
 
 ---
 

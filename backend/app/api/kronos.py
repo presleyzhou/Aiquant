@@ -1,20 +1,35 @@
 """Kronos K-line forecast endpoints.
 
-POST /api/kronos/forecast is CPU/GPU-bound for a few seconds, so the actual
-inference runs in a worker thread; the service serializes runs internally.
+Two execution modes, checked in order:
+
+1. **Local inference** — torch is installed (dev box, Docker with the kronos
+   extra): run the vendored model in-process in a worker thread.
+2. **Remote proxy** — torch is absent but ``KRONOS_REMOTE_URL`` points at a
+   Kronos-capable deployment of this same backend (HF Space / Fly / Railway).
+   This is how the Vercel deployment serves real forecasts while staying
+   under the serverless bundle cap. Proxying happens server-side, so the
+   browser never deals with CORS or a second origin.
+
+With neither available the endpoints degrade to a clear "disabled" status.
 """
 
 from __future__ import annotations
 
 import asyncio
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.config import get_settings
 from app.services.datasource import market_data
 from app.services.kronos_forecast import PRESETS, infer_market, kronos_service
 
 router = APIRouter(prefix="/api/kronos", tags=["kronos"])
+
+# Remote inference budget: a cold HF Space needs time to wake and (on the very
+# first request after a rebuild) to load the checkpoint into memory.
+_REMOTE_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
 
 
 class ForecastRequest(BaseModel):
@@ -23,19 +38,52 @@ class ForecastRequest(BaseModel):
     market: str | None = None  # "us" | "crypto"; inferred from the symbol if absent
 
 
+def _remote_base() -> str | None:
+    url = get_settings().kronos_remote_url
+    return url.rstrip("/") if url else None
+
+
 @router.get("/status")
 async def kronos_status() -> dict:
-    return kronos_service.status()
+    if kronos_service.enabled():
+        return {**kronos_service.status(), "mode": "local"}
+
+    remote = _remote_base()
+    if not remote:
+        return {**kronos_service.status(), "mode": "off"}
+
+    try:
+        async with httpx.AsyncClient(timeout=_REMOTE_TIMEOUT) as client:
+            resp = await client.get(f"{remote}/api/kronos/status")
+            resp.raise_for_status()
+            body = resp.json()
+    except Exception as exc:
+        return {
+            **kronos_service.status(),
+            "mode": "remote",
+            "enabled": False,
+            "error": f"remote unreachable: {exc}",
+        }
+    body["mode"] = "remote"
+    return body
 
 
 @router.post("/forecast")
 async def kronos_forecast(req: ForecastRequest) -> dict:
-    if not kronos_service.enabled():
-        raise HTTPException(
-            status_code=503,
-            detail="Kronos is not enabled on this deployment (torch not installed).",
-        )
+    if kronos_service.enabled():
+        return await _forecast_local(req)
 
+    remote = _remote_base()
+    if remote:
+        return await _forecast_remote(remote, req)
+
+    raise HTTPException(
+        status_code=503,
+        detail="Kronos is not enabled on this deployment (torch not installed).",
+    )
+
+
+async def _forecast_local(req: ForecastRequest) -> dict:
     symbol = req.symbol.upper().strip()
     market = req.market if req.market in PRESETS else infer_market(symbol)
     horizon = req.horizon or PRESETS[market].default_horizon
@@ -53,3 +101,20 @@ async def kronos_forecast(req: ForecastRequest) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Kronos inference failed: {exc}") from exc
+
+
+async def _forecast_remote(remote: str, req: ForecastRequest) -> dict:
+    payload = req.model_dump(exclude_none=True)
+    try:
+        async with httpx.AsyncClient(timeout=_REMOTE_TIMEOUT) as client:
+            resp = await client.post(f"{remote}/api/kronos/forecast", json=payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Kronos remote unreachable: {exc}") from exc
+
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return resp.json()

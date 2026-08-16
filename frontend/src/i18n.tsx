@@ -148,7 +148,7 @@ const zh = {
   "kr.title": "Kronos K线预测",
   "kr.off": "未启用",
   "kr.notice":
-    "Kronos 预测未启用：需要安装 torch（backend/requirements-kronos.txt），线上 Serverless 环境不包含该模型，本地或 Docker 运行时可用。",
+    "Kronos 预测未启用：本地/Docker 安装 torch（backend/requirements-kronos.txt）即可用；线上可由站长部署 deploy/kronos-space 推理服务并配置 KRONOS_REMOTE_URL 接入。",
   "kr.horizon": "预测窗口",
   "kr.days": "{n} 天",
   "kr.bdays": "{n} 个交易日",
@@ -377,7 +377,7 @@ const en: Record<MsgKey, string> = {
   "kr.title": "Kronos Forecast",
   "kr.off": "disabled",
   "kr.notice":
-    "Kronos forecasting is disabled: it needs torch (backend/requirements-kronos.txt). The serverless deployment ships without the model; run locally or in Docker to enable it.",
+    "Kronos forecasting is disabled here. Locally, install torch (backend/requirements-kronos.txt); for production, deploy the deploy/kronos-space inference service and set KRONOS_REMOTE_URL.",
   "kr.horizon": "Horizon",
   "kr.days": "{n} days",
   "kr.bdays": "{n} trading days",

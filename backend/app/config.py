@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     kronos_enabled: str = "auto"
     kronos_model: str = "NeoQuasar/Kronos-small"
     kronos_tokenizer: str = "NeoQuasar/Kronos-Tokenizer-base"
+    # Force a torch device ("cpu" | "mps" | "cuda:0"); empty = auto-detect.
+    kronos_device: str | None = None
+    # Base URL of a remote Kronos-capable deployment of this same backend
+    # (e.g. an HF Space / Fly / Railway host). When torch is missing locally —
+    # the Vercel case — /api/kronos/* proxies there, so production gets real
+    # forecasts without torch in the serverless bundle.
+    kronos_remote_url: str | None = None
 
     @property
     def cors_origin_list(self) -> list[str]:

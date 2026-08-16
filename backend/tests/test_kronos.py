@@ -128,3 +128,99 @@ def test_forecast_endpoint_503_when_disabled(monkeypatch):
     client = TestClient(app)
     resp = client.post("/api/kronos/forecast", json={"symbol": "AAPL"})
     assert resp.status_code == 503
+
+
+# ------------------------------------------------------------- remote proxy
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, body: dict):
+        self.status_code = status_code
+        self._body = body
+        self.text = str(body)
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _FakeAsyncClient:
+    """Stands in for httpx.AsyncClient in the proxy path."""
+
+    calls: list[tuple[str, str, dict | None]] = []
+    response: _FakeResponse = _FakeResponse(200, {})
+
+    def __init__(self, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url):
+        type(self).calls.append(("GET", url, None))
+        return type(self).response
+
+    async def post(self, url, json=None):
+        type(self).calls.append(("POST", url, json))
+        return type(self).response
+
+
+@pytest.fixture()
+def remote_mode(monkeypatch):
+    from app.api import kronos as kronos_api
+    from app.config import get_settings
+
+    monkeypatch.setattr(kronos_service, "enabled", lambda: False)
+    monkeypatch.setattr(get_settings(), "kronos_remote_url", "https://remote.example/")
+    monkeypatch.setattr(kronos_api.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.calls = []
+    yield
+    monkeypatch.setattr(get_settings(), "kronos_remote_url", None)
+
+
+def test_status_proxies_to_remote(remote_mode):
+    _FakeAsyncClient.response = _FakeResponse(
+        200, {"enabled": True, "loaded": True, "model": "NeoQuasar/Kronos-small"}
+    )
+    body = TestClient(app).get("/api/kronos/status").json()
+    assert body["enabled"] is True
+    assert body["mode"] == "remote"
+    # trailing slash on the configured URL must not produce a double slash
+    assert _FakeAsyncClient.calls == [("GET", "https://remote.example/api/kronos/status", None)]
+
+
+def test_forecast_proxies_to_remote(remote_mode):
+    _FakeAsyncClient.response = _FakeResponse(200, {"symbol": "AAPL", "forecast": []})
+    resp = TestClient(app).post("/api/kronos/forecast", json={"symbol": "AAPL", "horizon": 14})
+    assert resp.status_code == 200
+    assert resp.json()["symbol"] == "AAPL"
+    assert _FakeAsyncClient.calls == [
+        ("POST", "https://remote.example/api/kronos/forecast", {"symbol": "AAPL", "horizon": 14})
+    ]
+
+
+def test_forecast_remote_error_passthrough(remote_mode):
+    _FakeAsyncClient.response = _FakeResponse(404, {"detail": "no history for 'ZZZZ'"})
+    resp = TestClient(app).post("/api/kronos/forecast", json={"symbol": "ZZZZ"})
+    assert resp.status_code == 404
+    assert "no history" in resp.json()["detail"]
+
+
+def test_status_remote_unreachable_degrades(remote_mode):
+    class _Boom(_FakeAsyncClient):
+        async def get(self, url):
+            raise OSError("connection refused")
+
+    from app.api import kronos as kronos_api
+
+    kronos_api.httpx.AsyncClient = _Boom
+    body = TestClient(app).get("/api/kronos/status").json()
+    assert body["enabled"] is False
+    assert body["mode"] == "remote"
+    assert "unreachable" in body["error"]

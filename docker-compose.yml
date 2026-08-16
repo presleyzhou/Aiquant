@@ -5,6 +5,7 @@ services:
       # Optional — without it the site still serves quotes, indicators and
       # backtests; only the AI panel is disabled.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      KRONOS_REMOTE_URL: ${KRONOS_REMOTE_URL:-}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5}
       CLAUDE_EFFORT: ${CLAUDE_EFFORT:-high}
       ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY:-}
