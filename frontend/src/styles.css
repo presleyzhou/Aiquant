@@ -103,7 +103,10 @@ body::before {
   flex-direction: column;
   gap: 8px;
   min-height: 0;
-  overflow: hidden;
+  /* Three stacked panels (chart + Kronos + backtest) exceed any viewport —
+     the column scrolls instead of clipping, and panels keep natural height. */
+  overflow-y: auto;
+  overflow-x: hidden;
   background: transparent;
 }
 
@@ -155,6 +158,10 @@ body::before {
   overflow: hidden;
 }
 
+.column > .panel {
+  flex-shrink: 0;
+}
+
 .panel--grow {
   flex: 1;
 }
@@ -168,9 +175,7 @@ body::before {
 
 /* …and the results panel gives back the space by scrolling instead of growing. */
 .panel--results {
-  flex: 0 1 auto;
-  max-height: 48%;
-  overflow-y: auto;
+  flex-shrink: 0;
 }
 
 @media (max-width: 1100px) {
