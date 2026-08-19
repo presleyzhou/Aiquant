@@ -137,6 +137,8 @@ Vercel 后端会把 `/api/kronos/*` 服务器侧转发过去（无 CORS、前端
 | POST | `/api/kronos/forecast` | K线预测 `{symbol, horizon?}`（美股/加密自动分流参数） |
 | POST | `/api/kronos/evaluate` | 滚动历史评估：方向命中率 vs「永远看涨」基线 |
 | POST | `/api/kronos/signal` | kronos_signal 策略的多空锚点（供回测引擎使用） |
+| GET | `/api/factors/config` | 因子挖掘配置：标的池与默认参数 |
+| POST | `/api/factors/mine` | Loop-engineered 因子挖掘（NDJSON 流式：生成→评估→反馈循环） |
 | GET | `/api/ai/status` | AI 是否可用、用的哪个模型 |
 | POST | `/api/ai/analyze` | 流式分析（NDJSON） |
 | WS | `/ws/quotes` | 实时报价推送 |
@@ -147,6 +149,20 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
 ```
 
 ---
+
+## 因子挖掘（Loop Engineering）
+
+「因子挖掘」标签页实现了 2025 年 LLM 因子挖掘文献的迭代反馈架构（对标
+[Chain-of-Alpha](https://arxiv.org/abs/2508.06312) 的生成/优化双链、
+[AlphaAgent](https://arxiv.org/pdf/2502.16789) 的复杂度正则、QuantAgent 的经验累积）：
+
+1. **生成**：Claude 每轮通过强制工具调用提交 N 个因子表达式（安全 DSL，手写解析器，绝不 eval）；
+2. **评估**：服务端确定性数学 —— 对 24 只美股 / 16 个币对的截面逐日计算 Rank IC，
+   前 80% 样本内、后 20% 留出期，另查与已入选因子的冗余度与表达式复杂度；
+3. **反馈**：结果压缩为指令式反馈（信号弱→增强、不稳→平滑、冗余→换结构、解析错误→原文引用）
+   驱动下一轮生成 —— 每一轮都基于上一轮的结果优化。
+
+诚实性设计：留出期永不进入反馈（模型无法拟合）；入选需留出期同号确认；挖不出就如实显示空因子库。
 
 ## 设计要点
 

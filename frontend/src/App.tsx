@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, type Quote } from "./api";
 import { AIPanel } from "./components/AIPanel";
 import { BacktestPanel } from "./components/BacktestPanel";
+import { FactorLab } from "./components/FactorLab";
 import { KronosPanel } from "./components/KronosPanel";
 import { ChartPanel } from "./components/ChartPanel";
 import { MarketPage } from "./components/MarketPage";
@@ -20,7 +21,7 @@ import {
   type MarketProfile,
 } from "./markets";
 
-type View = MarketId | "lab" | "market";
+type View = MarketId | "lab" | "factors" | "market";
 
 function loadWatchlist(profile: MarketProfile): string[] {
   try {
@@ -132,6 +133,7 @@ export default function App() {
               ["us", t("nav.us")],
               ["crypto", t("nav.crypto")],
               ["lab", t("nav.lab")],
+              ["factors", t("nav.factors")],
               ["market", t("nav.market")],
             ] as Array<[View, string]>
           ).map(([value, label]) => (
@@ -199,6 +201,7 @@ export default function App() {
           chart state, or an in-flight generation on every tab switch. */}
       {view === "market" && <MarketPage onRunStrategy={() => switchView(lastTerminal)} />}
       <StrategyLab hidden={view !== "lab"} aiEnabled={ai.enabled} onRun={runGeneratedStrategy} />
+      <FactorLab hidden={view !== "factors"} aiEnabled={ai.enabled} />
       {(["us", "crypto"] as MarketId[]).map((market) => (
         <TerminalWorkspace
           key={market}

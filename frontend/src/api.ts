@@ -325,7 +325,9 @@ export async function streamNDJSON(
 
   if (!res.ok || !res.body) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail ?? `${res.status} ${res.statusText}`);
+    const detail =
+      typeof body.detail === "string" ? body.detail : body.detail ? JSON.stringify(body.detail) : null;
+    throw new Error(detail ?? `${res.status} ${res.statusText}`);
   }
 
   const reader = res.body.getReader();

@@ -1595,6 +1595,104 @@ tbody tr:hover td {
   overflow-y: auto;
 }
 
+/* ------------------------------------------------------------ factor lab --- */
+
+.fl-round {
+  color: var(--amber);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  padding: 10px 0 2px;
+}
+
+.fl-cand {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-bright);
+  border-radius: 5px;
+  padding: 8px 10px;
+  margin: 6px 0;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.fl-cand--ok {
+  border-left-color: var(--green);
+}
+
+.fl-cand--err {
+  border-left-color: var(--red);
+}
+
+.fl-cand__expr {
+  display: block;
+  font-size: 12px;
+  color: var(--cyan);
+  word-break: break-all;
+}
+
+.fl-cand__hypo {
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.fl-cand__metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+.fl-chip {
+  white-space: nowrap;
+}
+
+.fl-verdict {
+  font-weight: 600;
+  margin-left: auto;
+}
+
+.fl-cand__reasons {
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.fl-cand__err {
+  color: var(--red);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.fl-feedback {
+  border: 1px dashed rgba(255, 176, 0, 0.35);
+  border-radius: 5px;
+  padding: 8px 10px;
+  margin: 8px 0;
+  background: rgba(255, 176, 0, 0.04);
+}
+
+.fl-feedback__tag {
+  color: var(--amber);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.fl-feedback pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: inherit;
+}
+
+.fl-how p {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .skill-chip {
   display: inline-flex;
   align-items: center;
