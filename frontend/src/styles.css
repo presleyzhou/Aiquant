@@ -2163,3 +2163,73 @@ tbody tr:hover td {
   font-size: 10.5px;
   white-space: nowrap;
 }
+
+/* ------------------------------------------------------- small screens --- */
+
+@media (max-width: 640px) {
+  .header {
+    padding: 6px 10px;
+    gap: 8px;
+  }
+
+  .brand__sub {
+    display: none;
+  }
+
+  /* nav becomes a horizontal scroller instead of wrapping into the status row */
+  .nav-tabs {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .nav-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-tab {
+    padding: 6px 12px;
+    white-space: nowrap;
+  }
+
+  .lab__inner {
+    padding: 20px 12px 32px;
+  }
+
+  .lab-hero__title {
+    font-size: 22px;
+    letter-spacing: 0.1em;
+  }
+
+  .lab-grid {
+    gap: 10px;
+  }
+
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .control-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* comfortable touch targets */
+  .btn,
+  .select,
+  .input {
+    min-height: 38px;
+  }
+
+  table th,
+  table td {
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+
+  .workspace {
+    padding: 6px;
+    gap: 6px;
+  }
+}

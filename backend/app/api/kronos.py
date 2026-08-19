@@ -16,6 +16,7 @@ With neither available the endpoints degrade to a clear "disabled" status.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -30,6 +31,12 @@ router = APIRouter(prefix="/api/kronos", tags=["kronos"])
 # Remote inference budget: a cold HF Space needs time to wake and (on the very
 # first request after a rebuild) to load the checkpoint into memory.
 _REMOTE_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
+
+# Forecasts are sampled, so identical requests within a short window can share
+# one result — this shields the free inference Space from repeat clicks.
+_FORECAST_CACHE: dict[tuple, tuple[float, dict]] = {}
+_FORECAST_TTL = 600.0
+_FORECAST_CACHE_MAX = 64
 
 
 class ForecastRequest(BaseModel):
@@ -81,17 +88,26 @@ async def kronos_status() -> dict:
 
 @router.post("/forecast")
 async def kronos_forecast(req: ForecastRequest) -> dict:
+    key = (req.symbol.upper().strip(), req.market, req.horizon)
+    hit = _FORECAST_CACHE.get(key)
+    if hit and time.time() - hit[0] < _FORECAST_TTL:
+        return hit[1]
+
     if kronos_service.enabled():
-        return await _forecast_local(req)
+        result = await _forecast_local(req)
+    else:
+        remote = _remote_base()
+        if not remote:
+            raise HTTPException(
+                status_code=503,
+                detail="Kronos is not enabled on this deployment (torch not installed).",
+            )
+        result = await _forecast_remote(remote, req)
 
-    remote = _remote_base()
-    if remote:
-        return await _forecast_remote(remote, req)
-
-    raise HTTPException(
-        status_code=503,
-        detail="Kronos is not enabled on this deployment (torch not installed).",
-    )
+    if len(_FORECAST_CACHE) >= _FORECAST_CACHE_MAX:
+        _FORECAST_CACHE.pop(next(iter(_FORECAST_CACHE)))
+    _FORECAST_CACHE[key] = (time.time(), result)
+    return result
 
 
 async def _forecast_local(req: ForecastRequest) -> dict:

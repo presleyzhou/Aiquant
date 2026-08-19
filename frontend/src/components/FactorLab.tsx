@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { streamNDJSON } from "../api";
+import { api, streamNDJSON, type FactorBacktestResult } from "../api";
 import { useT } from "../i18n";
+import {
+  deleteFactor,
+  factorLessons,
+  saveFactorLessons,
+  saveFactors,
+  savedFactors,
+  type SavedFactor,
+} from "../store";
+import { EquityChart } from "./EquityChart";
 
 /** One evaluated candidate (or a failed parse). */
 interface FactorRow {
@@ -41,6 +50,11 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   const [horizon, setHorizon] = useState(10);
   const [rounds, setRounds] = useState(3);
   const [perRound, setPerRound] = useState(4);
+  const [mode, setMode] = useState("standard");
+  const [saved, setSaved] = useState<SavedFactor[]>(savedFactors);
+  const [btFor, setBtFor] = useState<string | null>(null);
+  const [btResult, setBtResult] = useState<FactorBacktestResult | null>(null);
+  const [btError, setBtError] = useState<string | null>(null);
 
   const [running, setRunning] = useState(false);
   const [items, setItems] = useState<LoopItem[]>([]);
@@ -76,9 +90,18 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
     abortRef.current = controller;
 
     try {
+      // Cross-session memory: replay accepted factors (this market) and
+      // stored lessons so the loop continues where earlier sessions stopped.
+      const memory = {
+        accepted: savedFactors()
+          .filter((f) => f.market === market)
+          .map((f) => f.expression)
+          .slice(0, 20),
+        lessons: factorLessons(),
+      };
       await streamNDJSON(
         "/api/factors/mine",
-        { market, horizon, rounds, per_round: perRound },
+        { market, horizon, rounds, per_round: perRound, mode, memory },
         (event) => {
           const e = event as Record<string, unknown> & { type: string };
           switch (e.type) {
@@ -106,9 +129,29 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                 { kind: "feedback", round: e.round as number, text: e.text as string },
               ]);
               break;
-            case "done":
+            case "done": {
               setFinished(true);
+              const zooDone = (e.zoo as FactorRow[]) ?? [];
+              if (zooDone.length) {
+                setSaved(
+                  saveFactors(
+                    zooDone.map((f) => ({
+                      expression: f.expression,
+                      hypothesis: f.hypothesis,
+                      market,
+                      horizon,
+                      is_ic: f.is_ic ?? 0,
+                      is_icir: f.is_icir ?? 0,
+                      oos_ic: f.oos_ic ?? 0,
+                      savedAt: new Date().toISOString(),
+                    })),
+                  ),
+                );
+              }
+              const lessons = (e.lessons as string[]) ?? [];
+              if (lessons.length) saveFactorLessons(lessons);
               break;
+            }
             case "error":
               setError(e.message as string);
               break;
@@ -125,6 +168,27 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   };
 
   const stop = () => abortRef.current?.abort();
+
+  const runFactorBacktest = async (f: SavedFactor) => {
+    setBtFor(f.expression);
+    setBtError(null);
+    try {
+      setBtResult(
+        await api.factorBacktest({
+          expression: f.expression,
+          market: f.market,
+          top_n: 5,
+          rebalance: f.horizon,
+          invert: f.is_ic < 0, // negative IC = signal works inverted
+        }),
+      );
+    } catch (err) {
+      setBtError((err as Error).message);
+      setBtResult(null);
+    } finally {
+      setBtFor(null);
+    }
+  };
 
   return (
     <div className="lab" style={hidden ? { display: "none" } : undefined}>
@@ -204,6 +268,19 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                   </select>
                 </label>
                 <label className="field">
+                  <span className="field__label">{t("fl.mode")}</span>
+                  <select
+                    className="select"
+                    value={mode}
+                    onChange={(e) => setMode(e.target.value)}
+                    disabled={running}
+                  >
+                    <option value="strict">{t("fl.mode.strict")}</option>
+                    <option value="standard">{t("fl.mode.standard")}</option>
+                    <option value="loose">{t("fl.mode.loose")}</option>
+                  </select>
+                </label>
+                <label className="field">
                   <span className="field__label">&nbsp;</span>
                   {running ? (
                     <button className="btn" onClick={stop}>
@@ -216,7 +293,10 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                   )}
                 </label>
               </div>
-              <div className="lab-form__hint">{t("fl.hint")}</div>
+              <div className="lab-form__hint">
+                {t("fl.hint")}
+                {mode === "loose" && <span className="dn"> {t("fl.mode.warn")}</span>}
+              </div>
             </div>
 
             <div className="lab-grid">
@@ -336,6 +416,88 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
 
                 <div className="panel">
                   <div className="panel__head">
+                    <span className="panel__title">{t("fl.mine.title")}</span>
+                    <span className="panel__meta">
+                      {saved.length ? t("fl.mine.meta", { n: String(saved.length) }) : ""}
+                    </span>
+                  </div>
+                  {saved.length === 0 ? (
+                    <div className="empty" style={{ padding: 18 }}>{t("fl.mine.empty")}</div>
+                  ) : (
+                    <ul className="lab-saved">
+                      {saved.map((f) => (
+                        <li key={`${f.market}|${f.expression}`} className="lab-saved__row">
+                          <div style={{ minWidth: 0 }}>
+                            <code style={{ fontSize: 11, wordBreak: "break-all" }}>
+                              {f.expression}
+                            </code>
+                            <div className="dim" style={{ fontSize: 11 }}>
+                              {f.market === "crypto" ? t("fl.market.crypto") : t("fl.market.us")} ·{" "}
+                              IC {fmt(f.is_ic)} · OOS {fmt(f.oos_ic)} · {f.savedAt.slice(0, 10)}
+                            </div>
+                          </div>
+                          <div className="lab-saved__actions">
+                            <button
+                              className="btn"
+                              disabled={btFor === f.expression}
+                              onClick={() => runFactorBacktest(f)}
+                            >
+                              {btFor === f.expression ? "…" : t("fl.bt.run")}
+                            </button>
+                            <button
+                              className="watch-row__x"
+                              title={t("lab.mine.del")}
+                              onClick={() => setSaved(deleteFactor(f.market, f.expression))}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {btError && <div className="err">{btError}</div>}
+                  {btResult && (
+                    <div className="fl-bt">
+                      <div className="fl-bt__head dim">
+                        {t("fl.bt.head", {
+                          n: String(btResult.top_n),
+                          r: String(btResult.rebalance),
+                        })}
+                        {btResult.inverted && ` · ${t("fl.bt.inverted")}`}
+                        {" · "}
+                        {btResult.span.from} → {btResult.span.to}
+                      </div>
+                      <EquityChart
+                        equity={btResult.equity_curve}
+                        benchmark={btResult.benchmark_curve}
+                        drawdown={btResult.drawdown_curve}
+                      />
+                      <div className="stat-grid">
+                        <Stat2
+                          label={t("bt.totalReturn")}
+                          value={pct(btResult.stats.total_return_pct)}
+                          tone={btResult.stats.total_return_pct}
+                        />
+                        <Stat2
+                          label={t("fl.bt.bench")}
+                          value={pct(btResult.stats.benchmark.total_return_pct)}
+                          tone={btResult.stats.benchmark.total_return_pct}
+                        />
+                        <Stat2 label={t("bt.sharpe")} value={btResult.stats.sharpe.toFixed(2)} />
+                        <Stat2
+                          label={t("bt.maxdd")}
+                          value={pct(btResult.stats.max_drawdown_pct)}
+                          tone={-1}
+                        />
+                      </div>
+                      <div className="kr-disclaimer dim">{t("fl.bt.note")}</div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="panel">
+                  <div className="panel__head">
                     <span className="panel__title">{t("fl.how")}</span>
                   </div>
                   <div className="panel__body fl-how">
@@ -366,3 +528,15 @@ function Chip({ label, v, signed }: { label: string; v?: number; signed?: boolea
 
 const fmt = (v?: number) =>
   v === undefined || v === null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(3)}`;
+
+function Stat2({ label, value, tone }: { label: string; value: string; tone?: number }) {
+  const cls = tone === undefined ? "" : tone > 0 ? "up" : tone < 0 ? "dn" : "";
+  return (
+    <div className="stat">
+      <div className="stat__label">{label}</div>
+      <div className={`stat__value ${cls}`}>{value}</div>
+    </div>
+  );
+}
+
+const pct = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(2)}%`;

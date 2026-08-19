@@ -165,3 +165,59 @@ export function deleteStrategy(id: string): void {
     JSON.stringify(savedStrategies().filter((s) => s.id !== id)),
   );
 }
+
+/* ------------------------------------------------- factor mining memory ---
+ * Cross-session memory for the loop-engineered factor miner (AlphaMemo-style):
+ * accepted factors are never resubmitted and feed the redundancy prompt;
+ * lessons are the compressed per-session directives. Both live per-browser. */
+
+const FACTORS_KEY = "aiquant.factors.zoo";
+const LESSONS_KEY = "aiquant.factors.lessons";
+
+export interface SavedFactor {
+  expression: string;
+  hypothesis?: string;
+  market: string;
+  horizon: number;
+  is_ic: number;
+  is_icir: number;
+  oos_ic: number;
+  savedAt: string;
+}
+
+export function savedFactors(): SavedFactor[] {
+  return read<SavedFactor[]>(FACTORS_KEY, []);
+}
+
+export function saveFactors(factors: SavedFactor[]): SavedFactor[] {
+  const existing = savedFactors();
+  const known = new Set(existing.map((f) => `${f.market}|${f.expression}`));
+  const fresh = factors.filter((f) => !known.has(`${f.market}|${f.expression}`));
+  const merged = [...fresh, ...existing].slice(0, 40);
+  localStorage.setItem(FACTORS_KEY, JSON.stringify(merged));
+  return merged;
+}
+
+export function deleteFactor(market: string, expression: string): SavedFactor[] {
+  const kept = savedFactors().filter(
+    (f) => !(f.market === market && f.expression === expression),
+  );
+  localStorage.setItem(FACTORS_KEY, JSON.stringify(kept));
+  return kept;
+}
+
+export function factorLessons(): string[] {
+  return read<string[]>(LESSONS_KEY, []);
+}
+
+export function saveFactorLessons(lessons: string[]): string[] {
+  // newest last; dedup keeps the latest occurrence; cap matches the API limit
+  const merged = [...factorLessons(), ...lessons];
+  const out: string[] = [];
+  for (const lesson of merged.reverse()) {
+    if (!out.includes(lesson)) out.push(lesson);
+  }
+  const final = out.reverse().slice(-12);
+  localStorage.setItem(LESSONS_KEY, JSON.stringify(final));
+  return final;
+}

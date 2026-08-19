@@ -21,6 +21,26 @@ export interface Candle {
   volume: number;
 }
 
+export interface FactorBacktestResult {
+  expression: string;
+  market: string;
+  top_n: number;
+  rebalance: number;
+  inverted: boolean;
+  span: { from: string; to: string };
+  stats: {
+    total_return_pct: number;
+    cagr_pct: number | null;
+    sharpe: number;
+    max_drawdown_pct: number;
+    avg_turnover_pct: number;
+    benchmark: { total_return_pct: number; cagr_pct: number | null; sharpe: number };
+  };
+  equity_curve: Point[];
+  benchmark_curve: Point[];
+  drawdown_curve: Point[];
+}
+
 export interface KronosBar {
   time: number;
   close: number;
@@ -214,6 +234,13 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(json<BacktestResult>),
+
+  factorBacktest: (body: Record<string, unknown>) =>
+    fetch("/api/factors/backtest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<FactorBacktestResult>),
 
   kronosStatus: () => fetch("/api/kronos/status").then(json<KronosStatus>),
 

@@ -49,18 +49,28 @@ UNIVERSES: dict[str, list[str]] = {
     "crypto": [
         "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "DOGE-USD",
         "ADA-USD", "AVAX-USD", "DOT-USD", "LTC-USD", "LINK-USD", "TRX-USD",
-        "SHIB-USD", "TON-USD", "NEAR-USD", "UNI-USD",
+        "SHIB-USD", "NEAR-USD", "UNI-USD", "ATOM-USD",
     ],
 }
 
 HOLDOUT_FRACTION = 0.2      # trailing slice the LLM never gets feedback on
-MIN_ABS_IC = 0.015          # in-sample bar a candidate must clear
+MIN_ABS_IC = 0.015          # "standard" in-sample bar (kept for tests/back-compat)
 MAX_ZOO_CORR = 0.7          # redundancy ceiling vs accepted factors
 MAX_COMPLEXITY = 24         # AST nodes — AlphaAgent-style regularizer
 MIN_COVERAGE = 0.55         # fraction of days with a computable cross-section
 
+# Acceptance tiers: (min |in-sample IC|, min |in-sample ICIR|). The holdout
+# same-sign confirmation is NON-negotiable in every tier — loosening only
+# lowers the magnitude bars, and the UI warns that loose = more overfit risk.
+MODES: dict[str, tuple[float, float]] = {
+    "strict": (0.02, 0.25),
+    "standard": (0.015, 0.15),
+    "loose": (0.01, 0.08),
+}
+
 _PANEL_CACHE: dict[str, tuple[float, dict[str, pd.DataFrame]]] = {}
 _PANEL_TTL = 6 * 3600
+MAX_LEN_HINT = 240
 
 
 # ------------------------------------------------------------------- data
@@ -86,8 +96,11 @@ def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
         frame = frame.dropna(axis=1, how="all")
         panel[field] = frame
 
-    # Keep only symbols with a usable close history.
-    good = panel["close"].columns[panel["close"].notna().mean() > 0.7]
+    # Keep only symbols with a usable close history AND sane daily moves —
+    # a >400% day in daily bars is a data feed error, not a market event.
+    close_ok = panel["close"].notna().mean() > 0.7
+    sane = panel["close"].pct_change().abs().max() < 4.0
+    good = panel["close"].columns[close_ok & sane]
     if len(good) < 8:
         raise LookupError(f"only {len(good)} usable symbols in the {market} universe")
     for field in list(panel):
@@ -177,21 +190,22 @@ def evaluate_candidate(
     }
 
 
-def _verdict(m: dict) -> tuple[bool, list[str]]:
+def _verdict(m: dict, mode: str = "standard") -> tuple[bool, list[str]]:
     """Accept/reject + the reasons that become next-round feedback."""
+    min_ic, min_icir = MODES.get(mode, MODES["standard"])
     reasons: list[str] = []
     if m["coverage"] < MIN_COVERAGE:
         reasons.append(f"coverage {m['coverage']:.0%} < {MIN_COVERAGE:.0%} — too many NaN days")
     if m["complexity"] > MAX_COMPLEXITY:
         reasons.append(f"complexity {m['complexity']} > {MAX_COMPLEXITY} — simplify")
-    if abs(m["is_ic"]) < MIN_ABS_IC:
-        reasons.append(f"weak signal: |IS IC| {abs(m['is_ic']):.3f} < {MIN_ABS_IC}")
-    elif np.sign(m["oos_ic"]) != np.sign(m["is_ic"]) or abs(m["oos_ic"]) < MIN_ABS_IC / 2:
+    if abs(m["is_ic"]) < min_ic:
+        reasons.append(f"weak signal: |IS IC| {abs(m['is_ic']):.3f} < {min_ic}")
+    elif np.sign(m["oos_ic"]) != np.sign(m["is_ic"]) or abs(m["oos_ic"]) < min_ic / 3:
         reasons.append(
             f"holdout does not confirm: IS IC {m['is_ic']:+.3f} vs OOS IC {m['oos_ic']:+.3f}"
         )
-    if abs(m["is_icir"]) < 0.15:
-        reasons.append(f"unstable: |ICIR| {abs(m['is_icir']):.2f} < 0.15")
+    if abs(m["is_icir"]) < min_icir:
+        reasons.append(f"unstable: |ICIR| {abs(m['is_icir']):.2f} < {min_icir}")
     if m["max_zoo_corr"] > MAX_ZOO_CORR:
         reasons.append(f"redundant: |corr| {m['max_zoo_corr']:.2f} with an accepted factor")
     return (not reasons), reasons
@@ -331,9 +345,19 @@ async def _generate_round(
 
 
 async def mine_stream(
-    market: str, horizon: int, rounds: int, per_round: int
+    market: str,
+    horizon: int,
+    rounds: int,
+    per_round: int,
+    mode: str = "standard",
+    memory: dict | None = None,
 ) -> AsyncIterator[dict]:
-    """The loop engine. Yields NDJSON-able progress events."""
+    """The loop engine. Yields NDJSON-able progress events.
+
+    `memory` carries cross-session state (AlphaMemo/XALPHA-style): previously
+    accepted expressions (never resubmitted, counted in redundancy checks via
+    the prompt) and compressed lessons from earlier sessions.
+    """
     if not analyst.enabled:
         yield {"type": "error", "message": "AI is not configured (ANTHROPIC_API_KEY)."}
         return
@@ -342,6 +366,10 @@ async def mine_stream(
     horizon = max(1, min(30, horizon))
     rounds = max(1, min(6, rounds))
     per_round = max(2, min(6, per_round))
+    mode = mode if mode in MODES else "standard"
+    memory = memory or {}
+    prior_accepted = [str(x)[:MAX_LEN_HINT] for x in memory.get("accepted", [])][:20]
+    prior_lessons = [str(x)[:300] for x in memory.get("lessons", [])][:12]
 
     try:
         panel = await asyncio.to_thread(_load_panel_blocking, market)
@@ -356,6 +384,8 @@ async def mine_stream(
         "horizon": horizon,
         "rounds": rounds,
         "per_round": per_round,
+        "mode": mode,
+        "prior_memory": {"accepted": len(prior_accepted), "lessons": len(prior_lessons)},
         "universe": symbols,
         "span": {
             "from": str(panel["close"].index[0].date()),
@@ -366,7 +396,21 @@ async def mine_stream(
     zoo: list[dict] = []
     zoo_values: list[pd.DataFrame] = []
     history: list[str] = []
-    seen: set[str] = set()
+    seen: set[str] = set(prior_accepted)
+
+    if prior_accepted or prior_lessons:
+        block = "PRIOR SESSIONS (cross-session memory):"
+        if prior_accepted:
+            block += (
+                "\nAlready-accepted factors — do NOT resubmit these, and avoid "
+                "structurally similar ideas:\n"
+                + "\n".join(f"- `{e}`" for e in prior_accepted)
+            )
+        if prior_lessons:
+            block += "\nLessons from earlier sessions:\n" + "\n".join(
+                f"- {le}" for le in prior_lessons
+            )
+        history.append(block)
 
     for round_no in range(1, rounds + 1):
         yield {"type": "round", "round": round_no, "rounds": rounds}
@@ -409,7 +453,7 @@ async def mine_stream(
                        "error": str(exc), "accepted": False}
                 continue
 
-            accepted, reasons = _verdict(metrics)
+            accepted, reasons = _verdict(metrics, mode)
             values = metrics.pop("_values")
             row = {**metrics, "hypothesis": cand["hypothesis"], "accepted": accepted,
                    "reasons": reasons, "round": round_no}
@@ -425,4 +469,125 @@ async def mine_stream(
             yield {"type": "feedback", "round": round_no, "text": feedback}
 
     zoo_public = [{k: v for k, v in f.items() if not k.startswith("_")} for f in zoo]
-    yield {"type": "done", "zoo": zoo_public, "evaluated": len(seen)}
+    yield {
+        "type": "done",
+        "zoo": zoo_public,
+        "evaluated": len(seen) - len(prior_accepted),
+        "mode": mode,
+        "lessons": _session_lessons(history, market, horizon),
+    }
+
+
+def _session_lessons(history: list[str], market: str, horizon: int) -> list[str]:
+    """Compress a session into carry-forward lessons: the directive lines,
+    tagged with market/horizon so later sessions know their context."""
+    lessons: list[str] = []
+    for chunk in history:
+        for line in chunk.splitlines():
+            if line.startswith("DIRECTIVES"):
+                text = line.removeprefix("DIRECTIVES for next round:").strip().rstrip(".")
+                lessons.append(f"[{market}/{horizon}d] {text}")
+    # dedup, keep the most recent occurrences
+    out: list[str] = []
+    for lesson in reversed(lessons):
+        if lesson not in out:
+            out.append(lesson)
+    return list(reversed(out))[-6:]
+
+
+# ------------------------------------------------------- factor backtest
+
+
+def portfolio_backtest_blocking(
+    expression: str,
+    market: str,
+    top_n: int = 5,
+    rebalance: int = 10,
+    invert: bool = False,
+    cost_bps: float = 7.0,
+) -> dict:
+    """Judge a factor with money instead of IC: equal-weight the top-N ranked
+    symbols, rebalance every `rebalance` bars, subtract turnover costs, and
+    compare against an equal-weight buy-and-hold of the same universe.
+
+    No look-ahead: the factor is computed on data up to day t and the
+    resulting weights earn returns from day t+1 onward.
+    """
+    market = market if market in UNIVERSES else "us"
+    top_n = max(2, min(10, top_n))
+    rebalance = max(1, min(30, rebalance))
+
+    panel = _load_panel_blocking(market)
+    values, _ = factor_dsl.compute(expression, panel)
+    if invert:
+        values = -values
+
+    close = panel["close"]
+    daily_ret = close.pct_change()
+
+    ranked = values.rank(axis=1, ascending=False)  # 1 = best
+    member = (ranked <= top_n).astype(float)
+    # freeze weights between rebalance dates, then lag one bar (enter at t+1)
+    is_rebalance_day = pd.Series(range(len(member)), index=member.index) % rebalance == 0
+    member = member.where(is_rebalance_day).ffill()
+    weights = member.div(member.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+    held = weights.shift(1).fillna(0.0)
+
+    gross = (held * daily_ret).sum(axis=1)
+    turnover = (weights - held).abs().sum(axis=1) / 2
+    net = gross - turnover * (cost_bps / 10_000)
+
+    bench_w = close.notna().astype(float)
+    bench_w = bench_w.div(bench_w.sum(axis=1), axis=0)
+    bench = (bench_w.shift(1) * daily_ret).sum(axis=1)
+
+    # drop the warmup where the factor had no values at all
+    first = held.abs().sum(axis=1).gt(0).idxmax()
+    net, bench = net.loc[first:], bench.loc[first:]
+    if len(net) < 60:
+        raise factor_dsl.FactorError("factor warms up too late to backtest")
+
+    equity = (1 + net).cumprod() * 100_000
+    bench_eq = (1 + bench).cumprod() * 100_000
+    peak = equity.cummax()
+    dd = (equity / peak - 1) * 100
+
+    ann = 252 if market == "us" else 365
+    years = len(net) / ann
+
+    def stats(series: pd.Series, eq: pd.Series) -> dict:
+        total = float(eq.iloc[-1] / eq.iloc[0] - 1) * 100
+        vol = float(series.std() * np.sqrt(ann))
+        sharpe = float(series.mean() * ann / vol) if vol > 1e-9 else 0.0
+        return {
+            "total_return_pct": round(total, 2),
+            "cagr_pct": round(float((eq.iloc[-1] / eq.iloc[0]) ** (1 / years) - 1) * 100, 2)
+            if years > 0.2 else None,
+            "sharpe": round(sharpe, 2),
+        }
+
+    epoch = lambda ts: int(pd.Timestamp(ts).timestamp())  # noqa: E731
+    return {
+        "expression": expression,
+        "market": market,
+        "top_n": top_n,
+        "rebalance": rebalance,
+        "inverted": invert,
+        "cost_bps": cost_bps,
+        "span": {"from": str(net.index[0].date()), "to": str(net.index[-1].date())},
+        "stats": {
+            **stats(net, equity),
+            "max_drawdown_pct": round(float(dd.min()), 2),
+            "avg_turnover_pct": round(float(turnover.loc[first:].mean() * 100), 1),
+            "benchmark": stats(bench, bench_eq),
+        },
+        "equity_curve": [
+            {"time": epoch(ts), "value": round(float(v), 2)} for ts, v in equity.items()
+        ],
+        "benchmark_curve": [
+            {"time": epoch(ts), "value": round(float(v), 2)} for ts, v in bench_eq.items()
+        ],
+        "drawdown_curve": [
+            {"time": epoch(ts), "value": round(float(v), 3)} for ts, v in dd.items()
+        ],
+    }

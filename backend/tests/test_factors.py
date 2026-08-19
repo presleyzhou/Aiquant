@@ -12,9 +12,12 @@ from app.main import app
 from app.services import factor_dsl
 from app.services.factor_mine import (
     MIN_ABS_IC,
+    MODES,
     _round_feedback,
+    _session_lessons,
     _verdict,
     evaluate_candidate,
+    portfolio_backtest_blocking,
 )
 
 
@@ -150,3 +153,53 @@ def test_mine_requires_ai(monkeypatch):
     with client.stream("POST", "/api/factors/mine", json={"market": "us"}) as resp:
         first = next(resp.iter_lines())
     assert "not configured" in first
+
+
+# ------------------------------------------------- tiers / memory / backtest
+
+
+def test_modes_ordering():
+    assert MODES["strict"][0] > MODES["standard"][0] > MODES["loose"][0]
+    assert MODES["strict"][1] > MODES["standard"][1] > MODES["loose"][1]
+
+
+def test_loose_mode_admits_marginal_factor():
+    m = {
+        "coverage": 0.9, "complexity": 5, "is_ic": 0.012, "is_icir": 0.1,
+        "oos_ic": 0.011, "max_zoo_corr": 0.1,
+    }
+    accepted_std, _ = _verdict(m, "standard")
+    accepted_loose, _ = _verdict(m, "loose")
+    assert not accepted_std and accepted_loose
+
+
+def test_holdout_confirmation_survives_loose_mode():
+    m = {
+        "coverage": 0.9, "complexity": 5, "is_ic": 0.05, "is_icir": 0.5,
+        "oos_ic": -0.04, "max_zoo_corr": 0.1,  # sign flip in holdout
+    }
+    accepted, reasons = _verdict(m, "loose")
+    assert not accepted and any("holdout" in r for r in reasons)
+
+
+def test_session_lessons_extracts_directives():
+    history = [
+        "PRIOR SESSIONS: ...",
+        "Round 1:\n- `x` rejected\nDIRECTIVES for next round: smooth with ts_mean.",
+        "Round 2:\n- `y` rejected\nDIRECTIVES for next round: smooth with ts_mean.",
+    ]
+    lessons = _session_lessons(history, "us", 10)
+    assert lessons == ["[us/10d] smooth with ts_mean"]  # deduped, tagged
+
+
+def test_portfolio_backtest_on_synthetic_panel(monkeypatch):
+    from app.services import factor_mine
+
+    panel = _panel(400, 12)
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    out = portfolio_backtest_blocking("rank(delta(close, 5))", "us", top_n=4, rebalance=10)
+    assert out["stats"]["total_return_pct"] is not None
+    assert len(out["equity_curve"]) == len(out["benchmark_curve"]) > 100
+    assert out["stats"]["benchmark"]["sharpe"] is not None
+    # no look-ahead plumbing check: first equity point starts at capital
+    assert abs(out["equity_curve"][0]["value"] - 100_000) < 5_000
