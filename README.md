@@ -138,7 +138,10 @@ Vercel 后端会把 `/api/kronos/*` 服务器侧转发过去（无 CORS、前端
 | POST | `/api/kronos/evaluate` | 滚动历史评估：方向命中率 vs「永远看涨」基线 |
 | POST | `/api/kronos/signal` | kronos_signal 策略的多空锚点（供回测引擎使用） |
 | GET | `/api/factors/config` | 因子挖掘配置：标的池与默认参数 |
-| POST | `/api/factors/mine` | Loop-engineered 因子挖掘（NDJSON 流式：生成→评估→反馈循环） |
+| POST | `/api/factors/mine` | Loop-engineered 因子挖掘（NDJSON 流式；支持跨次记忆与严格/标准/宽松门槛） |
+| POST | `/api/factors/backtest` | 单因子 Top-N 等权组合回测（含成本与等权基准） |
+| POST | `/api/factors/composite` | 多因子合成回测（等权 / 样本内 IC 加权） |
+| POST | `/api/factors/check` | 因子体检：全窗/留出/近60日 IC（衰减监控与跨市场移植检验共用） |
 | GET | `/api/ai/status` | AI 是否可用、用的哪个模型 |
 | POST | `/api/ai/analyze` | 流式分析（NDJSON） |
 | WS | `/ws/quotes` | 实时报价推送 |
@@ -187,6 +190,10 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
 ---
 
 ## 测试
+
+前端另有 Playwright E2E 冒烟（`cd frontend && npm run e2e`）：全程 mock API、桩掉
+WebSocket，无需后端与外网，CI 自动运行。
+
 
 ```bash
 cd backend && .venv/bin/python -m pytest -q
