@@ -10,6 +10,11 @@ export default defineConfig({
   use: {
     baseURL: "http://127.0.0.1:4173",
     viewport: { width: 1440, height: 900 },
+    // The production build registers a network-only service worker; if it
+    // takes control it bypasses page.route() interception and the hermetic
+    // mocks silently stop applying. Block SWs in tests entirely.
+    serviceWorkers: "block",
+    trace: "retain-on-failure",
   },
   webServer: {
     command: "npm run preview -- --host 127.0.0.1 --port 4173 --strictPort",

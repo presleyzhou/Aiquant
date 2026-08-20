@@ -85,3 +85,11 @@ jobs:
       # so no backend, keys or market data are needed.
       - name: Run smoke suite
         run: npx playwright test
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: frontend/test-results/
+          retention-days: 7
