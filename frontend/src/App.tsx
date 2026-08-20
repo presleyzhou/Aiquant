@@ -3,6 +3,7 @@ import { api, type Quote } from "./api";
 import { AIPanel } from "./components/AIPanel";
 import { BacktestPanel } from "./components/BacktestPanel";
 import { FactorLab } from "./components/FactorLab";
+import { Tour } from "./components/Tour";
 import { KronosPanel } from "./components/KronosPanel";
 import { ChartPanel } from "./components/ChartPanel";
 import { MarketPage } from "./components/MarketPage";
@@ -219,6 +220,7 @@ export default function App() {
       ))}
 
       <div className="disclaimer">{t("app.disclaimer")}</div>
+      <Tour />
     </div>
   );
 }

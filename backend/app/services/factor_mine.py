@@ -514,13 +514,24 @@ def portfolio_backtest_blocking(
     resulting weights earn returns from day t+1 onward.
     """
     market = market if market in UNIVERSES else "us"
-    top_n = max(2, min(10, top_n))
-    rebalance = max(1, min(30, rebalance))
-
     panel = _load_panel_blocking(market)
     values, _ = factor_dsl.compute(expression, panel)
     if invert:
         values = -values
+    result = _portfolio_from_values(values, panel, market, top_n, rebalance, cost_bps)
+    return {"expression": expression, "inverted": invert, **result}
+
+
+def _portfolio_from_values(
+    values: pd.DataFrame,
+    panel: dict[str, pd.DataFrame],
+    market: str,
+    top_n: int,
+    rebalance: int,
+    cost_bps: float = 7.0,
+) -> dict:
+    top_n = max(2, min(10, top_n))
+    rebalance = max(1, min(30, rebalance))
 
     close = panel["close"]
     daily_ret = close.pct_change()
@@ -568,11 +579,9 @@ def portfolio_backtest_blocking(
 
     epoch = lambda ts: int(pd.Timestamp(ts).timestamp())  # noqa: E731
     return {
-        "expression": expression,
         "market": market,
         "top_n": top_n,
         "rebalance": rebalance,
-        "inverted": invert,
         "cost_bps": cost_bps,
         "span": {"from": str(net.index[0].date()), "to": str(net.index[-1].date())},
         "stats": {
@@ -590,4 +599,109 @@ def portfolio_backtest_blocking(
         "drawdown_curve": [
             {"time": epoch(ts), "value": round(float(v), 3)} for ts, v in dd.items()
         ],
+    }
+
+
+# ------------------------------------------------- composite & health
+
+
+def composite_backtest_blocking(
+    factors: list[dict],
+    market: str,
+    weighting: str = "ic",
+    top_n: int = 5,
+    rebalance: int = 10,
+) -> dict:
+    """Blend 2+ factors into one meta-signal and run the same portfolio test.
+
+    Each factor is sign-aligned (inverted when its stored IC was negative),
+    reduced to daily cross-sectional ranks (scale-free, so heterogeneous
+    factors are comparable), then combined equal-weight or |IC|-weighted.
+    IC weights come from the IN-SAMPLE window only — the same 80% the miner
+    used — so the blend never peeks at the holdout it is judged on.
+    """
+    if len(factors) < 2:
+        raise factor_dsl.FactorError("composite needs at least 2 factors")
+    if len(factors) > 8:
+        raise factor_dsl.FactorError("composite supports at most 8 factors")
+    market = market if market in UNIVERSES else "us"
+    weighting = weighting if weighting in ("equal", "ic") else "ic"
+
+    panel = _load_panel_blocking(market)
+    close = panel["close"]
+
+    ranked_list: list[pd.DataFrame] = []
+    components: list[dict] = []
+    for f in factors:
+        expr = str(f.get("expression", ""))
+        values, _ = factor_dsl.compute(expr, panel)
+        if bool(f.get("invert")):
+            values = -values
+        horizon = max(1, min(30, int(f.get("horizon", 10))))
+        fwd = close.pct_change(horizon).shift(-horizon)
+        ic = _daily_rank_ic(values, fwd)
+        split = int(len(ic) * (1 - HOLDOUT_FRACTION))
+        is_ic = float(ic.iloc[:split].mean()) if split > 0 else 0.0
+        ranked_list.append(values.rank(axis=1, pct=True))
+        components.append({"expression": expr, "is_ic": round(is_ic, 4)})
+
+    # pairwise redundancy — shown, not enforced: the user chose the blend
+    n = len(ranked_list)
+    max_pair_corr = 0.0
+    for i in range(n):
+        for j in range(i + 1, n):
+            pair = pd.concat(
+                [ranked_list[i].stack(), ranked_list[j].stack()], axis=1
+            ).dropna()
+            if len(pair) > 200:
+                max_pair_corr = max(
+                    max_pair_corr, abs(float(pair.iloc[:, 0].corr(pair.iloc[:, 1])))
+                )
+
+    if weighting == "ic":
+        raw = [abs(c["is_ic"]) for c in components]
+        total = sum(raw)
+        weights = [r / total if total > 1e-9 else 1 / n for r in raw]
+    else:
+        weights = [1 / n] * n
+    for c, w in zip(components, weights):
+        c["weight"] = round(w, 3)
+
+    combined = sum(r * w for r, w in zip(ranked_list, weights))
+
+    result = _portfolio_from_values(combined, panel, market, top_n, rebalance)
+    return {
+        "weighting": weighting,
+        "components": components,
+        "max_pair_corr": round(max_pair_corr, 3),
+        **result,
+    }
+
+
+def check_factor_blocking(expression: str, market: str, horizon: int) -> dict:
+    """One factor's current health on one market: full-window IC, holdout IC,
+    and the trailing-60-evaluable-day IC that exposes decay. Serves both the
+    re-checkup button and the cross-market robustness test."""
+    market = market if market in UNIVERSES else "us"
+    horizon = max(1, min(30, horizon))
+
+    panel = _load_panel_blocking(market)
+    values, _ = factor_dsl.compute(expression, panel)
+    fwd = panel["close"].pct_change(horizon).shift(-horizon)
+    ic = _daily_rank_ic(values, fwd)
+    if len(ic) < 90:
+        raise factor_dsl.FactorError(f"only {len(ic)} evaluable days on {market}")
+
+    split = int(len(ic) * (1 - HOLDOUT_FRACTION))
+    recent = ic.iloc[-60:]
+    return {
+        "expression": expression,
+        "market": market,
+        "horizon": horizon,
+        "is_ic": round(float(ic.iloc[:split].mean()), 4),
+        "oos_ic": round(float(ic.iloc[split:].mean()), 4),
+        "recent_ic": round(float(recent.mean()), 4),
+        "recent_days": int(len(recent)),
+        "days": int(len(ic)),
+        "as_of": str(ic.index[-1].date()),
     }

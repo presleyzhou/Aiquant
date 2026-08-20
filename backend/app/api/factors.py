@@ -17,6 +17,8 @@ from app.services import factor_dsl
 from app.services.factor_mine import (
     MODES,
     UNIVERSES,
+    check_factor_blocking,
+    composite_backtest_blocking,
     mine_stream,
     portfolio_backtest_blocking,
 )
@@ -48,6 +50,26 @@ class FactorBacktestRequest(BaseModel):
     top_n: int = Field(5, ge=2, le=10)
     rebalance: int = Field(10, ge=1, le=30)
     invert: bool = False
+
+
+class CompositeFactor(BaseModel):
+    expression: str = Field(min_length=1, max_length=240)
+    invert: bool = False
+    horizon: int = Field(10, ge=1, le=30)
+
+
+class CompositeRequest(BaseModel):
+    factors: list[CompositeFactor] = Field(min_length=2, max_length=8)
+    market: str = Field("us")
+    weighting: str = Field("ic", description="ic | equal")
+    top_n: int = Field(5, ge=2, le=10)
+    rebalance: int = Field(10, ge=1, le=30)
+
+
+class CheckRequest(BaseModel):
+    expression: str = Field(min_length=1, max_length=240)
+    market: str = Field("us")
+    horizon: int = Field(10, ge=1, le=30)
 
 
 @router.get("/config")
@@ -91,6 +113,38 @@ async def factor_backtest(req: FactorBacktestRequest) -> dict:
             req.top_n,
             req.rebalance,
             req.invert,
+        )
+    except factor_dsl.FactorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/composite")
+async def factor_composite(req: CompositeRequest) -> dict:
+    """Blend 2-8 zoo factors into one meta-signal and portfolio-test it."""
+    try:
+        return await asyncio.to_thread(
+            composite_backtest_blocking,
+            [f.model_dump() for f in req.factors],
+            req.market,
+            req.weighting,
+            req.top_n,
+            req.rebalance,
+        )
+    except factor_dsl.FactorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/check")
+async def factor_check(req: CheckRequest) -> dict:
+    """Health/robustness check: recent rolling IC (decay monitor) or the same
+    factor evaluated on the OTHER market (cross-market transfer test)."""
+    try:
+        return await asyncio.to_thread(
+            check_factor_blocking, req.expression, req.market, req.horizon
         )
     except factor_dsl.FactorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

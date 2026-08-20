@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { api, streamNDJSON, type FactorBacktestResult } from "../api";
+import {
+  api,
+  streamNDJSON,
+  type CompositeResult,
+  type FactorBacktestResult,
+  type FactorCheck,
+} from "../api";
 import { useT } from "../i18n";
 import {
   deleteFactor,
@@ -55,6 +61,13 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   const [btFor, setBtFor] = useState<string | null>(null);
   const [btResult, setBtResult] = useState<FactorBacktestResult | null>(null);
   const [btError, setBtError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [weighting, setWeighting] = useState("ic");
+  const [compositeResult, setCompositeResult] = useState<CompositeResult | null>(null);
+  const [compositing, setCompositing] = useState(false);
+  const [health, setHealth] = useState<Record<string, FactorCheck | "pending" | "failed">>({});
+  const [checking, setChecking] = useState(false);
+  const [transfer, setTransfer] = useState<Record<string, FactorCheck | "pending" | "failed">>({});
 
   const [running, setRunning] = useState(false);
   const [items, setItems] = useState<LoopItem[]>([]);
@@ -188,6 +201,90 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
     } finally {
       setBtFor(null);
     }
+  };
+
+  const key = (f: SavedFactor) => `${f.market}|${f.expression}`;
+
+  const toggleSelect = (f: SavedFactor) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const k = key(f);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+  };
+
+  const runComposite = async () => {
+    const chosen = saved.filter((f) => selected.has(key(f)));
+    if (chosen.length < 2 || compositing) return;
+    const markets = new Set(chosen.map((f) => f.market));
+    if (markets.size > 1) {
+      setBtError(t("fl.cp.sameMarket"));
+      return;
+    }
+    setCompositing(true);
+    setBtError(null);
+    setBtResult(null);
+    try {
+      setCompositeResult(
+        await api.factorComposite({
+          factors: chosen.map((f) => ({
+            expression: f.expression,
+            invert: f.is_ic < 0,
+            horizon: f.horizon,
+          })),
+          market: chosen[0].market,
+          weighting,
+          top_n: 5,
+          rebalance: chosen[0].horizon,
+        }),
+      );
+    } catch (err) {
+      setBtError((err as Error).message);
+      setCompositeResult(null);
+    } finally {
+      setCompositing(false);
+    }
+  };
+
+  const checkAll = async () => {
+    if (checking || saved.length === 0) return;
+    setChecking(true);
+    for (const f of saved) {
+      setHealth((prev) => ({ ...prev, [key(f)]: "pending" }));
+      try {
+        const result = await api.factorCheck(f.expression, f.market, f.horizon);
+        setHealth((prev) => ({ ...prev, [key(f)]: result }));
+      } catch {
+        setHealth((prev) => ({ ...prev, [key(f)]: "failed" }));
+      }
+    }
+    setChecking(false);
+  };
+
+  const runTransfer = async (f: SavedFactor) => {
+    const other = f.market === "crypto" ? "us" : "crypto";
+    setTransfer((prev) => ({ ...prev, [key(f)]: "pending" }));
+    try {
+      const result = await api.factorCheck(f.expression, other, f.horizon);
+      setTransfer((prev) => ({ ...prev, [key(f)]: result }));
+    } catch {
+      setTransfer((prev) => ({ ...prev, [key(f)]: "failed" }));
+    }
+  };
+
+  /** Sign-aligned decay verdict: recent IC in the direction the factor was
+   * accepted with, below the loose bar = suspected decay. */
+  const decayState = (f: SavedFactor, h: FactorCheck): "ok" | "decayed" => {
+    const aligned = h.recent_ic * Math.sign(f.is_ic || 1);
+    return aligned < 0.01 ? "decayed" : "ok";
+  };
+
+  const transferState = (f: SavedFactor, h: FactorCheck): "ok" | "fail" => {
+    const aligned = h.is_ic * Math.sign(f.is_ic || 1);
+    const alignedOos = h.oos_ic * Math.sign(f.is_ic || 1);
+    return aligned > 0.01 && alignedOos > 0 ? "ok" : "fail";
   };
 
   return (
@@ -418,43 +515,157 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                   <div className="panel__head">
                     <span className="panel__title">{t("fl.mine.title")}</span>
                     <span className="panel__meta">
-                      {saved.length ? t("fl.mine.meta", { n: String(saved.length) }) : ""}
+                      {saved.length > 0 && (
+                        <button className="btn btn--mini" onClick={checkAll} disabled={checking}>
+                          {checking ? t("fl.hc.running") : t("fl.hc.run")}
+                        </button>
+                      )}
                     </span>
                   </div>
                   {saved.length === 0 ? (
                     <div className="empty" style={{ padding: 18 }}>{t("fl.mine.empty")}</div>
                   ) : (
                     <ul className="lab-saved">
-                      {saved.map((f) => (
-                        <li key={`${f.market}|${f.expression}`} className="lab-saved__row">
-                          <div style={{ minWidth: 0 }}>
-                            <code style={{ fontSize: 11, wordBreak: "break-all" }}>
-                              {f.expression}
-                            </code>
-                            <div className="dim" style={{ fontSize: 11 }}>
-                              {f.market === "crypto" ? t("fl.market.crypto") : t("fl.market.us")} ·{" "}
-                              IC {fmt(f.is_ic)} · OOS {fmt(f.oos_ic)} · {f.savedAt.slice(0, 10)}
+                      {saved.map((f) => {
+                        const k = key(f);
+                        const h = health[k];
+                        const tr = transfer[k];
+                        return (
+                          <li key={k} className="lab-saved__row fl-zoo-row">
+                            <input
+                              type="checkbox"
+                              className="fl-zoo-row__check"
+                              checked={selected.has(k)}
+                              onChange={() => toggleSelect(f)}
+                              aria-label={t("fl.cp.select")}
+                            />
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                              <code style={{ fontSize: 11, wordBreak: "break-all" }}>
+                                {f.expression}
+                              </code>
+                              <div className="dim" style={{ fontSize: 11 }}>
+                                {f.market === "crypto" ? t("fl.market.crypto") : t("fl.market.us")} ·{" "}
+                                IC {fmt(f.is_ic)} · OOS {fmt(f.oos_ic)} · {f.savedAt.slice(0, 10)}
+                              </div>
+                              {h && h !== "pending" && h !== "failed" && (
+                                <div
+                                  className={`fl-badge ${decayState(f, h) === "ok" ? "fl-badge--ok" : "fl-badge--warn"}`}
+                                >
+                                  {decayState(f, h) === "ok"
+                                    ? t("fl.hc.ok", { v: fmt(h.recent_ic) })
+                                    : t("fl.hc.decayed", { v: fmt(h.recent_ic) })}
+                                </div>
+                              )}
+                              {h === "pending" && <div className="fl-badge dim">…</div>}
+                              {tr && tr !== "pending" && tr !== "failed" && (
+                                <div
+                                  className={`fl-badge ${transferState(f, tr) === "ok" ? "fl-badge--ok" : "fl-badge--warn"}`}
+                                >
+                                  {t(
+                                    transferState(f, tr) === "ok" ? "fl.tr.ok" : "fl.tr.fail",
+                                    {
+                                      m: tr.market === "crypto" ? t("fl.tr.crypto") : t("fl.tr.us"),
+                                      a: fmt(tr.is_ic),
+                                      b: fmt(tr.oos_ic),
+                                    },
+                                  )}
+                                </div>
+                              )}
+                              {tr === "pending" && <div className="fl-badge dim">⇄ …</div>}
                             </div>
-                          </div>
-                          <div className="lab-saved__actions">
-                            <button
-                              className="btn"
-                              disabled={btFor === f.expression}
-                              onClick={() => runFactorBacktest(f)}
-                            >
-                              {btFor === f.expression ? "…" : t("fl.bt.run")}
-                            </button>
-                            <button
-                              className="watch-row__x"
-                              title={t("lab.mine.del")}
-                              onClick={() => setSaved(deleteFactor(f.market, f.expression))}
-                            >
-                              ×
-                            </button>
-                          </div>
-                        </li>
-                      ))}
+                            <div className="lab-saved__actions">
+                              <button
+                                className="btn btn--mini"
+                                disabled={btFor === f.expression}
+                                onClick={() => runFactorBacktest(f)}
+                              >
+                                {btFor === f.expression ? "…" : "▶"}
+                              </button>
+                              <button
+                                className="btn btn--mini"
+                                title={t("fl.tr.title")}
+                                onClick={() => runTransfer(f)}
+                              >
+                                ⇄
+                              </button>
+                              <button
+                                className="watch-row__x"
+                                title={t("lab.mine.del")}
+                                onClick={() => setSaved(deleteFactor(f.market, f.expression))}
+                              >
+                                ×
+                              </button>
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
+                  )}
+                  {saved.length >= 2 && (
+                    <div className="fl-composite-bar">
+                      <select
+                        className="select"
+                        value={weighting}
+                        onChange={(e) => setWeighting(e.target.value)}
+                      >
+                        <option value="ic">{t("fl.cp.ic")}</option>
+                        <option value="equal">{t("fl.cp.equal")}</option>
+                      </select>
+                      <button
+                        className="btn btn--primary"
+                        disabled={selected.size < 2 || compositing}
+                        onClick={runComposite}
+                      >
+                        {compositing
+                          ? t("fl.cp.running")
+                          : t("fl.cp.run", { n: String(selected.size) })}
+                      </button>
+                    </div>
+                  )}
+                  {compositeResult && (
+                    <div className="fl-bt">
+                      <div className="fl-bt__head dim">
+                        {t("fl.cp.head", {
+                          n: String(compositeResult.components.length),
+                          w: compositeResult.weighting === "ic" ? t("fl.cp.ic") : t("fl.cp.equal"),
+                          c: compositeResult.max_pair_corr.toFixed(2),
+                        })}
+                      </div>
+                      <div className="fl-cp-weights dim">
+                        {compositeResult.components.map((c) => (
+                          <span key={c.expression} className="fl-chip">
+                            <code>{c.expression.slice(0, 28)}…</code> w={c.weight}
+                          </span>
+                        ))}
+                      </div>
+                      <EquityChart
+                        equity={compositeResult.equity_curve}
+                        benchmark={compositeResult.benchmark_curve}
+                        drawdown={compositeResult.drawdown_curve}
+                      />
+                      <div className="stat-grid">
+                        <Stat2
+                          label={t("bt.totalReturn")}
+                          value={pct(compositeResult.stats.total_return_pct)}
+                          tone={compositeResult.stats.total_return_pct}
+                        />
+                        <Stat2
+                          label={t("fl.bt.bench")}
+                          value={pct(compositeResult.stats.benchmark.total_return_pct)}
+                          tone={compositeResult.stats.benchmark.total_return_pct}
+                        />
+                        <Stat2
+                          label={t("bt.sharpe")}
+                          value={compositeResult.stats.sharpe.toFixed(2)}
+                        />
+                        <Stat2
+                          label={t("bt.maxdd")}
+                          value={pct(compositeResult.stats.max_drawdown_pct)}
+                          tone={-1}
+                        />
+                      </div>
+                      <div className="kr-disclaimer dim">{t("fl.cp.note")}</div>
+                    </div>
                   )}
                   {btError && <div className="err">{btError}</div>}
                   {btResult && (

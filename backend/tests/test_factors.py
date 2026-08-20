@@ -16,6 +16,8 @@ from app.services.factor_mine import (
     _round_feedback,
     _session_lessons,
     _verdict,
+    check_factor_blocking,
+    composite_backtest_blocking,
     evaluate_candidate,
     portfolio_backtest_blocking,
 )
@@ -203,3 +205,63 @@ def test_portfolio_backtest_on_synthetic_panel(monkeypatch):
     assert out["stats"]["benchmark"]["sharpe"] is not None
     # no look-ahead plumbing check: first equity point starts at capital
     assert abs(out["equity_curve"][0]["value"] - 100_000) < 5_000
+
+
+# --------------------------------------------------- composite / health
+
+
+def test_composite_ic_weighting_and_shape(monkeypatch):
+    from app.services import factor_mine
+
+    panel = _panel(400, 12)
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    out = composite_backtest_blocking(
+        [
+            {"expression": "rank(delta(close, 5))", "invert": False, "horizon": 10},
+            {"expression": "rank(ts_std(returns, 20))", "invert": True, "horizon": 10},
+        ],
+        "us",
+        weighting="ic",
+    )
+    assert len(out["components"]) == 2
+    total_w = sum(c["weight"] for c in out["components"])
+    assert abs(total_w - 1.0) < 0.01
+    assert 0 <= out["max_pair_corr"] <= 1
+    assert len(out["equity_curve"]) > 100
+
+
+def test_composite_requires_two(monkeypatch):
+    from app.services import factor_mine
+
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: _panel())
+    with pytest.raises(factor_dsl.FactorError):
+        composite_backtest_blocking(
+            [{"expression": "rank(close)", "invert": False, "horizon": 10}], "us"
+        )
+
+
+def test_check_factor_reports_recent_ic(monkeypatch):
+    from app.services import factor_mine
+
+    panel = _panel(400, 12)
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    out = check_factor_blocking("rank(delta(close, 5))", "us", 10)
+    assert {"is_ic", "oos_ic", "recent_ic", "recent_days", "as_of"} <= set(out)
+    assert out["recent_days"] == 60
+
+
+def test_check_planted_decay_detected(monkeypatch):
+    """A factor that WAS the future return early on but pure noise recently
+    must show recent_ic near zero while is_ic stays high — the decay signal."""
+    from app.services import factor_mine
+
+    panel = _panel(400, 12, seed=11)
+    horizon = 10
+    fwd = panel["close"].pct_change(horizon).shift(-horizon)
+    leak = fwd.copy()
+    leak.iloc[-90:] = np.random.default_rng(3).normal(size=(90, leak.shape[1]))  # decayed tail
+    panel["vwap"] = leak
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    out = check_factor_blocking("rank(vwap)", "us", horizon)
+    assert out["is_ic"] > 0.5
+    assert abs(out["recent_ic"]) < 0.2

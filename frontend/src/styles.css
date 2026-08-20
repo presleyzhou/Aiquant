@@ -2164,6 +2164,135 @@ tbody tr:hover td {
   white-space: nowrap;
 }
 
+.btn--mini {
+  padding: 3px 8px;
+  font-size: 11px;
+  min-height: 0;
+}
+
+.fl-zoo-row {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.fl-zoo-row__check {
+  margin-top: 4px;
+  accent-color: var(--amber);
+  flex: 0 0 auto;
+}
+
+.fl-badge {
+  display: inline-block;
+  font-size: 11px;
+  border-radius: 3px;
+  padding: 1px 6px;
+  margin: 3px 6px 0 0;
+  border: 1px solid var(--border-bright);
+}
+
+.fl-badge--ok {
+  color: var(--green);
+  border-color: rgba(51, 209, 122, 0.4);
+  background: rgba(51, 209, 122, 0.07);
+}
+
+.fl-badge--warn {
+  color: var(--amber);
+  border-color: rgba(255, 176, 0, 0.45);
+  background: rgba(255, 176, 0, 0.08);
+}
+
+.fl-composite-bar {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  align-items: center;
+}
+
+.fl-composite-bar .select {
+  max-width: 140px;
+}
+
+.fl-cp-weights {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 4px 14px;
+  font-size: 11px;
+}
+
+/* ------------------------------------------------------------------ tour --- */
+
+.tour-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(5, 7, 10, 0.72);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.tour-card {
+  width: min(430px, 100%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%), var(--panel);
+  border: 1px solid var(--border-bright);
+  border-radius: 10px;
+  box-shadow: 0 24px 60px -12px rgba(0, 0, 0, 0.8);
+  padding: 22px 22px 18px;
+}
+
+.tour-card__step {
+  color: var(--amber);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  margin-bottom: 8px;
+}
+
+.tour-card__icon {
+  font-size: 26px;
+  margin-bottom: 6px;
+}
+
+.tour-card__title {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 6px;
+}
+
+.tour-card__body {
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0 0 16px;
+}
+
+.tour-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tour-dots {
+  display: flex;
+  gap: 6px;
+}
+
+.tour-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-bright);
+}
+
+.tour-dot.is-on {
+  background: var(--amber);
+}
+
 /* ------------------------------------------------------- small screens --- */
 
 @media (max-width: 640px) {

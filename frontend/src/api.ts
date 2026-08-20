@@ -41,6 +41,24 @@ export interface FactorBacktestResult {
   drawdown_curve: Point[];
 }
 
+export interface FactorCheck {
+  expression: string;
+  market: string;
+  horizon: number;
+  is_ic: number;
+  oos_ic: number;
+  recent_ic: number;
+  recent_days: number;
+  days: number;
+  as_of: string;
+}
+
+export interface CompositeResult extends Omit<FactorBacktestResult, "expression" | "inverted"> {
+  weighting: string;
+  components: Array<{ expression: string; is_ic: number; weight: number }>;
+  max_pair_corr: number;
+}
+
 export interface KronosBar {
   time: number;
   close: number;
@@ -234,6 +252,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(json<BacktestResult>),
+
+  factorComposite: (body: Record<string, unknown>) =>
+    fetch("/api/factors/composite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<CompositeResult>),
+
+  factorCheck: (expression: string, market: string, horizon: number) =>
+    fetch("/api/factors/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expression, market, horizon }),
+    }).then(json<FactorCheck>),
 
   factorBacktest: (body: Record<string, unknown>) =>
     fetch("/api/factors/backtest", {
