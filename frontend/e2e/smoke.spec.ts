@@ -34,6 +34,24 @@ async function mockApi(page: Page) {
     if (path === "/api/ai/status") return json({ enabled: false, model: null, effort: null });
     if (path === "/api/kronos/status")
       return json({ enabled: false, loaded: false, model: null, device: null, error: null, mode: "off" });
+    if (path.startsWith("/api/marketplace/items"))
+      return json({
+        items: [
+          {
+            id: "golden-cross",
+            type: "strategy",
+            name: "黄金交叉 50/200",
+            tagline: "最经典的长周期趋势跟随",
+            tags: ["趋势"],
+            price: 0,
+            currency: "USDC",
+            risk: "low",
+            author: "AIQUANT",
+            version: "1.0",
+            payload: { strategy: "sma_cross", fast: 50, slow: 200 },
+          },
+        ],
+      });
     if (path === "/api/factors/config")
       return json({ universes: { us: ["AAPL"], crypto: ["BTC-USD"] }, defaults: {}, modes: {} });
     if (path === "/api/market/quotes") {

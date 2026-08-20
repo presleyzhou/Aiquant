@@ -51,7 +51,7 @@ export function MarketPage({ onRunStrategy }: Props) {
   useEffect(() => {
     api
       .marketItems()
-      .then((res) => setItems(res.items))
+      .then((res) => setItems(res.items ?? []))
       .catch((err: Error) => setError(err.message));
     api
       .paymentConfig()
