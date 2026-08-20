@@ -16,3 +16,5 @@ build/
 .vercel
 # .env is already ignored above; .env.example must stay tracked
 .env.local
+frontend/test-results/
+frontend/playwright-report/
