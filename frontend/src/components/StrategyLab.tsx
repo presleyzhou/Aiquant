@@ -11,6 +11,8 @@ import {
   saveStrategy,
   type SavedStrategy,
 } from "../store";
+import { deployPaper } from "../store";
+import { DeployButton } from "./DeployButton";
 import { SymbolSearch } from "./SymbolSearch";
 import { useT, type MsgKey } from "../i18n";
 
@@ -461,6 +463,15 @@ export function StrategyLab({ hidden, aiEnabled, onRun }: Props) {
                             <button className="btn" onClick={() => runProposal(s)}>
                               {t("lab.mine.run")}
                             </button>
+                            <DeployButton
+                              onDeploy={() =>
+                                deployPaper("strategy", `${s.symbol} · ${s.name}`, {
+                                  symbol: s.symbol,
+                                  strategy: s.strategy,
+                                  ...s.params,
+                                })
+                              }
+                            />
                             <button
                               className="watch-row__x"
                               title={t("lab.mine.del")}

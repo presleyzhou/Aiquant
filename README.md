@@ -1,5 +1,7 @@
 # AIQUANT TERMINAL
 
+**[English README →](README.en.md)**
+
 一个 Bloomberg 风格的 AI 量化研究网站：**美股与 A 股**双终端、跑马灯行情、K 线与技术指标、无前视偏差的策略回测、一个会**实际调用这些工具**再作答的 Claude 分析面板，以及一个带**加密货币结账**的策略 / AI 技能 / 数据源市场。
 
 **线上地址**: https://aiquant-rust.vercel.app · **仓库**: https://github.com/presleyzhou/Aiquant

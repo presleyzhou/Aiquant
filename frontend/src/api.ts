@@ -59,6 +59,37 @@ export interface CompositeResult extends Omit<FactorBacktestResult, "expression"
   max_pair_corr: number;
 }
 
+export interface NewsArticle {
+  title: string;
+  url: string;
+  publisher: string;
+  published: string;
+}
+
+export interface NewsSummary {
+  symbol: string;
+  stance: "bullish" | "bearish" | "neutral" | "mixed";
+  summary: string;
+  article_count: number;
+  cached: boolean;
+}
+
+export interface PaperTrack {
+  kind: string;
+  started_at: string;
+  as_of: string;
+  days_live: number;
+  equity_curve: Point[];
+  benchmark_curve: Point[];
+  stats: {
+    return_pct: number;
+    bench_return_pct: number;
+    excess_pct: number;
+    max_drawdown_pct: number;
+    bars: number;
+  };
+}
+
 export interface KronosBar {
   time: number;
   close: number;
@@ -233,8 +264,10 @@ export const api = {
       json<{ quotes: Quote[] }>,
     ),
 
-  candles: (symbol: string, period: string) =>
-    fetch(`/api/market/candles/${encodeURIComponent(symbol)}?period=${period}`).then(
+  candles: (symbol: string, period: string, interval?: string) =>
+    fetch(
+      `/api/market/candles/${encodeURIComponent(symbol)}?period=${period}${interval ? `&interval=${interval}` : ""}`,
+    ).then(
       json<{ symbol: string; period: string; interval: string; candles: Candle[] }>,
     ),
 
@@ -252,6 +285,25 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(json<BacktestResult>),
+
+  symbolNews: (symbol: string) =>
+    fetch(`/api/market/news/${encodeURIComponent(symbol)}`).then(
+      json<{ symbol: string; articles: NewsArticle[] }>,
+    ),
+
+  newsSummary: (symbol: string) =>
+    fetch("/api/ai/news-summary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol }),
+    }).then(json<NewsSummary>),
+
+  paperTrack: (body: Record<string, unknown>) =>
+    fetch("/api/paper/track", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<PaperTrack>),
 
   factorComposite: (body: Record<string, unknown>) =>
     fetch("/api/factors/composite", {
@@ -283,11 +335,11 @@ export const api = {
       body: JSON.stringify(horizon ? { symbol, horizon } : { symbol }),
     }).then(json<KronosEvaluation>),
 
-  kronosForecast: (symbol: string, horizon?: number) =>
+  kronosForecast: (symbol: string, horizon?: number, interval: string = "1d") =>
     fetch("/api/kronos/forecast", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(horizon ? { symbol, horizon } : { symbol }),
+      body: JSON.stringify(horizon ? { symbol, horizon, interval } : { symbol, interval }),
     }).then(json<KronosForecast>),
 
   aiStatus: () =>

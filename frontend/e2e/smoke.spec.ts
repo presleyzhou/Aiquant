@@ -66,6 +66,13 @@ async function mockApi(page: Page) {
         })),
       });
     }
+    if (path.startsWith("/api/market/news/"))
+      return json({
+        symbol: path.split("/").pop(),
+        articles: [
+          { title: "测试头条：市场观望", url: "https://example.com/n1", publisher: "TestWire", published: "" },
+        ],
+      });
     if (path.startsWith("/api/market/candles/"))
       return json({
         symbol: path.split("/").pop(),
@@ -175,7 +182,7 @@ test("first visit shows the tour; skip persists", async ({ page }) => {
   await expect(page.getByTestId("tour")).toBeVisible();
   await expect(page.getByText("自选与实时行情").first()).toBeVisible();
   await page.getByRole("button", { name: "下一步" }).click();
-  await expect(page.getByText("策略回测").first()).toBeVisible();
+  await expect(page.getByTestId("tour").getByText("策略回测")).toBeVisible();
   await page.getByRole("button", { name: "跳过" }).click();
   await expect(page.getByTestId("tour")).toHaveCount(0);
   await page.reload();

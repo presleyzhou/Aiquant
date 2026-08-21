@@ -16,6 +16,8 @@ import {
   type SavedFactor,
 } from "../store";
 import { buildFactorShare, takeFactorShare } from "../share";
+import { deployPaper } from "../store";
+import { DeployButton } from "./DeployButton";
 import { EquityChart } from "./EquityChart";
 import { ShareButton } from "./ShareButton";
 
@@ -600,6 +602,17 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                               >
                                 {btFor === f.expression ? "…" : "▶"}
                               </button>
+                              <DeployButton
+                                onDeploy={() =>
+                                  deployPaper("factor", f.expression.slice(0, 40), {
+                                    expression: f.expression,
+                                    market: f.market,
+                                    top_n: 5,
+                                    rebalance: f.horizon,
+                                    invert: f.is_ic < 0,
+                                  })
+                                }
+                              />
                               <button
                                 className="btn btn--mini"
                                 title={t("fl.tr.title")}

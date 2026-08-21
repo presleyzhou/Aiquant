@@ -57,6 +57,18 @@ async def get_news(category: str = "financial", limit: int = Query(20, ge=1, le=
     return await market_data.news(category=category, limit=limit)
 
 
+@router.get("/news/{symbol}")
+async def get_symbol_news(symbol: str, limit: int = Query(8, ge=1, le=15)):
+    """Recent headlines for one symbol (yfinance), disk-cached 15 minutes."""
+    import asyncio
+
+    from app.services.symbol_news import fetch_symbol_news
+
+    symbol = symbol.upper().strip()
+    articles = await asyncio.to_thread(fetch_symbol_news, symbol, limit)
+    return {"symbol": symbol, "articles": articles}
+
+
 @router.get("/sources")
 async def get_sources():
     """Health of the vendored fincept data layer and its current source mapping."""

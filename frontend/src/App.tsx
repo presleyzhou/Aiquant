@@ -6,6 +6,8 @@ import { FactorLab } from "./components/FactorLab";
 import { Tour } from "./components/Tour";
 import { parseShareFromUrl } from "./share";
 import { KronosPanel } from "./components/KronosPanel";
+import { NewsPanel } from "./components/NewsPanel";
+import { PaperPage } from "./components/PaperPage";
 import { ChartPanel } from "./components/ChartPanel";
 import { MarketPage } from "./components/MarketPage";
 import { StrategyLab } from "./components/StrategyLab";
@@ -24,7 +26,7 @@ import {
   type MarketProfile,
 } from "./markets";
 
-type View = MarketId | "lab" | "factors" | "market";
+type View = MarketId | "lab" | "factors" | "paper" | "market";
 
 function loadWatchlist(profile: MarketProfile): string[] {
   try {
@@ -163,6 +165,7 @@ export default function App() {
               ["crypto", t("nav.crypto")],
               ["lab", t("nav.lab")],
               ["factors", t("nav.factors")],
+              ["paper", t("nav.paper")],
               ["market", t("nav.market")],
             ] as Array<[View, string]>
           ).map(([value, label]) => (
@@ -231,6 +234,7 @@ export default function App() {
       {view === "market" && <MarketPage onRunStrategy={() => switchView(lastTerminal)} />}
       <StrategyLab hidden={view !== "lab"} aiEnabled={ai.enabled} onRun={runGeneratedStrategy} />
       <FactorLab hidden={view !== "factors"} aiEnabled={ai.enabled} />
+      <PaperPage hidden={view !== "paper"} />
       {(["us", "crypto"] as MarketId[]).map((market) => (
         <TerminalWorkspace
           key={market}
@@ -329,6 +333,7 @@ function TerminalWorkspace(props: {
       </div>
 
       <div className="column">
+        <NewsPanel symbol={active || "SPY"} aiEnabled={ai.enabled} />
         <AIPanel enabled={ai.enabled} model={ai.model} symbol={active || "SPY"} />
       </div>
     </div>

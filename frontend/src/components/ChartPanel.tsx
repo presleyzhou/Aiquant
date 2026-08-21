@@ -10,7 +10,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "../i18n";
 import { api, type Candle, type Point } from "../api";
 
-const PERIODS = ["1mo", "3mo", "6mo", "1y", "2y", "5y"] as const;
+/** Timeframes: each carries its own bar size and sensible history windows.
+ * Hourly is capped at 3mo (Yahoo limit ~730d for 1h; short windows keep the
+ * chart readable) and weekly starts at 1y. */
+const TIMEFRAMES = {
+  "1h": { interval: "1h", periods: ["5d", "1mo", "3mo"], default: "1mo" },
+  "1d": { interval: "1d", periods: ["1mo", "3mo", "6mo", "1y", "2y", "5y"], default: "6mo" },
+  "1wk": { interval: "1wk", periods: ["1y", "2y", "5y", "max"], default: "2y" },
+} as const;
+
+type Timeframe = keyof typeof TIMEFRAMES;
 
 /** Overlays draw on the price scale; the rest would flatten it, so they're excluded. */
 const OVERLAYS = [
@@ -51,6 +60,7 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
   const overlayRefs = useRef<Record<string, ISeriesApi<"Line">[]>>({});
 
   const [period, setPeriod] = useState<string>("6mo");
+  const [timeframe, setTimeframe] = useState<Timeframe>("1d");
   const [enabled, setEnabled] = useState<OverlayKey[]>(["sma"]);
   const [meta, setMeta] = useState<{ bars: number; interval: string } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -147,7 +157,7 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
     setError(null);
 
     api
-      .candles(symbol, period)
+      .candles(symbol, period, TIMEFRAMES[timeframe].interval)
       .then((res) => {
         if (cancelled || !priceRef.current || !volumeRef.current) return;
         priceRef.current.setData(
@@ -180,7 +190,7 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [symbol, period]);
+  }, [symbol, period, timeframe]);
 
   // --- indicator overlays --------------------------------------------------
   useEffect(() => {
@@ -237,7 +247,7 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, period, enabledKey]);
+  }, [symbol, period, timeframe, enabledKey]);
 
   const toggle = (key: OverlayKey) =>
     setEnabled((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -250,7 +260,20 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
       </div>
 
       <div className="chip-row">
-        {PERIODS.map((p) => (
+        {(Object.keys(TIMEFRAMES) as Timeframe[]).map((tf) => (
+          <button
+            key={tf}
+            className={`chip chip--tf${tf === timeframe ? " is-on" : ""}`}
+            onClick={() => {
+              setTimeframe(tf);
+              setPeriod(TIMEFRAMES[tf].default);
+            }}
+          >
+            {t(`chart.tf.${tf}` as Parameters<typeof t>[0])}
+          </button>
+        ))}
+        <span style={{ width: 10 }} />
+        {TIMEFRAMES[timeframe].periods.map((p) => (
           <button
             key={p}
             className={`chip${p === period ? " is-on" : ""}`}

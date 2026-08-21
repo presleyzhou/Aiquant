@@ -134,10 +134,19 @@ class KronosService:
 
     # ----------------------------------------------------------- forecast
 
-    def forecast_blocking(self, df: pd.DataFrame, symbol: str, market: str, horizon: int) -> dict:
-        """Run one forecast. `df` is a yfinance OHLCV frame (daily bars)."""
+    def forecast_blocking(
+        self, df: pd.DataFrame, symbol: str, market: str, horizon: int, interval: str = "1d"
+    ) -> dict:
+        """Run one forecast. `df` is a yfinance OHLCV frame (daily or hourly).
+
+        Hourly mode is crypto-only: a 24×7 tape gives clean consecutive hourly
+        bars, whereas equity sessions would feed the model's hour embedding a
+        gap-riddled sequence. horizon is in BARS (= hours for hourly).
+        """
         preset = PRESETS[market]
         horizon = max(_HORIZON_MIN, min(_HORIZON_MAX, horizon))
+        if interval == "1h" and market != "crypto":
+            raise LookupError("hourly forecasts are crypto-only (equity sessions have gaps)")
 
         frame = pd.DataFrame(
             {
@@ -157,7 +166,9 @@ class KronosService:
         x_ts = pd.Series(idx)
 
         last_bar = idx[-1]
-        if preset.calendar == "bdays":
+        if interval == "1h":
+            future = pd.date_range(last_bar + pd.Timedelta(hours=1), periods=horizon, freq="h")
+        elif preset.calendar == "bdays":
             future = pd.bdate_range(last_bar + pd.Timedelta(days=1), periods=horizon)
         else:
             future = pd.date_range(last_bar + pd.Timedelta(days=1), periods=horizon, freq="D")
@@ -196,6 +207,7 @@ class KronosService:
             "model": get_settings().kronos_model,
             "device": str(predictor.device),
             "horizon": horizon,
+            "interval": interval,
             "preset": {
                 "calendar": preset.calendar,
                 "temperature": preset.temperature,

@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type BacktestResult } from "../api";
 import { useT } from "../i18n";
+import { DeployButton } from "./DeployButton";
 import { EVENTS, takeBacktestPresetFor } from "../store";
 import { buildBacktestShare } from "../share";
 import { ShareButton } from "./ShareButton";
+import { deployPaper } from "../store";
 import { EquityChart } from "./EquityChart";
 
 const STRATEGY_KEYS = [
@@ -112,6 +114,18 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
           {presetName && <span style={{ color: "var(--cyan)" }}> · {presetName}</span>}
         </span>
         <span className="panel__meta">
+          {result && <DeployButton onDeploy={() => {
+            deployPaper("strategy", `${result.symbol} · ${t(STRATEGY_KEYS.find(([v]) => v === strategy)?.[1] ?? "bt.strat.sma")}`, {
+              symbol: result.symbol,
+              strategy,
+              fast,
+              slow,
+              rsi_period: rsiPeriod,
+              rsi_oversold: rsiOversold,
+              rsi_overbought: rsiOverbought,
+              kronos_horizon: kronosHorizon,
+            });
+          }} />}
           {result && (
             <ShareButton
               url={() =>

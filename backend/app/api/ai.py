@@ -1,7 +1,8 @@
+import asyncio
 import json
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -112,3 +113,80 @@ async def analyze(req: AnalyzeRequest):
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+class NewsSummaryRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=20)
+
+
+NEWS_SUMMARY_TOOL = {
+    "name": "submit_sentiment",
+    "description": "Deliver the news sentiment read. The only output channel.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "stance": {"type": "string", "enum": ["bullish", "bearish", "neutral", "mixed"]},
+            "summary": {
+                "type": "string",
+                "description": "恰好三句中文：市场在关注什么、多空双方论点、对短期情绪的净判断。",
+            },
+        },
+        "required": ["stance", "summary"],
+    },
+}
+
+
+@router.post("/news-summary")
+async def news_summary(req: NewsSummaryRequest, request: Request):
+    """Three-sentence Claude sentiment read over the symbol's headlines.
+
+    Token-spending endpoint, so it is the platform's first rate-limited one:
+    cache first (free), then 10/day per IP and 200/day per instance globally.
+    """
+    from app.config import get_settings
+    from app.services import disk_cache, ratelimit
+    from app.services.symbol_news import fetch_symbol_news
+
+    if not analyst.enabled:
+        raise HTTPException(status_code=503, detail="AI is not configured")
+
+    symbol = req.symbol.upper().strip()
+    cache_key = f"newssum-{symbol}"
+    cached = disk_cache.load(cache_key, ttl_seconds=1800)
+    if isinstance(cached, dict):
+        return {**cached, "cached": True}
+
+    ip = (request.client.host if request.client else "unknown") or "unknown"
+    if not ratelimit.allow(f"newssum:{ip}", limit=10, window_seconds=86_400):
+        raise HTTPException(status_code=429, detail="news-summary limit reached for today (10/day)")
+    if not ratelimit.allow("newssum:GLOBAL", limit=200, window_seconds=86_400):
+        raise HTTPException(status_code=429, detail="site-wide news-summary budget exhausted for today")
+
+    articles = await asyncio.to_thread(fetch_symbol_news, symbol, 10)
+    if not articles:
+        raise HTTPException(status_code=404, detail=f"no recent news found for {symbol}")
+
+    headlines = "\n".join(f"- {a['title']} ({a['publisher']})" for a in articles)
+    settings = get_settings()
+    response = await analyst.client.messages.create(
+        model=settings.claude_model,
+        max_tokens=500,
+        system=(
+            "你是量化终端的新闻情绪分析器。只依据给出的标题判断，不得虚构标题之外的事实；"
+            "标题信息不足时 stance 用 neutral 并如实说明。通过 submit_sentiment 工具输出。"
+        ),
+        messages=[{"role": "user", "content": f"标的 {symbol} 最近的新闻标题：\n{headlines}"}],
+        tools=[NEWS_SUMMARY_TOOL],
+        tool_choice={"type": "tool", "name": "submit_sentiment"},
+    )
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "submit_sentiment":
+            result = {
+                "symbol": symbol,
+                "stance": str(block.input.get("stance", "neutral")),
+                "summary": str(block.input.get("summary", ""))[:600],
+                "article_count": len(articles),
+            }
+            disk_cache.store(cache_key, result)
+            return {**result, "cached": False}
+    raise HTTPException(status_code=502, detail="model did not return a sentiment")

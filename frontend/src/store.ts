@@ -273,3 +273,45 @@ export function markTriggered(id: string): PriceAlert[] {
   localStorage.setItem(ALERTS_KEY, JSON.stringify(next));
   return next;
 }
+
+/* -------------------------------------------------------- paper trading ---
+ * A deployment freezes a config at a real date. The backend replays the rule
+ * and slices from that date, so everything shown is out-of-sample by
+ * construction — "has it worked since you clicked deploy?". */
+
+const PAPER_KEY = "aiquant.paper";
+
+export interface PaperDeployment {
+  id: string;
+  kind: "strategy" | "factor";
+  name: string;
+  config: Record<string, unknown>;
+  startedAt: string; // YYYY-MM-DD
+}
+
+export function savedPaper(): PaperDeployment[] {
+  return read<PaperDeployment[]>(PAPER_KEY, []);
+}
+
+export function deployPaper(
+  kind: "strategy" | "factor",
+  name: string,
+  config: Record<string, unknown>,
+): PaperDeployment[] {
+  const entry: PaperDeployment = {
+    id: `pp_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    kind,
+    name: name.slice(0, 60),
+    config,
+    startedAt: new Date().toISOString().slice(0, 10),
+  };
+  const next = [entry, ...savedPaper()].slice(0, 12);
+  localStorage.setItem(PAPER_KEY, JSON.stringify(next));
+  return next;
+}
+
+export function deletePaper(id: string): PaperDeployment[] {
+  const next = savedPaper().filter((p) => p.id !== id);
+  localStorage.setItem(PAPER_KEY, JSON.stringify(next));
+  return next;
+}

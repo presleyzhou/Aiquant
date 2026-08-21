@@ -43,6 +43,7 @@ class ForecastRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=20)
     horizon: int | None = Field(default=None, ge=5, le=60)
     market: str | None = None  # "us" | "crypto"; inferred from the symbol if absent
+    interval: str = Field(default="1d", pattern="^(1d|1h)$")
 
 
 class EvaluateRequest(BaseModel):
@@ -88,7 +89,7 @@ async def kronos_status() -> dict:
 
 @router.post("/forecast")
 async def kronos_forecast(req: ForecastRequest) -> dict:
-    key = (req.symbol.upper().strip(), req.market, req.horizon)
+    key = (req.symbol.upper().strip(), req.market, req.horizon, req.interval)
     hit = _FORECAST_CACHE.get(key)
     if hit and time.time() - hit[0] < _FORECAST_TTL:
         return hit[1]
@@ -115,14 +116,15 @@ async def _forecast_local(req: ForecastRequest) -> dict:
     market = req.market if req.market in PRESETS else infer_market(symbol)
     horizon = req.horizon or PRESETS[market].default_horizon
 
+    period = "1mo" if req.interval == "1h" else "2y"
     try:
-        df = await market_data.history_frame(symbol, period="2y", interval="1d")
+        df = await market_data.history_frame(symbol, period=period, interval=req.interval)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     try:
         return await asyncio.to_thread(
-            kronos_service.forecast_blocking, df, symbol, market, horizon
+            kronos_service.forecast_blocking, df, symbol, market, horizon, req.interval
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -144,7 +146,17 @@ async def _forecast_remote(remote: str, req: ForecastRequest) -> dict:
         except Exception:
             detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=detail)
-    return resp.json()
+    body = resp.json()
+    # Version guard: an inference Space built before hourly support silently
+    # ignores the interval field and would return a DAILY forecast mislabeled
+    # as hourly. Refuse loudly instead.
+    if req.interval != "1d" and body.get("interval") != req.interval:
+        raise HTTPException(
+            status_code=502,
+            detail="the remote inference service predates hourly forecasts — "
+            "Factory-rebuild the HF Space to update it",
+        )
+    return body
 
 
 @router.post("/evaluate")

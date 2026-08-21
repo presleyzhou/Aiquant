@@ -11,6 +11,7 @@ import { buildKronosShare, takeKronosShare } from "../share";
 import { ShareButton } from "./ShareButton";
 
 const HORIZONS = [7, 14, 30, 60];
+const HOURLY_HORIZONS = [24, 48, 60];
 
 /** Module-level cache: every workspace shares one status probe. */
 let statusPromise: Promise<KronosStatus> | null = null;
@@ -29,6 +30,7 @@ export function KronosPanel({ symbol, marketId }: Props) {
   const { t } = useT();
   const [status, setStatus] = useState<KronosStatus | null>(null);
   const [horizon, setHorizon] = useState(30);
+  const [interval, setIntervalTf] = useState<"1d" | "1h">("1d");
   const [result, setResult] = useState<KronosForecast | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -63,7 +65,7 @@ export function KronosPanel({ symbol, marketId }: Props) {
     // waking from sleep — tell the user instead of looking frozen.
     const wakeTimer = window.setTimeout(() => setWaking(true), 8000);
     try {
-      setResult(await api.kronosForecast(symbol, h));
+      setResult(await api.kronosForecast(symbol, h, interval));
     } catch (err) {
       setError((err as Error).message);
       setResult(null);
@@ -111,6 +113,23 @@ export function KronosPanel({ symbol, marketId }: Props) {
       ) : (
         <>
           <div className="control-grid">
+            {marketId === "crypto" && (
+              <label className="field">
+                <span className="field__label">{t("kr.tf")}</span>
+                <select
+                  className="select"
+                  value={interval}
+                  onChange={(e) => {
+                    const next = e.target.value as "1d" | "1h";
+                    setIntervalTf(next);
+                    setHorizon(next === "1h" ? 24 : 30);
+                  }}
+                >
+                  <option value="1d">{t("kr.tf.daily")}</option>
+                  <option value="1h">{t("kr.tf.hourly")}</option>
+                </select>
+              </label>
+            )}
             <label className="field">
               <span className="field__label">{t("kr.horizon")}</span>
               <select
@@ -118,9 +137,13 @@ export function KronosPanel({ symbol, marketId }: Props) {
                 value={horizon}
                 onChange={(e) => setHorizon(Number(e.target.value))}
               >
-                {HORIZONS.map((h) => (
+                {(interval === "1h" ? HOURLY_HORIZONS : HORIZONS).map((h) => (
                   <option key={h} value={h}>
-                    {marketId === "crypto" ? t("kr.days", { n: String(h) }) : t("kr.bdays", { n: String(h) })}
+                    {interval === "1h"
+                      ? t("kr.hours", { n: String(h) })
+                      : marketId === "crypto"
+                        ? t("kr.days", { n: String(h) })
+                        : t("kr.bdays", { n: String(h) })}
                   </option>
                 ))}
               </select>

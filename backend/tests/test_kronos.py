@@ -211,7 +211,11 @@ def test_forecast_proxies_to_remote(remote_mode):
     assert resp.status_code == 200
     assert resp.json()["symbol"] == "AAPL"
     assert _FakeAsyncClient.calls == [
-        ("POST", "https://remote.example/api/kronos/forecast", {"symbol": "AAPL", "horizon": 14})
+        (
+            "POST",
+            "https://remote.example/api/kronos/forecast",
+            {"symbol": "AAPL", "horizon": 14, "interval": "1d"},
+        )
     ]
 
 
