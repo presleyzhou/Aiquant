@@ -8,7 +8,7 @@
 #
 # First forecast downloads the checkpoint (~100MB) from HuggingFace
 # (NeoQuasar/Kronos-small + NeoQuasar/Kronos-Tokenizer-base).
-torch>=2.0
+torch>=2.13.0
 einops>=0.8
 huggingface_hub>=0.30
 safetensors>=0.4
