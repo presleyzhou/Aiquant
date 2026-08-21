@@ -1,0 +1,23 @@
+name: Kronos Space keepalive
+
+# Free HF Spaces sleep after ~48h without traffic; the next visitor then
+# waits 30-60s for the wake. Two pings a day keep the inference service warm
+# at zero cost. If the Space is renamed, update the URL here.
+on:
+  schedule:
+    - cron: "17 2,14 * * *" # 02:17 & 14:17 UTC daily
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping inference Space
+        run: |
+          status=$(curl -s --max-time 120 -o /tmp/body -w '%{http_code}' \
+            https://presleyzhou-aiquant.hf.space/api/kronos/status || echo "000")
+          echo "HTTP $status"
+          cat /tmp/body || true
+          # A sleeping Space can answer slowly or 5xx on the first hit — the
+          # ping itself triggers the wake, so only hard failures matter.
+          [ "$status" != "000" ]

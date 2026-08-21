@@ -3,6 +3,7 @@ import type { Quote } from "../api";
 import { usePriceFlash } from "../hooks/usePriceFlash";
 import { useT } from "../i18n";
 import { displayName, type MarketProfile } from "../markets";
+import { AlertsPanel } from "./AlertsPanel";
 import { SymbolSearch } from "./SymbolSearch";
 
 interface Props {
@@ -10,12 +11,24 @@ interface Props {
   symbols: string[];
   quotes: Record<string, Quote>;
   active: string;
+  alertsVersion: number;
+  onAlertsChange: () => void;
   onSelect: (symbol: string) => void;
   onAdd: (symbol: string) => void;
   onRemove: (symbol: string) => void;
 }
 
-export function Watchlist({ profile, symbols, quotes, active, onSelect, onAdd, onRemove }: Props) {
+export function Watchlist({
+  profile,
+  symbols,
+  quotes,
+  active,
+  alertsVersion,
+  onAlertsChange,
+  onSelect,
+  onAdd,
+  onRemove,
+}: Props) {
   const { t } = useT();
   const [draft, setDraft] = useState("");
   const flash = usePriceFlash(quotes);
@@ -32,7 +45,10 @@ export function Watchlist({ profile, symbols, quotes, active, onSelect, onAdd, o
     <div className="panel panel--grow">
       <div className="panel__head">
         <span className="panel__title">{t("watch.title")}</span>
-        <span className="panel__meta">{symbols.length}</span>
+        <span className="panel__meta">
+          <AlertsPanel symbols={symbols} version={alertsVersion} onChange={onAlertsChange} />{" "}
+          {symbols.length}
+        </span>
       </div>
 
       <form className="watch-form" onSubmit={submit}>

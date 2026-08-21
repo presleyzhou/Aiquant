@@ -7,6 +7,8 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { api, type KronosEvaluation, type KronosForecast, type KronosStatus } from "../api";
 import { useT } from "../i18n";
+import { buildKronosShare, takeKronosShare } from "../share";
+import { ShareButton } from "./ShareButton";
 
 const HORIZONS = [7, 14, 30, 60];
 
@@ -38,16 +40,36 @@ export function KronosPanel({ symbol, marketId }: Props) {
     getStatus().then(setStatus).catch(() => setStatus(null));
   }, []);
 
-  const run = async () => {
+  // Shared-link replay: when the URL carried ?s=kr for this symbol, adopt its
+  // horizon and run immediately (once the status probe confirms availability).
+  useEffect(() => {
+    const share = takeKronosShare(symbol);
+    if (!share) return;
+    setHorizon(share.horizon);
+    const timer = window.setTimeout(() => void runWith(share.horizon), 400);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol]);
+
+  const [waking, setWaking] = useState(false);
+
+  const run = () => runWith(horizon);
+
+  const runWith = async (h: number) => {
     if (running) return;
     setRunning(true);
     setError(null);
+    // A response this slow almost always means the free inference Space is
+    // waking from sleep — tell the user instead of looking frozen.
+    const wakeTimer = window.setTimeout(() => setWaking(true), 8000);
     try {
-      setResult(await api.kronosForecast(symbol, horizon));
+      setResult(await api.kronosForecast(symbol, h));
     } catch (err) {
       setError((err as Error).message);
       setResult(null);
     } finally {
+      window.clearTimeout(wakeTimer);
+      setWaking(false);
       setRunning(false);
     }
   };
@@ -75,6 +97,9 @@ export function KronosPanel({ symbol, marketId }: Props) {
       <div className="panel__head">
         <span className="panel__title">{t("kr.title")}</span>
         <span className="panel__meta">
+          {result && !stale && (
+            <ShareButton url={() => buildKronosShare(marketId, result.symbol, result.horizon)} />
+          )}
           {status?.enabled ? (result ? `${result.model} · ${result.device}` : "Kronos-small") : t("kr.off")}
         </span>
       </div>
@@ -103,7 +128,7 @@ export function KronosPanel({ symbol, marketId }: Props) {
             <label className="field">
               <span className="field__label">&nbsp;</span>
               <button className="btn btn--primary" onClick={run} disabled={running}>
-                {running ? t("kr.running") : t("kr.run")}
+                {running ? (waking ? t("kr.waking") : t("kr.running")) : t("kr.run")}
               </button>
             </label>
           </div>

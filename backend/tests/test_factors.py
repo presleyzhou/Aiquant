@@ -265,3 +265,30 @@ def test_check_planted_decay_detected(monkeypatch):
     out = check_factor_blocking("rank(vwap)", "us", horizon)
     assert out["is_ic"] > 0.5
     assert abs(out["recent_ic"]) < 0.2
+
+
+# ------------------------------------------------------------- disk cache
+
+
+def test_disk_cache_roundtrip_and_ttl(tmp_path, monkeypatch):
+    import pandas as pd
+
+    from app.services import disk_cache
+
+    monkeypatch.setenv("AIQUANT_CACHE_DIR", str(tmp_path))
+    frame = pd.DataFrame({"a": [1.0, 2.0]})
+    disk_cache.store("t-key", {"close": frame})
+    loaded = disk_cache.load("t-key", ttl_seconds=60)
+    assert loaded is not None and loaded["close"].equals(frame)
+    # expired entries read as a miss
+    assert disk_cache.load("t-key", ttl_seconds=-1) is None
+    # unknown keys and weird characters are safe
+    assert disk_cache.load("no/such:key", 60) is None
+
+
+def test_disk_cache_corrupt_file_is_a_miss(tmp_path, monkeypatch):
+    from app.services import disk_cache
+
+    monkeypatch.setenv("AIQUANT_CACHE_DIR", str(tmp_path))
+    (tmp_path / "bad.pkl").write_bytes(b"not a pickle")
+    assert disk_cache.load("bad", 60) is None

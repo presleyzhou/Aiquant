@@ -15,7 +15,9 @@ import {
   savedFactors,
   type SavedFactor,
 } from "../store";
+import { buildFactorShare, takeFactorShare } from "../share";
 import { EquityChart } from "./EquityChart";
+import { ShareButton } from "./ShareButton";
 
 /** One evaluated candidate (or a failed parse). */
 interface FactorRow {
@@ -83,6 +85,23 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  // Shared-link replay (?s=fb): run the factor portfolio test directly.
+  useEffect(() => {
+    const share = takeFactorShare();
+    if (!share) return;
+    void (async () => {
+      setBtFor(share.expression);
+      try {
+        setBtResult(await api.factorBacktest({ ...share }));
+      } catch (err) {
+        setBtError((err as Error).message);
+      } finally {
+        setBtFor(null);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [items]);
@@ -671,6 +690,17 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                   {btResult && (
                     <div className="fl-bt">
                       <div className="fl-bt__head dim">
+                        <ShareButton
+                          url={() =>
+                            buildFactorShare({
+                              expression: btResult.expression,
+                              market: btResult.market,
+                              top_n: btResult.top_n,
+                              rebalance: btResult.rebalance,
+                              invert: btResult.inverted,
+                            })
+                          }
+                        />{" "}
                         {t("fl.bt.head", {
                           n: String(btResult.top_n),
                           r: String(btResult.rebalance),

@@ -221,3 +221,55 @@ export function saveFactorLessons(lessons: string[]): string[] {
   localStorage.setItem(LESSONS_KEY, JSON.stringify(final));
   return final;
 }
+
+/* ---------------------------------------------------------- price alerts ---
+ * Frontend-only rule engine over the live quote stream (Binance for crypto,
+ * Yahoo for stocks). One-shot: a triggered alert disarms until re-armed. */
+
+const ALERTS_KEY = "aiquant.alerts";
+
+export interface PriceAlert {
+  id: string;
+  symbol: string;
+  dir: "above" | "below";
+  price: number;
+  createdAt: string;
+  triggeredAt?: string;
+}
+
+export function savedAlerts(): PriceAlert[] {
+  return read<PriceAlert[]>(ALERTS_KEY, []);
+}
+
+export function saveAlert(symbol: string, dir: "above" | "below", price: number): PriceAlert[] {
+  const alert: PriceAlert = {
+    id: `al_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    symbol: symbol.toUpperCase(),
+    dir,
+    price,
+    createdAt: new Date().toISOString(),
+  };
+  const next = [alert, ...savedAlerts()].slice(0, 30);
+  localStorage.setItem(ALERTS_KEY, JSON.stringify(next));
+  return next;
+}
+
+export function deleteAlert(id: string): PriceAlert[] {
+  const next = savedAlerts().filter((a) => a.id !== id);
+  localStorage.setItem(ALERTS_KEY, JSON.stringify(next));
+  return next;
+}
+
+export function rearmAlert(id: string): PriceAlert[] {
+  const next = savedAlerts().map((a) => (a.id === id ? { ...a, triggeredAt: undefined } : a));
+  localStorage.setItem(ALERTS_KEY, JSON.stringify(next));
+  return next;
+}
+
+export function markTriggered(id: string): PriceAlert[] {
+  const next = savedAlerts().map((a) =>
+    a.id === id ? { ...a, triggeredAt: new Date().toISOString() } : a,
+  );
+  localStorage.setItem(ALERTS_KEY, JSON.stringify(next));
+  return next;
+}

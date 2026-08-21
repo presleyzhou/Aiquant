@@ -4,12 +4,14 @@ import { AIPanel } from "./components/AIPanel";
 import { BacktestPanel } from "./components/BacktestPanel";
 import { FactorLab } from "./components/FactorLab";
 import { Tour } from "./components/Tour";
+import { parseShareFromUrl } from "./share";
 import { KronosPanel } from "./components/KronosPanel";
 import { ChartPanel } from "./components/ChartPanel";
 import { MarketPage } from "./components/MarketPage";
 import { StrategyLab } from "./components/StrategyLab";
 import { TickerTape } from "./components/TickerTape";
 import { Watchlist } from "./components/Watchlist";
+import { useAlerts } from "./hooks/useAlerts";
 import { useBinanceStream } from "./hooks/useBinanceStream";
 import { useQuoteStream } from "./hooks/useQuoteStream";
 import { useT } from "./i18n";
@@ -69,11 +71,37 @@ export default function App() {
     () => ({ ...yahooQuotes, ...binanceQuotes }),
     [yahooQuotes, binanceQuotes],
   );
+  const { toasts, version: alertsVersion, bump: bumpAlerts } = useAlerts(quotes);
 
   useEffect(() => {
     localStorage.setItem(MARKETS.us.storageKey, JSON.stringify(lists.us));
     localStorage.setItem(MARKETS.crypto.storageKey, JSON.stringify(lists.crypto));
   }, [lists]);
+
+  // Shared-link replay: switch to the right workspace, add the symbol, and
+  // (for backtests) queue the preset — panels handle the rest themselves.
+  useEffect(() => {
+    const share = parseShareFromUrl();
+    if (!share) return;
+    const market = share.market as MarketId;
+    if (share.symbol) {
+      add(market, share.symbol);
+      select(market, share.symbol);
+    }
+    if (share.kind === "fb") {
+      setView("factors");
+      return;
+    }
+    switchView(market);
+    if (share.kind === "bt" && share.symbol && share.backtestPayload) {
+      queueBacktestPreset({
+        name: t("share.preset"),
+        payload: { ...share.backtestPayload, symbol: share.symbol },
+        market,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     api
@@ -212,6 +240,8 @@ export default function App() {
           quotes={quotes}
           active={actives[market]}
           ai={ai}
+          alertsVersion={alertsVersion}
+          onAlertsChange={bumpAlerts}
           presetTarget={lastTerminal === market}
           onSelect={(s) => select(market, s)}
           onAdd={(s) => add(market, s)}
@@ -219,6 +249,17 @@ export default function App() {
         />
       ))}
 
+      {toasts.length > 0 && (
+        <div className="toasts">
+          {toasts.map((toast) => (
+            <div key={toast.id} className="toast">
+              <b>{toast.symbol}</b>{" "}
+              {toast.dir === "above" ? t("al.hitAbove") : t("al.hitBelow")} {toast.price}
+              <span className="dim"> · {t("al.now")} {toast.actual}</span>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="disclaimer">{t("app.disclaimer")}</div>
       <Tour />
     </div>
@@ -232,13 +273,27 @@ function TerminalWorkspace(props: {
   quotes: Record<string, Quote>;
   active: string;
   ai: AiState;
+  alertsVersion: number;
+  onAlertsChange: () => void;
   presetTarget: boolean;
   onSelect: (symbol: string) => void;
   onAdd: (symbol: string) => void;
   onRemove: (symbol: string) => void;
 }) {
-  const { profile, hidden, symbols, quotes, active, ai, presetTarget, onSelect, onAdd, onRemove } =
-    props;
+  const {
+    profile,
+    hidden,
+    symbols,
+    quotes,
+    active,
+    ai,
+    alertsVersion,
+    onAlertsChange,
+    presetTarget,
+    onSelect,
+    onAdd,
+    onRemove,
+  } = props;
   const { t } = useT();
   return (
     <div
@@ -251,6 +306,8 @@ function TerminalWorkspace(props: {
           symbols={symbols}
           quotes={quotes}
           active={active}
+          alertsVersion={alertsVersion}
+          onAlertsChange={onAlertsChange}
           onSelect={onSelect}
           onAdd={onAdd}
           onRemove={onRemove}

@@ -14,3 +14,5 @@ yfinance>=0.2.50
 pandas>=2.2
 numpy>=1.26
 anthropic>=0.69
+# error monitoring (inert without SENTRY_DSN)
+sentry-sdk>=2.0

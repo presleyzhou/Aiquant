@@ -13,6 +13,17 @@ logging.basicConfig(
 
 settings = get_settings()
 
+# Error monitoring — a no-op unless SENTRY_DSN is configured. The FastAPI
+# integration is picked up automatically by sentry_sdk.init.
+if settings.sentry_dsn:
+    try:
+        import sentry_sdk
+
+        sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=0.05)
+        logging.getLogger("aiquant").info("Sentry enabled")
+    except Exception as exc:  # never let monitoring break the app
+        logging.getLogger("aiquant").warning("Sentry init failed: %s", exc)
+
 app = FastAPI(
     title="AI Quant Terminal",
     description=(

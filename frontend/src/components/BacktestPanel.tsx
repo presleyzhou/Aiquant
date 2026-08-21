@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { api, type BacktestResult } from "../api";
 import { useT } from "../i18n";
 import { EVENTS, takeBacktestPresetFor } from "../store";
+import { buildBacktestShare } from "../share";
+import { ShareButton } from "./ShareButton";
 import { EquityChart } from "./EquityChart";
 
 const STRATEGY_KEYS = [
@@ -109,7 +111,25 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
           {t("bt.title")}
           {presetName && <span style={{ color: "var(--cyan)" }}> · {presetName}</span>}
         </span>
-        <span className="panel__meta">{result ? `${result.symbol} · ${result.period}` : symbol}</span>
+        <span className="panel__meta">
+          {result && (
+            <ShareButton
+              url={() =>
+                buildBacktestShare(marketId, result.symbol, {
+                  strategy,
+                  period,
+                  fast,
+                  slow,
+                  rsi_period: rsiPeriod,
+                  rsi_oversold: rsiOversold,
+                  rsi_overbought: rsiOverbought,
+                  kronos_horizon: kronosHorizon,
+                })
+              }
+            />
+          )}
+          {result ? `${result.symbol} · ${result.period}` : symbol}
+        </span>
       </div>
 
       <div className="control-grid">

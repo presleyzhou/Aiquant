@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=("../.env", ".env"), extra="ignore")
 
     # --- server ---
+    # Optional Sentry DSN — error monitoring activates only when set.
+    sentry_dsn: str | None = None
     cors_origins: str = "http://localhost:5173,http://localhost:8080"
 
     # --- Claude ---

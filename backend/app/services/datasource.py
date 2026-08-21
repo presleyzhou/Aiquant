@@ -173,6 +173,15 @@ class MarketDataService:
         }
 
     def _fetch_history_blocking(self, symbol: str, period: str, interval: str) -> pd.DataFrame:
+        from app.services import disk_cache
+
+        # 30 minutes is far fresher than daily bars change, and it absorbs the
+        # repeat fetches from backtests/indicators/Kronos on the same symbol.
+        cache_key = f"hist-{symbol}-{period}-{interval}"
+        cached = disk_cache.load(cache_key, ttl_seconds=1800)
+        if isinstance(cached, pd.DataFrame) and not cached.empty:
+            return cached
+
         df = yf.Ticker(symbol).history(period=period, interval=interval)
         if df.empty:
             raise LookupError(f"no history for {symbol!r} (period={period}, interval={interval})")
@@ -182,6 +191,7 @@ class MarketDataService:
         df = df.dropna(subset=["Open", "High", "Low", "Close"])
         if df.empty:
             raise LookupError(f"history for {symbol!r} contained no usable bars")
+        disk_cache.store(cache_key, df)
         return df
 
     async def history_frame(self, symbol: str, period: str, interval: str = "1d") -> pd.DataFrame:

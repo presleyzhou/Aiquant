@@ -35,7 +35,7 @@ import pandas as pd
 import yfinance as yf
 
 from app.config import get_settings
-from app.services import factor_dsl
+from app.services import disk_cache, factor_dsl
 from app.services.llm import ClaudeUnavailable, analyst
 
 log = logging.getLogger("aiquant.factors")
@@ -81,6 +81,13 @@ def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
     if cached and time.time() - cached[0] < _PANEL_TTL:
         return cached[1]
 
+    # Disk layer: survives process restarts and serverless instance churn,
+    # and cuts the 40-ticker × 3y Yahoo download to one fetch per TTL window.
+    disk = disk_cache.load(f"panel-{market}", _PANEL_TTL)
+    if isinstance(disk, dict) and "close" in disk:
+        _PANEL_CACHE[market] = (time.time(), disk)
+        return disk
+
     tickers = UNIVERSES[market]
     raw = yf.download(
         tickers, period="3y", interval="1d", auto_adjust=True,
@@ -111,6 +118,7 @@ def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
     panel["vwap"] = (panel["high"] + panel["low"] + close) / 3
 
     _PANEL_CACHE[market] = (time.time(), panel)
+    disk_cache.store(f"panel-{market}", panel)
     return panel
 
 
