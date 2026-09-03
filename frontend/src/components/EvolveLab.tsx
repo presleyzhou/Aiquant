@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { streamNDJSON } from "../api";
 import { useT } from "../i18n";
 import { saveFactors, savedFactors } from "../store";
@@ -17,9 +17,18 @@ interface Champion {
   bench_return_pct?: number;
 }
 
+interface HofEntry {
+  expression: string;
+  is_ic: number;
+  gen: number;
+}
+
 interface GenEvent {
   gen: number;
   generations: number;
+  hof?: HofEntry[];
+  best_abs_ic?: number;
+  min_ic?: number;
   best_fitness: number;
   mean_fitness: number;
   unique: number;
@@ -49,6 +58,8 @@ interface Discovered {
 interface DoneEvent {
   market: string;
   horizon: number;
+  min_ic?: number;
+  best_abs_ic?: number;
   generations: number;
   evaluated_total: number;
   elapsed: number;
@@ -76,7 +87,20 @@ export function EvolveLab() {
   const [done, setDone] = useState<DoneEvent | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [added, setAdded] = useState<Set<string>>(new Set());
+  const [streamEnded, setStreamEnded] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const discoveredRef = useRef<HTMLDivElement>(null);
+
+  // When the run completes, bring the discovered list into view — on narrow
+  // layouts it sits below the progress panel and was easy to miss.
+  useEffect(() => {
+    if (done) {
+      window.setTimeout(
+        () => discoveredRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+        150,
+      );
+    }
+  }, [done]);
 
   const run = async () => {
     if (running) return;
@@ -85,6 +109,7 @@ export function EvolveLab() {
     setDone(null);
     setError(null);
     setAdded(new Set());
+    setStreamEnded(false);
     const controller = new AbortController();
     abortRef.current = controller;
     const seeds = warmStart
@@ -106,8 +131,14 @@ export function EvolveLab() {
       if ((err as Error).name !== "AbortError") setError((err as Error).message);
     } finally {
       setRunning(false);
+      setStreamEnded(true);
       abortRef.current = null;
     }
+  };
+
+  const rerunLoose = () => {
+    setMode("loose");
+    window.setTimeout(() => void run(), 0);
   };
 
   const addToZoo = (d: Discovered) => {
@@ -222,6 +253,25 @@ export function EvolveLab() {
                     </div>
                   </div>
                 )}
+                {last.hof && last.hof.length > 0 && (
+                  <div className="gp-livehof">
+                    <div className="gp-champion__label dim">{t("gp.liveHof", { n: String(last.hof.length) })}</div>
+                    <ul className="gp-livehof__list">
+                      {last.hof.map((h) => (
+                        <li key={h.expression}>
+                          <code>{h.expression}</code>
+                          <span className={`dim ${h.is_ic >= 0 ? "up" : "dn"}`}> IC {fix(h.is_ic, 3, true)}</span>
+                          <span className="dim"> · G{h.gen}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {last.hof && last.hof.length === 0 && running && (
+                  <div className="dim" style={{ fontSize: 11, marginTop: 8 }}>
+                    {t("gp.noHofYet", { b: fix(last.best_abs_ic, 3), m: fix(last.min_ic, 3) })}
+                  </div>
+                )}
               </>
             )}
             {running && <div className="lab-step__result dim">{t("gp.evolving")}</div>}
@@ -230,16 +280,29 @@ export function EvolveLab() {
         </div>
 
         {/* -------------------------------------------- discovered factors */}
-        <div className="lab-side">
+        <div className="lab-side" ref={discoveredRef}>
           <div className="panel">
             <div className="panel__head">
               <span className="panel__title">{t("gp.discovered")}</span>
               <span className="panel__meta">{done ? t("gp.doneMeta", { n: String(done.discovered.length), g: String(done.generations) }) : ""}</span>
             </div>
             {!done ? (
-              <div className="empty" style={{ padding: 24 }}>{running ? t("gp.waitDone") : t("gp.discoveredEmpty")}</div>
+              <div className="empty" style={{ padding: 24 }}>
+                {running
+                  ? t("gp.waitDone")
+                  : streamEnded && gens.length > 0 && !error
+                    ? t("gp.interrupted")
+                    : t("gp.discoveredEmpty")}
+              </div>
             ) : done.discovered.length === 0 ? (
-              <div className="empty" style={{ padding: 24 }}>{t("gp.none")}</div>
+              <div className="empty" style={{ padding: 24 }}>
+                <div>{t("gp.noneDetail", { b: fix(done.best_abs_ic, 3), m: fix(done.min_ic, 3) })}</div>
+                {mode !== "loose" && (
+                  <button className="btn btn--mini" style={{ marginTop: 10 }} onClick={rerunLoose}>
+                    {t("gp.retryLoose")}
+                  </button>
+                )}
+              </div>
             ) : (
               <>
                 {done.equity_curve && done.benchmark_curve && (

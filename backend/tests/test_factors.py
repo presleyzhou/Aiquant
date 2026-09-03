@@ -421,3 +421,17 @@ def test_unknown_market_rejected():
     client = TestClient(app)
     r = client.post("/api/factors/check", json={"expression": "rank(close)", "market": "mars"})
     assert r.status_code == 422
+
+
+def test_gp_gen_event_carries_live_hof(monkeypatch):
+    from app.services import factor_gp, factor_mine
+
+    panel = _panel(400, 12, seed=5)
+    panel["vwap"] = panel["close"].pct_change(10).shift(-10)  # planted → HOF fills fast
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    monkeypatch.setattr(factor_gp, "_load_panel_blocking", lambda market: panel)
+    events: list[dict] = []
+    report = factor_gp.evolve_blocking("us", 10, 30, 4, "standard", [], 11, events.append)
+    assert all("hof" in e and "best_abs_ic" in e and "min_ic" in e for e in events)
+    assert len(events[-1]["hof"]) >= 1
+    assert "min_ic" in report and "best_abs_ic" in report

@@ -290,6 +290,9 @@ def evolve_blocking(
                     "bench_return_pct": port["stats"]["benchmark"]["total_return_pct"],
                 }
             )
+        best_abs_ic_seen = max(
+            [abs(m["is_ic"]) for m in cache.values() if m is not None] or [0.0]
+        )
         row = {
             "type": "gen",
             "gen": gen,
@@ -299,6 +302,13 @@ def evolve_blocking(
             "unique": len(scored),
             "evaluated_total": len(cache),
             "hof_size": len(hof),
+            # live hall of fame so discoveries show up as they happen
+            "hof": [
+                {"expression": h["expr"], "is_ic": h["metrics"]["is_ic"], "gen": h["gen"]}
+                for h in hof
+            ],
+            "best_abs_ic": round(best_abs_ic_seen, 4),
+            "min_ic": min_ic,
             "champion": champion,
             "elapsed": round(time.time() - started, 1),
         }
@@ -373,6 +383,8 @@ def evolve_blocking(
         "market": market,
         "horizon": horizon,
         "mode": mode,
+        "min_ic": min_ic,
+        "best_abs_ic": max([abs(m["is_ic"]) for m in cache.values() if m is not None] or [0.0]),
         "generations": len(history),
         "evaluated_total": len(cache),
         "elapsed": round(time.time() - started, 1),

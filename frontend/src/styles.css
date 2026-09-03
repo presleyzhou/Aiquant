@@ -2307,6 +2307,28 @@ tbody tr:hover td {
   accent-color: var(--amber);
 }
 
+.gp-livehof {
+  border-top: 1px dashed var(--border);
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.gp-livehof__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 11px;
+}
+
+.gp-livehof__list li {
+  padding: 3px 0;
+  word-break: break-all;
+}
+
+.gp-livehof__list code {
+  color: var(--cyan);
+}
+
 /* ------------------------------------------------------------- news panel --- */
 
 .news-panel {
