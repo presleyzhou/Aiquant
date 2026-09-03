@@ -269,6 +269,9 @@ def compute(expression: str, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
     if not isinstance(values, pd.DataFrame) or values.dropna(how="all").empty:
         raise FactorError("expression produced no usable values")
     values = values.replace([np.inf, -np.inf], np.nan)
-    if math.isclose(float(values.std().sum() or 0), 0.0, abs_tol=1e-12):
-        raise FactorError("expression is constant across the panel")
+    spread = float(values.std().sum())
+    # NaN spread (all-NaN columns) is as useless as zero spread — both mean
+    # the expression carries no cross-sectional information.
+    if not (spread > 1e-12):
+        raise FactorError("expression is constant (or undefined) across the panel")
     return values, node

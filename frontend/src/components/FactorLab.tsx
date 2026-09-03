@@ -19,6 +19,7 @@ import { buildFactorShare, takeFactorShare } from "../share";
 import { deployPaper } from "../store";
 import { DeployButton } from "./DeployButton";
 import { EquityChart } from "./EquityChart";
+import { EvolveLab } from "./EvolveLab";
 import { ShareButton } from "./ShareButton";
 
 /** One evaluated candidate (or a failed parse). */
@@ -61,6 +62,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   const [rounds, setRounds] = useState(3);
   const [perRound, setPerRound] = useState(4);
   const [mode, setMode] = useState("standard");
+  const [engine, setEngine] = useState<"llm" | "gp">("llm");
   const [saved, setSaved] = useState<SavedFactor[]>(savedFactors);
   const [btFor, setBtFor] = useState<string | null>(null);
   const [btResult, setBtResult] = useState<FactorBacktestResult | null>(null);
@@ -320,7 +322,29 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
           </p>
         </section>
 
-        {!aiEnabled ? (
+        <div className="engine-toggle" role="tablist">
+          <button
+            role="tab"
+            className={`chip${engine === "llm" ? " is-on" : ""}`}
+            onClick={() => setEngine("llm")}
+          >
+            {t("gp.engine.llm")}
+          </button>
+          <button
+            role="tab"
+            className={`chip${engine === "gp" ? " is-on" : ""}`}
+            onClick={() => setEngine("gp")}
+          >
+            {t("gp.engine.gp")}
+          </button>
+          <span className="dim engine-toggle__note">
+            {engine === "gp" ? t("gp.engine.gpNote") : t("gp.engine.llmNote")}
+          </span>
+        </div>
+
+        {engine === "gp" ? (
+          <EvolveLab />
+        ) : !aiEnabled ? (
           <div className="notice" style={{ maxWidth: 560 }}>
             {t("lab.aiOff")}
           </div>

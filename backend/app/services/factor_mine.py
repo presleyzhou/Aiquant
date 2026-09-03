@@ -169,6 +169,8 @@ def evaluate_candidate(
 
     is_ic, is_icir = summarize(ic_is)
     oos_ic, oos_icir = summarize(ic_oos)
+    if not (np.isfinite(is_ic) and np.isfinite(oos_ic)):
+        raise factor_dsl.FactorError("IC is undefined — factor has no usable cross-sectional variation")
 
     ranked = values.rank(axis=1, pct=True)
     stability = float(ranked.corrwith(ranked.shift(1), axis=1).mean())

@@ -292,3 +292,66 @@ def test_disk_cache_corrupt_file_is_a_miss(tmp_path, monkeypatch):
     monkeypatch.setenv("AIQUANT_CACHE_DIR", str(tmp_path))
     (tmp_path / "bad.pkl").write_bytes(b"not a pickle")
     assert disk_cache.load("bad", 60) is None
+
+
+# ------------------------------------------------------------ GP engine
+
+
+def test_gp_random_trees_are_valid_dsl():
+    import random
+
+    from app.services.factor_gp import canonical, crossover, mutate, random_tree
+
+    rng = random.Random(3)
+    trees = [random_tree(rng, 3, full=(i % 2 == 0)) for i in range(150)]
+    assert all(canonical(t) is not None for t in trees if factor_dsl.complexity(t) <= 24)
+    a, b = random_tree(rng, 3), random_tree(rng, 3)
+    kids = [crossover(rng, a, b) for _ in range(60)] + [mutate(rng, a) for _ in range(60)]
+    # every child either serializes to a valid capped expression or is rejected — never crashes
+    for k in kids:
+        canonical(k)
+
+
+def test_gp_has_transform_gate():
+    from app.services.factor_gp import has_transform
+
+    assert not has_transform(factor_dsl.parse("volume"))
+    assert not has_transform(factor_dsl.parse("high * volume"))
+    assert has_transform(factor_dsl.parse("rank(delta(close, 5))"))
+    assert has_transform(factor_dsl.parse("ts_corr(high, low, 10) + 1"))
+
+
+def test_constant_expression_rejected_even_when_nan():
+    panel = _panel(200, 8)
+    with pytest.raises(factor_dsl.FactorError):
+        factor_dsl.compute("ts_rank(rank(close / close), 10)", panel)
+
+
+def test_gp_finds_planted_signal(monkeypatch):
+    """With future returns leaked into `vwap`, evolution must converge on a
+    vwap-based champion with high IC — the engine's plumbing test."""
+    from app.services import factor_gp, factor_mine
+
+    panel = _panel(400, 12, seed=5)
+    horizon = 10
+    panel["vwap"] = panel["close"].pct_change(horizon).shift(-horizon)
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    monkeypatch.setattr(factor_gp, "_load_panel_blocking", lambda market: panel)
+
+    events: list[dict] = []
+    report = factor_gp.evolve_blocking("us", horizon, 30, 8, "standard", [], 11, events.append)
+    assert len(events) == 8 and events[-1]["gen"] == 8
+    best = max(abs(d["is_ic"]) for d in report["discovered"]) if report["discovered"] else 0
+    assert best > 0.5
+    assert any("vwap" in d["expression"] for d in report["discovered"])
+
+
+def test_gp_is_deterministic_with_seed(monkeypatch):
+    from app.services import factor_gp, factor_mine
+
+    panel = _panel(300, 10, seed=2)
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    monkeypatch.setattr(factor_gp, "_load_panel_blocking", lambda market: panel)
+    a = factor_gp.evolve_blocking("us", 10, 20, 4, "loose", [], 42, lambda e: None)
+    b = factor_gp.evolve_blocking("us", 10, 20, 4, "loose", [], 42, lambda e: None)
+    assert [d["expression"] for d in a["discovered"]] == [d["expression"] for d in b["discovered"]]

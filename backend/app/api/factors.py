@@ -14,6 +14,7 @@ import asyncio
 from fastapi import HTTPException
 
 from app.services import factor_dsl
+from app.services.factor_gp import evolve_stream
 from app.services.factor_mine import (
     MODES,
     UNIVERSES,
@@ -64,6 +65,16 @@ class CompositeRequest(BaseModel):
     weighting: str = Field("ic", description="ic | equal")
     top_n: int = Field(5, ge=2, le=10)
     rebalance: int = Field(10, ge=1, le=30)
+
+
+class EvolveRequest(BaseModel):
+    market: str = Field("us")
+    horizon: int = Field(10, ge=1, le=30)
+    population: int = Field(40, ge=20, le=80)
+    generations: int = Field(15, ge=3, le=40)
+    mode: str = Field("standard")
+    seeds: list[str] = Field(default_factory=list, max_length=10)  # warm-start zoo factors
+    seed: int | None = Field(default=None, description="RNG seed for reproducibility")
 
 
 class CheckRequest(BaseModel):
@@ -150,3 +161,27 @@ async def factor_check(req: CheckRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/evolve")
+async def evolve(req: EvolveRequest) -> StreamingResponse:
+    """Genetic-programming factor evolution — no LLM involved, streams one
+    event per generation (champion IC + portfolio stats) then the hall of
+    fame with holdout verdicts."""
+
+    async def generate():
+        try:
+            async for event in evolve_stream(
+                req.market, req.horizon, req.population, req.generations, req.mode,
+                [s[:240] for s in req.seeds], req.seed,
+            ):
+                yield json.dumps(event, default=str) + "\n"
+        except Exception as exc:
+            log.exception("factor evolution stream failed")
+            yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
