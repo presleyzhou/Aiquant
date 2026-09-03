@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 import pandas as pd
 
 from app.api.kronos import signal_points
+from app.api.market import _clean_symbol
 from app.services import backtest as bt
 from app.services import indicators as ind
 from app.services.datasource import market_data
@@ -23,6 +24,7 @@ async def get_indicator(
     period: int | None = Query(None, ge=2, le=400),
     history: str = Query("1y", description="Price history window to compute over"),
 ):
+    symbol = _clean_symbol(symbol)
     try:
         df = await market_data.history_frame(symbol, history, "1d")
     except LookupError as exc:

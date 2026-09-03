@@ -405,3 +405,19 @@ def test_mining_endpoint_rate_limited(monkeypatch):
         assert r1.status_code == 200
     r2 = client.post("/api/factors/mine", json={"market": "us"})
     assert r2.status_code == 429
+
+
+# ------------------------------------------------------ input validation
+
+
+def test_blank_symbol_is_400_not_502():
+    client = TestClient(app)
+    assert client.get("/api/market/candles/%20").status_code == 400
+    assert client.get("/api/market/news/%20").status_code == 400
+    assert client.get("/api/analytics/indicator/%20/rsi").status_code == 400
+
+
+def test_unknown_market_rejected():
+    client = TestClient(app)
+    r = client.post("/api/factors/check", json={"expression": "rank(close)", "market": "mars"})
+    assert r.status_code == 422

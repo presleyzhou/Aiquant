@@ -39,7 +39,7 @@ class MineMemory(BaseModel):
 
 
 class MineRequest(BaseModel):
-    market: str = Field("us", description="us | crypto")
+    market: str = Field("us", pattern="^(us|crypto)$")
     horizon: int = Field(10, ge=1, le=30, description="forward-return horizon, bars")
     rounds: int = Field(3, ge=1, le=6)
     per_round: int = Field(4, ge=2, le=6)
@@ -49,7 +49,7 @@ class MineRequest(BaseModel):
 
 class FactorBacktestRequest(BaseModel):
     expression: str = Field(min_length=1, max_length=240)
-    market: str = Field("us")
+    market: str = Field("us", pattern="^(us|crypto)$")
     top_n: int = Field(5, ge=2, le=10)
     rebalance: int = Field(10, ge=1, le=30)
     invert: bool = False
@@ -63,14 +63,14 @@ class CompositeFactor(BaseModel):
 
 class CompositeRequest(BaseModel):
     factors: list[CompositeFactor] = Field(min_length=2, max_length=8)
-    market: str = Field("us")
+    market: str = Field("us", pattern="^(us|crypto)$")
     weighting: str = Field("ic", description="ic | equal")
     top_n: int = Field(5, ge=2, le=10)
     rebalance: int = Field(10, ge=1, le=30)
 
 
 class EvolveRequest(BaseModel):
-    market: str = Field("us")
+    market: str = Field("us", pattern="^(us|crypto)$")
     horizon: int = Field(10, ge=1, le=30)
     population: int = Field(40, ge=20, le=80)
     generations: int = Field(15, ge=3, le=40)
@@ -81,7 +81,7 @@ class EvolveRequest(BaseModel):
 
 class CheckRequest(BaseModel):
     expression: str = Field(min_length=1, max_length=240)
-    market: str = Field("us")
+    market: str = Field("us", pattern="^(us|crypto)$")
     horizon: int = Field(10, ge=1, le=30)
 
 

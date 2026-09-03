@@ -1,3 +1,4 @@
+import re
 import asyncio
 
 from fastapi import APIRouter, HTTPException, Query
@@ -6,6 +7,17 @@ from app.services import symbol_search
 from app.services.datasource import market_data
 
 router = APIRouter(prefix="/api/market", tags=["market"])
+
+
+_SYMBOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-=^]{0,19}$")
+
+
+def _clean_symbol(symbol: str) -> str:
+    """Reject blank/garbage tickers with a 400 instead of a 502 from upstream."""
+    symbol = (symbol or "").strip().upper()
+    if not _SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=400, detail=f"invalid symbol {symbol!r}")
+    return symbol
 
 
 @router.get("/search")
@@ -22,6 +34,7 @@ async def search_symbols(
 
 @router.get("/quote/{symbol}")
 async def get_quote(symbol: str):
+    symbol = _clean_symbol(symbol)
     try:
         return await market_data.quote(symbol)
     except LookupError as exc:
@@ -44,6 +57,7 @@ async def get_candles(
     period: str = Query("6mo", description="1d 5d 1mo 3mo 6mo 1y 2y 5y max"),
     interval: str | None = Query(None, description="Override the auto-selected bar size"),
 ):
+    symbol = _clean_symbol(symbol)
     try:
         return await market_data.candles(symbol, period=period, interval=interval)
     except LookupError as exc:
@@ -64,7 +78,7 @@ async def get_symbol_news(symbol: str, limit: int = Query(8, ge=1, le=15)):
 
     from app.services.symbol_news import fetch_symbol_news
 
-    symbol = symbol.upper().strip()
+    symbol = _clean_symbol(symbol)
     articles = await asyncio.to_thread(fetch_symbol_news, symbol, limit)
     return {"symbol": symbol, "articles": articles}
 

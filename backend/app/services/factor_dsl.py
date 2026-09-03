@@ -12,7 +12,6 @@ down the index; cross-sectional operators (rank, zscore) act across columns.
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
 
