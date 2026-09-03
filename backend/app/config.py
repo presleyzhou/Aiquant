@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     # Chat (AI 分析) rarely needs the full budget a strategy-design session
     # does; a tighter cap trims worst-case spend at zero quality cost.
     claude_chat_max_tokens: int = 8000
+    # Cheaper tier for structured, evaluator-guarded tasks (news sentiment,
+    # factor-expression generation). Opus stays on the reasoning-heavy paths.
+    claude_model_light: str = "claude-sonnet-5"
+    # Per-IP rate limits for token-spending endpoints (window in seconds).
+    rl_chat_per_hour: int = 20
+    rl_strategy_per_day: int = 5
+    rl_mining_per_day: int = 5
+    rl_evolve_per_day: int = 20
+    rl_global_ai_per_day: int = 500
 
     # --- data sources (optional; yfinance needs no key) ---
     alpha_vantage_key: str | None = None

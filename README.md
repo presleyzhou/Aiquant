@@ -95,6 +95,9 @@ vercel --prod   # 生产环境
 | `ANTHROPIC_API_KEY` | 空 | 配上才会启用 AI 分析面板 |
 | `CLAUDE_MODEL` | `claude-opus-5` | 也可用 `claude-sonnet-5`（更便宜）等 |
 | `CLAUDE_EFFORT` | `high` | `low`/`medium`/`high`/`xhigh`/`max`，控制思考深度与花费 |
+| `CLAUDE_MODEL_LIGHT` | `claude-sonnet-5` | 轻任务模型（新闻情绪、因子表达式生成），成本约为 Opus 的 1/5 |
+| `CLAUDE_CHAT_MAX_TOKENS` | `8000` | AI 分析对话的单次输出上限（策略工坊仍用 `CLAUDE_MAX_TOKENS`） |
+| `RL_CHAT_PER_HOUR` / `RL_STRATEGY_PER_DAY` / `RL_MINING_PER_DAY` / `RL_EVOLVE_PER_DAY` | 20 / 5 / 5 / 20 | 每 IP 限流；`RL_GLOBAL_AI_PER_DAY`（500）为实例级每日 AI 调用熔断 |
 | `ALPHA_VANTAGE_KEY` | 空 | 仅供内嵌的 Alpha Vantage provider 使用；yfinance 无需 key |
 | `CORS_ORIGINS` | localhost | 仅当前后端不同源时才需要 |
 | `KRONOS_ENABLED` | `auto` | Kronos K线预测；`auto` = 装了 torch 就启用，`0` 强制关闭 |
@@ -145,7 +148,7 @@ Vercel 后端会把 `/api/kronos/*` 服务器侧转发过去（无 CORS、前端
 | POST | `/api/factors/composite` | 多因子合成回测（等权 / 样本内 IC 加权） |
 | POST | `/api/factors/check` | 因子体检：全窗/留出/近60日 IC（衰减监控与跨市场移植检验共用） |
 | POST | `/api/factors/evolve` | 遗传算法因子进化（NDJSON 流：每代冠军 + 名人堂留出期验证） |
-| GET | `/api/ai/status` | AI 是否可用、用的哪个模型 |
+| GET | `/api/ai/status` | AI 是否可用、模型/轻量模型、当日 token 用量与限流配置 |
 | POST | `/api/ai/analyze` | 流式分析（NDJSON） |
 | WS | `/ws/quotes` | 实时报价推送 |
 

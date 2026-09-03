@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from app.services.ratelimit import limiter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -30,6 +32,14 @@ async def status():
         "enabled": analyst.enabled,
         "model": settings.claude_model if analyst.enabled else None,
         "effort": settings.claude_effort if analyst.enabled else None,
+        "light_model": settings.claude_model_light if analyst.enabled else None,
+        "usage_today": __import__("app.services.usage", fromlist=["today"]).today(),
+        "limits": {
+            "chat_per_hour": settings.rl_chat_per_hour,
+            "strategy_per_day": settings.rl_strategy_per_day,
+            "mining_per_day": settings.rl_mining_per_day,
+            "evolve_per_day": settings.rl_evolve_per_day,
+        },
     }
 
 
@@ -60,7 +70,10 @@ def build_strategy_prompt(req: StrategyRequest) -> str:
     return "\n".join(lines)
 
 
-@router.post("/strategy")
+@router.post(
+    "/strategy",
+    dependencies=[Depends(limiter("strategy", "rl_strategy_per_day", 86_400, global_attr="rl_global_ai_per_day"))],
+)
 async def generate_strategy(req: StrategyRequest):
     """Stream a strategy-design session as NDJSON.
 
@@ -90,7 +103,10 @@ async def generate_strategy(req: StrategyRequest):
     )
 
 
-@router.post("/analyze")
+@router.post(
+    "/analyze",
+    dependencies=[Depends(limiter("chat", "rl_chat_per_hour", 3_600, global_attr="rl_global_ai_per_day"))],
+)
 async def analyze(req: AnalyzeRequest):
     """Stream analysis as newline-delimited JSON events.
 
@@ -173,7 +189,7 @@ async def news_summary(req: NewsSummaryRequest, request: Request):
     headlines = "\n".join(f"- {a['title']} ({a['publisher']})" for a in articles)
     settings = get_settings()
     response = await analyst.client.messages.create(
-        model=settings.claude_model,
+        model=settings.claude_model_light,
         max_tokens=500,
         system=(
             "你是量化终端的新闻情绪分析器。只依据给出的标题判断，不得虚构标题之外的事实；"
@@ -182,6 +198,13 @@ async def news_summary(req: NewsSummaryRequest, request: Request):
         messages=[{"role": "user", "content": f"标的 {symbol} 最近的新闻标题：\n{headlines}"}],
         tools=[NEWS_SUMMARY_TOOL],
         tool_choice={"type": "tool", "name": "submit_sentiment"},
+    )
+    from app.services import usage as usage_meter
+
+    usage_meter.record(
+        settings.claude_model_light,
+        getattr(response.usage, "input_tokens", 0),
+        getattr(response.usage, "output_tokens", 0),
     )
     for block in response.content:
         if block.type == "tool_use" and block.name == "submit_sentiment":

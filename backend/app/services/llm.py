@@ -516,6 +516,15 @@ class QuantAnalyst:
                 async for chunk in self._stream_once(request):
                     if chunk["type"] == "__final__":
                         message = chunk["message"]
+                        usage = getattr(message, "usage", None)
+                        if usage is not None:
+                            from app.services import usage as usage_meter
+
+                            usage_meter.record(
+                                request["model"],
+                                getattr(usage, "input_tokens", 0),
+                                getattr(usage, "output_tokens", 0),
+                            )
                     else:
                         yield chunk
                 if message is None:

@@ -104,6 +104,17 @@ async function mockApi(page: Page) {
           { entry_time: 1_690_000_000, entry_price: 100, exit_time: 1_695_000_000, exit_price: 108, pnl: 800, return_pct: 8.0 },
         ],
       });
+    if (path === "/api/factors/evolve")
+      return route.fulfill({
+        contentType: "application/x-ndjson",
+        body: [
+          { type: "start", market: "us", population: 20, generations: 3 },
+          { type: "gen", gen: 3, generations: 3, best_fitness: 0.05, mean_fitness: 0.02, unique: 18, evaluated_total: 50, hof_size: 1, elapsed: 1.2,
+            champion: { expression: "rank(delta(close, 5))", fitness: 0.05, is_ic: 0.051, sharpe: 1.23, total_return_pct: 33.3, cagr_pct: 12.1, max_drawdown_pct: -9.9, bench_return_pct: 20 } },
+          { type: "done", market: "us", horizon: 10, generations: 3, evaluated_total: 50, elapsed: 1.2, history: [],
+            discovered: [{ expression: "rank(delta(close, 5))", gen: 2, is_ic: 0.051, is_icir: 0.3, oos_ic: 0.04, complexity: 3, accepted: true, reasons: [], invert: false, total_return_pct: 33.3, cagr_pct: 12.1, sharpe: 1.23, max_drawdown_pct: -9.9, bench_return_pct: 20 }] },
+        ].map((e) => JSON.stringify(e)).join("\n") + "\n",
+      });
     // anything unmocked answers empty-but-valid, never hangs
     return json({});
   });
@@ -194,4 +205,14 @@ test("language toggle switches the chrome to English", async ({ page }) => {
   await page.locator(".lang-toggle").click();
   await expect(page.getByRole("button", { name: "Crypto" })).toBeVisible();
   await expect(page.getByText("WATCHLIST").first()).toBeVisible();
+});
+
+test("genetic evolution engine streams a champion", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "因子挖掘" }).click();
+  await page.getByRole("tab", { name: "🧬 遗传进化" }).click();
+  await page.locator("button", { hasText: "开始进化" }).click();
+  await expect(page.getByText("rank(delta(close, 5))").first()).toBeVisible();
+  await expect(page.getByText("+33.30%").first()).toBeVisible(); // cumulative return
+  await expect(page.getByText("✓ 入选").first()).toBeVisible();
 });

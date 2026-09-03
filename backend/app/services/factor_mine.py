@@ -330,12 +330,19 @@ async def _generate_round(
         user += " No history yet — cast a wide net across distinct hypotheses."
 
     response = await analyst.client.messages.create(
-        model=settings.claude_model,
+        model=settings.claude_model_light,  # evaluator-guarded task: the cheap tier is enough
         max_tokens=2000,
         system=system,
         messages=[{"role": "user", "content": user}],
         tools=[FACTOR_TOOL],
         tool_choice={"type": "tool", "name": "submit_factors"},
+    )
+    from app.services import usage as usage_meter
+
+    usage_meter.record(
+        settings.claude_model_light,
+        getattr(response.usage, "input_tokens", 0),
+        getattr(response.usage, "output_tokens", 0),
     )
     for block in response.content:
         if block.type == "tool_use" and block.name == "submit_factors":

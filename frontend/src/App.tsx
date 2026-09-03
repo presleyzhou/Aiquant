@@ -1,16 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { api, type Quote } from "./api";
 import { AIPanel } from "./components/AIPanel";
 import { BacktestPanel } from "./components/BacktestPanel";
-import { FactorLab } from "./components/FactorLab";
 import { Tour } from "./components/Tour";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+
+// Code-split the heavy views: each loads on first visit and then stays
+// mounted (hidden) so its state survives tab switches.
+const StrategyLab = lazy(() => import("./components/StrategyLab").then((m) => ({ default: m.StrategyLab })));
+const FactorLab = lazy(() => import("./components/FactorLab").then((m) => ({ default: m.FactorLab })));
+const PaperPage = lazy(() => import("./components/PaperPage").then((m) => ({ default: m.PaperPage })));
+const MarketPage = lazy(() => import("./components/MarketPage").then((m) => ({ default: m.MarketPage })));
 import { parseShareFromUrl } from "./share";
 import { KronosPanel } from "./components/KronosPanel";
 import { NewsPanel } from "./components/NewsPanel";
-import { PaperPage } from "./components/PaperPage";
 import { ChartPanel } from "./components/ChartPanel";
-import { MarketPage } from "./components/MarketPage";
-import { StrategyLab } from "./components/StrategyLab";
 import { TickerTape } from "./components/TickerTape";
 import { Watchlist } from "./components/Watchlist";
 import { useAlerts } from "./hooks/useAlerts";
@@ -47,6 +51,8 @@ interface AiState {
 export default function App() {
   const { t, lang, setLang } = useT();
   const [view, setView] = useState<View>("us");
+  // views that have been opened at least once — mounted lazily, kept alive after
+  const [visited, setVisited] = useState<Set<View>>(() => new Set<View>(["us"]));
   // Which terminal the marketplace should act on (and the tape should show)
   // while the user is browsing the market page.
   const [lastTerminal, setLastTerminal] = useState<MarketId>("us");
@@ -91,7 +97,7 @@ export default function App() {
       select(market, share.symbol);
     }
     if (share.kind === "fb") {
-      setView("factors");
+      switchView("factors");
       return;
     }
     switchView(market);
@@ -113,6 +119,7 @@ export default function App() {
   }, []);
 
   const switchView = (next: View) => {
+    setVisited((prev) => (prev.has(next) ? prev : new Set(prev).add(next)));
     setView(next);
     if (next === "us" || next === "crypto") setLastTerminal(next);
   };
@@ -231,10 +238,28 @@ export default function App() {
       {/* The market page conditionally mounts, but the terminal workspaces and
           the strategy lab only hide: unmounting would wipe AI conversations,
           chart state, or an in-flight generation on every tab switch. */}
-      {view === "market" && <MarketPage onRunStrategy={() => switchView(lastTerminal)} />}
-      <StrategyLab hidden={view !== "lab"} aiEnabled={ai.enabled} onRun={runGeneratedStrategy} />
-      <FactorLab hidden={view !== "factors"} aiEnabled={ai.enabled} />
-      <PaperPage hidden={view !== "paper"} />
+      <Suspense fallback={<div className="lab"><div className="lab__inner"><div className="empty">…</div></div></div>}>
+        {view === "market" && (
+          <ErrorBoundary name="市场">
+            <MarketPage onRunStrategy={() => switchView(lastTerminal)} />
+          </ErrorBoundary>
+        )}
+        {visited.has("lab") && (
+          <ErrorBoundary name="AI 策略">
+            <StrategyLab hidden={view !== "lab"} aiEnabled={ai.enabled} onRun={runGeneratedStrategy} />
+          </ErrorBoundary>
+        )}
+        {visited.has("factors") && (
+          <ErrorBoundary name="因子挖掘">
+            <FactorLab hidden={view !== "factors"} aiEnabled={ai.enabled} />
+          </ErrorBoundary>
+        )}
+        {visited.has("paper") && (
+          <ErrorBoundary name="模拟持仓">
+            <PaperPage hidden={view !== "paper"} />
+          </ErrorBoundary>
+        )}
+      </Suspense>
       {(["us", "crypto"] as MarketId[]).map((market) => (
         <TerminalWorkspace
           key={market}
@@ -321,9 +346,15 @@ function TerminalWorkspace(props: {
       <div className="column">
         {active ? (
           <>
-            <ChartPanel symbol={active} palette={candlePalette(profile)} />
-            <KronosPanel symbol={active} marketId={profile.id} />
-            <BacktestPanel symbol={active} marketId={profile.id} presetTarget={presetTarget} />
+            <ErrorBoundary name="走势">
+              <ChartPanel symbol={active} palette={candlePalette(profile)} />
+            </ErrorBoundary>
+            <ErrorBoundary name="Kronos">
+              <KronosPanel symbol={active} marketId={profile.id} />
+            </ErrorBoundary>
+            <ErrorBoundary name="策略回测">
+              <BacktestPanel symbol={active} marketId={profile.id} presetTarget={presetTarget} />
+            </ErrorBoundary>
           </>
         ) : (
           <div className="panel panel--grow">
@@ -333,8 +364,12 @@ function TerminalWorkspace(props: {
       </div>
 
       <div className="column">
-        <NewsPanel symbol={active || "SPY"} aiEnabled={ai.enabled} />
-        <AIPanel enabled={ai.enabled} model={ai.model} symbol={active || "SPY"} />
+        <ErrorBoundary name="新闻情绪">
+          <NewsPanel symbol={active || "SPY"} aiEnabled={ai.enabled} />
+        </ErrorBoundary>
+        <ErrorBoundary name="AI 分析">
+          <AIPanel enabled={ai.enabled} model={ai.model} symbol={active || "SPY"} />
+        </ErrorBoundary>
       </div>
     </div>
   );

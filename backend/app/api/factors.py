@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from app.services.ratelimit import limiter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -92,7 +94,10 @@ async def factors_config() -> dict:
     }
 
 
-@router.post("/mine")
+@router.post(
+    "/mine",
+    dependencies=[Depends(limiter("mining", "rl_mining_per_day", 86_400, global_attr="rl_global_ai_per_day"))],
+)
 async def mine(req: MineRequest) -> StreamingResponse:
     async def generate():
         try:
@@ -163,7 +168,10 @@ async def factor_check(req: CheckRequest) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/evolve")
+@router.post(
+    "/evolve",
+    dependencies=[Depends(limiter("evolve", "rl_evolve_per_day", 86_400))],
+)
 async def evolve(req: EvolveRequest) -> StreamingResponse:
     """Genetic-programming factor evolution — no LLM involved, streams one
     event per generation (champion IC + portfolio stats) then the hall of

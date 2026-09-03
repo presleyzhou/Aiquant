@@ -355,3 +355,53 @@ def test_gp_is_deterministic_with_seed(monkeypatch):
     a = factor_gp.evolve_blocking("us", 10, 20, 4, "loose", [], 42, lambda e: None)
     b = factor_gp.evolve_blocking("us", 10, 20, 4, "loose", [], 42, lambda e: None)
     assert [d["expression"] for d in a["discovered"]] == [d["expression"] for d in b["discovered"]]
+
+
+# ------------------------------------------------------ rate limits / usage
+
+
+def test_ratelimit_window_and_ip_isolation():
+    from app.services import ratelimit
+
+    ratelimit._BUCKETS.clear()
+    assert all(ratelimit.allow("t:a", 3, 60) for _ in range(3))
+    assert not ratelimit.allow("t:a", 3, 60)       # 4th blocked
+    assert ratelimit.allow("t:b", 3, 60)           # other client unaffected
+
+
+def test_client_ip_prefers_forwarded_header():
+    from types import SimpleNamespace
+
+    from app.services.ratelimit import client_ip
+
+    req = SimpleNamespace(headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"}, client=SimpleNamespace(host="10.0.0.1"))
+    assert client_ip(req) == "203.0.113.9"
+    req2 = SimpleNamespace(headers={}, client=SimpleNamespace(host="192.168.1.5"))
+    assert client_ip(req2) == "192.168.1.5"
+
+
+def test_usage_meter_accumulates(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIQUANT_CACHE_DIR", str(tmp_path))
+    from app.services import usage
+
+    before = usage.today()["calls"]
+    usage.record("claude-sonnet-5", 120, 30)
+    usage.record("claude-opus-5", 1000, 200)
+    after = usage.today()
+    assert after["calls"] == before + 2
+    assert after["by_model"]["claude-sonnet-5"]["input_tokens"] >= 120
+    assert after["input_tokens"] >= 1120
+
+
+def test_mining_endpoint_rate_limited(monkeypatch):
+    from app.config import get_settings
+    from app.services import ratelimit
+
+    ratelimit._BUCKETS.clear()
+    monkeypatch.setattr(get_settings(), "rl_mining_per_day", 1)
+    client = TestClient(app)
+    # first call passes the limiter (AI is off in tests → body says so, still 200 stream)
+    with client.stream("POST", "/api/factors/mine", json={"market": "us"}) as r1:
+        assert r1.status_code == 200
+    r2 = client.post("/api/factors/mine", json={"market": "us"})
+    assert r2.status_code == 429
