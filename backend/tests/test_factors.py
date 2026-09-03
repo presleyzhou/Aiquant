@@ -435,3 +435,15 @@ def test_gp_gen_event_carries_live_hof(monkeypatch):
     assert all("hof" in e and "best_abs_ic" in e and "min_ic" in e for e in events)
     assert len(events[-1]["hof"]) >= 1
     assert "min_ic" in report and "best_abs_ic" in report
+
+
+def test_gp_simplify_collapses_idempotent_nesting():
+    from app.services.factor_gp import simplify, to_expr
+
+    deep = factor_dsl.parse("ts_min(ts_min(ts_min(returns, 60), 60), 60)")
+    assert to_expr(simplify(deep)) == "ts_min(returns, 60)"
+    assert to_expr(simplify(factor_dsl.parse("rank(rank(close))"))) == "rank(close)"
+    assert to_expr(simplify(factor_dsl.parse("neg(neg(volume))"))) == "volume"
+    # different windows are NOT collapsed — that nesting is meaningful
+    kept = factor_dsl.parse("ts_min(ts_min(returns, 60), 3)")
+    assert to_expr(simplify(kept)) == "ts_min(ts_min(returns, 60), 3)"

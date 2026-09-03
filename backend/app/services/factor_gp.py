@@ -152,10 +152,36 @@ def has_transform(node: Node) -> bool:
     return any(has_transform(a) for a in node.args if isinstance(a, Node))
 
 
+_IDEMPOTENT_UNARY = {"rank", "zscore", "sign", "abs"}
+_IDEMPOTENT_TS = {"ts_min", "ts_max"}
+
+
+def simplify(node: Node) -> Node:
+    """Collapse algebraically redundant nesting GP loves to grow:
+    rank(rank(x)) → rank(x), ts_min(ts_min(x,w),w) → ts_min(x,w),
+    neg(neg(x)) → x, abs(abs(x)) → abs(x). Bloat that parsimony pressure
+    alone punishes too slowly; this removes it outright."""
+    args = tuple(simplify(a) if isinstance(a, Node) else a for a in node.args)
+    node = Node(node.kind, node.value, args)
+    if node.kind == "neg" and isinstance(args[0], Node) and args[0].kind == "neg":
+        return args[0].args[0]  # type: ignore[return-value]
+    if node.kind == "call":
+        name = str(node.value)
+        inner = args[0] if args and isinstance(args[0], Node) else None
+        if inner is not None and inner.kind == "call" and str(inner.value) == name:
+            if name in _IDEMPOTENT_UNARY:
+                return inner
+            if name in _IDEMPOTENT_TS and len(args) > 1 and args[1] == inner.args[1]:
+                return inner
+        if name == "neg" and inner is not None and inner.kind == "call" and str(inner.value) == "neg":
+            return inner.args[0]  # type: ignore[return-value]
+    return node
+
+
 def canonical(node: Node) -> str | None:
-    """Expression text if the tree respects every DSL cap, else None."""
+    """Expression text if the (simplified) tree respects every DSL cap, else None."""
     try:
-        text = to_expr(node)
+        text = to_expr(simplify(node))
         parsed = factor_dsl.parse(text)
     except factor_dsl.FactorError:
         return None
@@ -239,6 +265,7 @@ def evolve_blocking(
         scored: list[tuple[float, Node, str, dict | None]] = []
         seen_this_gen: set[str] = set()
         for tree in population:
+            tree = simplify(tree)
             text = canonical(tree)
             if not text or text in seen_this_gen:
                 continue
