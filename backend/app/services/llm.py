@@ -480,6 +480,7 @@ class QuantAnalyst:
         system: str | None = None,
         tools: list[dict] | None = None,
         max_iterations: int = 8,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[dict]:
         """Yield analysis events. Each event is a dict with a `type` field.
 
@@ -500,7 +501,7 @@ class QuantAnalyst:
         for _ in range(max_iterations):  # bound the tool loop
             request: dict[str, Any] = {
                 "model": self._settings.claude_model,
-                "max_tokens": self._settings.claude_max_tokens,
+                "max_tokens": max_tokens or self._settings.claude_max_tokens,
                 "system": system,
                 "messages": convo,
                 "tools": tools,

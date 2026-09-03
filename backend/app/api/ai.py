@@ -102,7 +102,11 @@ async def analyze(req: AnalyzeRequest):
 
     async def generate():
         try:
-            async for event in analyst.stream(convo):
+            from app.config import get_settings
+
+            async for event in analyst.stream(
+                convo, max_tokens=get_settings().claude_chat_max_tokens
+            ):
                 yield json.dumps(event, default=str) + "\n"
         except Exception as exc:
             log.exception("analysis stream failed")

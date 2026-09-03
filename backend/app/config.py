@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # low | medium | high | xhigh | max — controls thinking depth and token spend.
     claude_effort: str = "high"
     claude_max_tokens: int = 16000
+    # Chat (AI 分析) rarely needs the full budget a strategy-design session
+    # does; a tighter cap trims worst-case spend at zero quality cost.
+    claude_chat_max_tokens: int = 8000
 
     # --- data sources (optional; yfinance needs no key) ---
     alpha_vantage_key: str | None = None
