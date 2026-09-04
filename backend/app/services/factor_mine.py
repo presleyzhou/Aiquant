@@ -784,7 +784,9 @@ def analyze_factor_blocking(
         q_ret.append(float(per_day.mean()) * 100)
     hi, lo = (q_ret[-1], q_ret[0]) if sign > 0 else (q_ret[0], q_ret[-1])
     spread_pp = hi - lo  # % per holding period, long top vs short bottom
-    mono = float(pd.Series(q_ret).corr(pd.Series(range(nq)), method="spearman")) * sign
+    # Spearman by hand (pandas' method="spearman" needs scipy, absent on Vercel)
+    q_rank = pd.Series(q_ret).rank().to_numpy()
+    mono = float(np.corrcoef(q_rank, np.arange(nq))[0, 1]) * sign if np.std(q_rank) > 0 else 0.0
 
     # --- IC decay across horizons -----------------------------------------
     decay = []
