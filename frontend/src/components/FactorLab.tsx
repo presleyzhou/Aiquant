@@ -21,6 +21,7 @@ import { DeployButton } from "./DeployButton";
 import { EquityChart } from "./EquityChart";
 import { EvolveLab } from "./EvolveLab";
 import { ExplainButton } from "./ExplainButton";
+import { FactorReportButton } from "./FactorReport";
 import { ShareButton } from "./ShareButton";
 
 /** One evaluated candidate (or a failed parse). */
@@ -619,6 +620,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                               )}
                               {tr === "pending" && <div className="fl-badge dim">⇄ …</div>}
                               <ExplainButton expression={f.expression} market={f.market} enabled={aiEnabled} />
+                              <FactorReportButton expression={f.expression} market={f.market} horizon={f.horizon} />
                             </div>
                             <div className="lab-saved__actions">
                               <button

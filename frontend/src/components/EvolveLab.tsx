@@ -4,6 +4,7 @@ import { useT } from "../i18n";
 import { saveFactors, savedFactors } from "../store";
 import { EquityChart } from "./EquityChart";
 import { ExplainButton } from "./ExplainButton";
+import { FactorReportButton } from "./FactorReport";
 
 interface Champion {
   expression: string;
@@ -334,6 +335,7 @@ export function EvolveLab({ aiEnabled = false }: { aiEnabled?: boolean }) {
                           {d.accepted ? t("fl.accepted") : `${t("fl.rejected")} · ${d.reasons.join("；")}`}
                         </div>
                         <ExplainButton expression={d.expression} market={market} enabled={aiEnabled} />
+                        <FactorReportButton expression={d.expression} market={market} horizon={horizon} />
                       </div>
                       <div className="lab-saved__actions">
                         <button className="btn btn--mini" disabled={added.has(d.expression)} onClick={() => addToZoo(d)}>

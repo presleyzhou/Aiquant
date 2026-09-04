@@ -550,3 +550,27 @@ def test_paper_track_endpoint_returns_pre_post(monkeypatch):
     assert {"stats", "pre", "decay", "position", "daily_returns"} <= set(body)
     assert body["pre"]["bars"] > 300 and body["stats"]["bars"] == 100
     assert body["position"]["state"] == "long"
+
+
+def test_factor_report_card(monkeypatch):
+    from app.services import factor_mine
+
+    panel = _panel(n_days=500, n_syms=14)
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    r = factor_mine.analyze_factor_blocking("rank(delta(close, 5))", "us", 10, top_n=3, cost_bps=10)
+    assert len(r["quantiles"]) == 5 and len(r["folds"]) == 4
+    assert set(r["grades"]) == {"predictive", "stability", "robustness", "tradability", "significance"}
+    assert all(g in "ABC" for g in r["grades"].values())
+    assert 0 <= r["turnover"] <= 1 and r["cost_pct"] >= 0
+    assert abs(r["spread_after_cost_pct"] - (r["spread_pct"] - r["cost_pct"])) < 1e-6
+    assert r["best_horizon"] in [d["horizon"] for d in r["ic_decay"]]
+    assert r["suggestions"] and all("code" in s for s in r["suggestions"])
+    assert r["regimes"]["up_days"] + r["regimes"]["down_days"] == r["days"]
+    # t-stat adjustment is conservative for overlapping horizons
+    assert abs(r["t_stat_adj"]) <= abs(r["t_stat"]) + 1e-9
+    # endpoint surface
+    client = TestClient(app)
+    ok = client.post("/api/factors/analyze", json={"expression": "rank(delta(close, 5))", "market": "us", "horizon": 10})
+    assert ok.status_code == 200 and ok.json()["horizon"] == 10
+    bad = client.post("/api/factors/analyze", json={"expression": "rank(close +", "market": "us", "horizon": 10})
+    assert bad.status_code == 400

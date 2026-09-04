@@ -53,6 +53,37 @@ export interface FactorCheck {
   as_of: string;
 }
 
+export interface FactorReport {
+  expression: string;
+  market: string;
+  horizon: number;
+  top_n: number;
+  cost_bps: number;
+  sign: number;
+  days: number;
+  as_of: string;
+  complexity: number;
+  mean_ic: number;
+  icir: number;
+  t_stat: number;
+  t_stat_adj: number;
+  quantiles: Array<{ q: number; ret_pct: number }>;
+  spread_pct: number;
+  monotonicity: number;
+  ic_decay: Array<{ horizon: number; ic: number }>;
+  best_horizon: number;
+  turnover: number;
+  rank_autocorr: number;
+  cost_pct: number;
+  spread_after_cost_pct: number;
+  spread_after_cost_ann_pct: number;
+  folds: Array<{ fold: number; from: string; to: string; ic: number; icir: number }>;
+  positive_folds: number;
+  regimes: { up_ic: number | null; down_ic: number | null; up_days: number; down_days: number };
+  grades: Record<"predictive" | "stability" | "robustness" | "tradability" | "significance", "A" | "B" | "C">;
+  suggestions: Array<{ code: string; value: number | string | null }>;
+}
+
 export interface CompositeResult extends Omit<FactorBacktestResult, "expression" | "inverted"> {
   weighting: string;
   components: Array<{ expression: string; is_ic: number; weight: number }>;
@@ -440,6 +471,13 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(json<CompositeResult>),
+
+  factorAnalyze: (expression: string, market: string, horizon: number, top_n = 5, cost_bps = 10) =>
+    fetch("/api/factors/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expression, market, horizon, top_n, cost_bps }),
+    }).then(json<FactorReport>),
 
   factorCheck: (expression: string, market: string, horizon: number) =>
     fetch("/api/factors/check", {

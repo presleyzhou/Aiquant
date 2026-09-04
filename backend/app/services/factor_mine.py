@@ -735,3 +735,172 @@ def check_factor_blocking(expression: str, market: str, horizon: int) -> dict:
         "days": int(len(ic)),
         "as_of": str(ic.index[-1].date()),
     }
+
+
+# ------------------------------------------------------------ factor report
+
+
+REPORT_HORIZONS = (1, 3, 5, 10, 20, 40)
+REPORT_FOLDS = 4
+
+
+def analyze_factor_blocking(
+    expression: str, market: str, horizon: int, top_n: int = 5, cost_bps: float = 10.0
+) -> dict:
+    """Practitioner's report card for one factor — the diagnostics that
+    AlphaEval / Alphalens-style workflows run before anything is traded:
+
+    * quantile spread (is the signal monotonic, or only the tails work?)
+    * IC decay across horizons (where is the natural holding period?)
+    * turnover and cost-adjusted spread (is it tradable at all?)
+    * walk-forward folds and bull/bear split (does it survive regimes?)
+    * IC t-statistic, horizon-adjusted, against the Harvey–Liu–Zhu t ≥ 3 bar
+
+    Letter grades summarise each axis; `suggestions` are machine-readable
+    codes the UI turns into plain-language advice.
+    """
+    market = market if market in UNIVERSES else "us"
+    horizon = max(1, min(30, horizon))
+    top_n = max(2, min(20, top_n))
+    ann = 252 if market == "us" else 365
+
+    panel = _load_panel_blocking(market)
+    values, node = factor_dsl.compute(expression, panel)
+    close = panel["close"]
+    fwd = close.pct_change(horizon).shift(-horizon)
+    ic = _daily_rank_ic(values, fwd)
+    if len(ic) < 120:
+        raise factor_dsl.FactorError(f"only {len(ic)} evaluable days on {market}; need 120 for a report")
+    sign = 1.0 if float(ic.mean()) >= 0 else -1.0
+    ranked = values.rank(axis=1, pct=True)
+
+    # --- quantiles: mean forward return per bucket, per period ------------
+    nq = 5
+    bucket = np.ceil(ranked * nq).clip(1, nq)
+    q_ret = []
+    for q in range(1, nq + 1):
+        mask = bucket == q
+        per_day = fwd.where(mask).mean(axis=1)
+        q_ret.append(float(per_day.mean()) * 100)
+    hi, lo = (q_ret[-1], q_ret[0]) if sign > 0 else (q_ret[0], q_ret[-1])
+    spread_pp = hi - lo  # % per holding period, long top vs short bottom
+    mono = float(pd.Series(q_ret).corr(pd.Series(range(nq)), method="spearman")) * sign
+
+    # --- IC decay across horizons -----------------------------------------
+    decay = []
+    for h in REPORT_HORIZONS:
+        if h >= len(close) // 4:
+            continue
+        f_h = close.pct_change(h).shift(-h)
+        ic_h = _daily_rank_ic(values, f_h)
+        if len(ic_h) >= 60:
+            decay.append({"horizon": h, "ic": round(float(ic_h.mean()), 4)})
+    best_h = max(decay, key=lambda d: abs(d["ic"]))["horizon"] if decay else horizon
+
+    # --- turnover of the top-N book at the rebalance horizon ------------------
+    n_sym = ranked.notna().sum(axis=1).clip(lower=1)
+    thresh = 1 - (top_n / n_sym)
+    top = (ranked.ge(thresh, axis=0)) if sign > 0 else (ranked.le(1 - thresh, axis=0))
+    prev = top.shift(horizon)
+    changed = (top & ~prev.fillna(False).astype(bool)).sum(axis=1) / top.sum(axis=1).clip(lower=1)
+    turnover = float(changed.iloc[horizon:].mean())  # fraction of names replaced per rebalance
+    rank_autocorr = float(ranked.corrwith(ranked.shift(1), axis=1).mean())
+    cost_pp = turnover * 2 * cost_bps / 100  # buy + sell, in % per period
+    spread_after_cost = spread_pp - cost_pp
+    periods_per_year = ann / horizon
+    spread_ann = spread_after_cost * periods_per_year
+
+    # --- walk-forward folds ---------------------------------------------------
+    folds = []
+    n = len(ic)
+    for k in range(REPORT_FOLDS):
+        part = ic.iloc[k * n // REPORT_FOLDS:(k + 1) * n // REPORT_FOLDS]
+        folds.append({
+            "fold": k + 1,
+            "from": str(part.index[0].date()),
+            "to": str(part.index[-1].date()),
+            "ic": round(float(part.mean()), 4),
+            "icir": round(float(part.mean() / max(part.std(), 1e-4)), 3),
+        })
+    positive_folds = sum(1 for f in folds if f["ic"] * sign > 0)
+
+    # --- bull / bear split (universe equal-weight forward return) -------------
+    mkt = fwd.mean(axis=1).reindex(ic.index)
+    up, down = ic[mkt > 0], ic[mkt <= 0]
+    regimes = {
+        "up_ic": round(float(up.mean()), 4) if len(up) >= 20 else None,
+        "down_ic": round(float(down.mean()), 4) if len(down) >= 20 else None,
+        "up_days": len(up),
+        "down_days": len(down),
+    }
+    regime_ok = (
+        regimes["up_ic"] is not None and regimes["down_ic"] is not None
+        and regimes["up_ic"] * sign > 0 and regimes["down_ic"] * sign > 0
+    )
+
+    # --- significance (overlapping horizons inflate n; divide by sqrt(h)) ------
+    t_raw = float(ic.mean() / max(ic.std(), 1e-6) * np.sqrt(len(ic)))
+    t_adj = t_raw / np.sqrt(horizon)
+    mean_ic, icir = float(ic.mean()), float(ic.mean() / max(ic.std(), 1e-4))
+
+    # --- grades ----------------------------------------------------------------
+    def grade(v: float, a: float, b: float) -> str:
+        return "A" if v >= a else "B" if v >= b else "C"
+
+    grades = {
+        "predictive": grade(abs(mean_ic), 0.03, 0.015),
+        "stability": grade(abs(icir), 0.30, 0.15),
+        "robustness": "A" if positive_folds >= 3 and regime_ok else "B" if positive_folds >= 2 else "C",
+        "tradability": "A" if spread_after_cost > 0 and turnover < 0.6 else "B" if spread_after_cost > 0 else "C",
+        "significance": "A" if abs(t_adj) >= 3 else "B" if abs(t_adj) >= 2 else "C",
+    }
+
+    suggestions = []
+    if best_h != horizon:
+        suggestions.append({"code": "better_horizon", "value": best_h})
+    if turnover >= 0.6:
+        suggestions.append({"code": "high_turnover", "value": round(turnover * 100, 1)})
+    if spread_after_cost <= 0:
+        suggestions.append({"code": "negative_after_cost", "value": round(spread_after_cost, 3)})
+    if mono < 0.8:
+        suggestions.append({"code": "non_monotonic", "value": round(mono, 2)})
+    if not regime_ok and regimes["up_ic"] is not None and regimes["down_ic"] is not None:
+        weak = "down" if regimes["down_ic"] * sign <= 0 else "up"
+        suggestions.append({"code": "regime_dependent", "value": weak})
+    if positive_folds < 3:
+        suggestions.append({"code": "unstable_folds", "value": positive_folds})
+    if abs(t_adj) < 3:
+        suggestions.append({"code": "weak_significance", "value": round(t_adj, 2)})
+    if not suggestions:
+        suggestions.append({"code": "all_clear", "value": None})
+
+    return {
+        "expression": expression,
+        "market": market,
+        "horizon": horizon,
+        "top_n": top_n,
+        "cost_bps": cost_bps,
+        "sign": int(sign),
+        "days": len(ic),
+        "as_of": str(ic.index[-1].date()),
+        "complexity": factor_dsl.complexity(node),
+        "mean_ic": round(mean_ic, 4),
+        "icir": round(icir, 3),
+        "t_stat": round(t_raw, 2),
+        "t_stat_adj": round(t_adj, 2),
+        "quantiles": [{"q": i + 1, "ret_pct": round(v, 3)} for i, v in enumerate(q_ret)],
+        "spread_pct": round(spread_pp, 3),
+        "monotonicity": round(mono, 3),
+        "ic_decay": decay,
+        "best_horizon": best_h,
+        "turnover": round(turnover, 3),
+        "rank_autocorr": round(rank_autocorr, 3),
+        "cost_pct": round(cost_pp, 3),
+        "spread_after_cost_pct": round(spread_after_cost, 3),
+        "spread_after_cost_ann_pct": round(spread_ann, 2),
+        "folds": folds,
+        "positive_folds": positive_folds,
+        "regimes": regimes,
+        "grades": grades,
+        "suggestions": suggestions,
+    }
