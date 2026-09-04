@@ -205,7 +205,7 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
    （DeMiguel et al. 2009）、**持仓缓冲带**（已持有者在 Top-N+缓冲内继续持有，Qlib TopkDropout 思路）、**部分调仓**
    （Gârleanu-Pedersen 2013）、双边成本、可选目标波动率（只降杠杆、余额持现金，Harvey et al. 2018）；
 4. **回测**：t 日收盘决策、t+1 日成交，换手计成本，再平衡之间权重随价格漂移。指标：总收益 / 年化 / 波动 / 夏普 / 索提诺 / 卡玛 /
-   最大回撤 / 胜率、超额、β、跟踪误差、信息比率；前 80% 样本内与后 20% 留出期分列；月度热力图与年度表；同一信号下七种方案一键对比。
+   最大回撤 / 胜率、超额、β、跟踪误差、信息比率；前 80% 样本内与后 20% 留出期分列；月度热力图与年度表；同一信号下七种方案一键对比，每种方案相对等权的夏普差附 Ledoit-Wolf (2008) 区块自举 p 值——赢过 1/N 必须经得起噪声检验。
    **过拟合体检**：概率夏普 PSR、缩水夏普 DSR（N = 本次运行尝试过的配置数 + 浏览器里累计的历史运行数）、留出期 PSR、夏普 t 值
    对照 Harvey-Liu-Zhu 的 3.0 门槛、最短记录长度 MinTRL vs 实际天数、年换手倍数、**盈亏平衡成本**；
 5. **风险与归因**：最深五次回撤、个股贡献 Top/Bottom、有效持仓数（1/HHI）、上限触发比例、敞口曲线、60 日滚动 β、
@@ -219,7 +219,7 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
 组合构建与风险分析是从零实现的纯 numpy/pandas（`backend/app/services/portfolio.py`，不依赖 scipy 或外部优化器），
 流水线编排在 `backend/app/services/pipeline.py`，接口 `POST /api/pipeline/run`。文献：Ledoit & Wolf (2003/2004)、
 López de Prado (2016; Bailey & LdP 2012/2014)、Grinold (1994) / Grinold & Kahn、Gârleanu & Pedersen (2013)、
-DeMiguel-Garlappi-Uppal (2009)、Harvey-Liu-Zhu (2016)、Brinson-Fachler (1985)、Qlib (Yang et al. 2020)。
+DeMiguel-Garlappi-Uppal (2009)、Ledoit & Wolf (2008)、Harvey-Liu-Zhu (2016)、Brinson-Fachler (1985)、Qlib (Yang et al. 2020)。
 
 ## 设计要点
 
