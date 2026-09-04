@@ -3089,3 +3089,37 @@ tbody tr:hover td {
 @media (prefers-reduced-motion: reduce) {
   body::after, .panel, .dot--on { animation: none; }
 }
+
+/* ---- small-screen containment for the themed header ---------------------- */
+
+@media (max-width: 640px) {
+  .header,
+  .ticker {
+    max-width: 100vw;
+    overflow: hidden;
+  }
+
+  .status-row {
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    row-gap: 4px;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .status-row .status,
+  .usage,
+  .status--btn {
+    white-space: normal;
+    min-width: 0;
+  }
+
+  .nav-tabs {
+    max-width: 100%;
+  }
+
+  .brand__mark {
+    font-size: 15px;
+    letter-spacing: 0.16em;
+  }
+}
