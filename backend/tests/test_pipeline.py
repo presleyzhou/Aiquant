@@ -407,3 +407,48 @@ def test_v3_report_fields_prior_trials_and_shrink():
     spread = lambda r: max(w["weight_pct"] for w in r["target_weights"]["weights"]) - min(w["weight_pct"] for w in r["target_weights"]["weights"])  # noqa: E731
     assert spread(res) < spread(plain)
     assert client.post("/api/pipeline/run", json={**SPEC, "prior_trials": -1}).status_code == 422
+
+
+# ------------------------------------------------------------------ AI memo
+
+
+MEMO_BODY = {
+    "spec": {"scheme": "hrp"}, "universe": {"symbols": 30}, "signal": {"composite_is_ic": 0.01},
+    "portfolio": {"annual_turnover_x": 12.9}, "stats": {"sharpe": 1.4}, "in_sample": {"sharpe": 1.2},
+    "holdout": {"sharpe": 1.9}, "overfitting": {"psr": 0.98, "dsr": 0.84, "t_stat": 2.1}, "risk": {"cvar_95_pct": -1.5},
+    "warnings": ["high_turnover"], "lang": "zh",
+}
+
+
+def test_memo_requires_ai(monkeypatch):
+    from app.services import llm
+
+    monkeypatch.setattr(type(llm.analyst), "enabled", property(lambda self: False))
+    assert client.post("/api/pipeline/memo", json=MEMO_BODY).status_code == 503
+
+
+def test_memo_returns_structured_verdict_from_forced_tool_call(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services import llm
+
+    captured = {}
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            block = SimpleNamespace(type="tool_use", name="submit_memo", input={
+                "verdict": "paper_first", "headline": "留出期夏普 1.9 高于样本内 1.2，但 t 值 2.1 未过 3。",
+                "strengths": ["留出期确认"], "concerns": ["换手 12.9 倍", "DSR 0.84 < 0.95"],
+                "next_steps": ["把持仓缓冲提到 8 再测"], "honesty_note": "540 天样本无法区分运气与技能。",
+            })
+            return SimpleNamespace(content=[block], usage=SimpleNamespace(input_tokens=10, output_tokens=20))
+
+    monkeypatch.setattr(type(llm.analyst), "enabled", property(lambda self: True))
+    monkeypatch.setattr(type(llm.analyst), "client", property(lambda self: SimpleNamespace(messages=FakeMessages())))
+    r = client.post("/api/pipeline/memo", json=MEMO_BODY)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["verdict"] == "paper_first" and len(body["concerns"]) == 2
+    assert captured["tool_choice"] == {"type": "tool", "name": "submit_memo"}
+    assert "1.9" in captured["messages"][0]["content"]  # the model saw our numbers, not a paraphrase

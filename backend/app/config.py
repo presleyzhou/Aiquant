@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     rl_mining_per_day: int = 5
     rl_evolve_per_day: int = 20
     rl_explain_per_day: int = 30
+    rl_memo_per_day: int = 20
     rl_global_ai_per_day: int = 500
 
     # --- data sources (optional; yfinance needs no key) ---

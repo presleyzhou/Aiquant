@@ -97,7 +97,7 @@ vercel --prod   # 生产环境
 | `CLAUDE_EFFORT` | `high` | `low`/`medium`/`high`/`xhigh`/`max`，控制思考深度与花费 |
 | `CLAUDE_MODEL_LIGHT` | `claude-sonnet-5` | 轻任务模型（新闻情绪、因子表达式生成），成本约为 Opus 的 1/5 |
 | `CLAUDE_CHAT_MAX_TOKENS` | `8000` | AI 分析对话的单次输出上限（策略工坊仍用 `CLAUDE_MAX_TOKENS`） |
-| `RL_CHAT_PER_HOUR` / `RL_STRATEGY_PER_DAY` / `RL_MINING_PER_DAY` / `RL_EVOLVE_PER_DAY` | 20 / 5 / 5 / 20 | 每 IP 限流；`RL_GLOBAL_AI_PER_DAY`（500）为实例级每日 AI 调用熔断 |
+| `RL_CHAT_PER_HOUR` / `RL_STRATEGY_PER_DAY` / `RL_MINING_PER_DAY` / `RL_EVOLVE_PER_DAY` / `RL_MEMO_PER_DAY` | 20 / 5 / 5 / 20 / 20 | 每 IP 限流；`RL_GLOBAL_AI_PER_DAY`（500）为实例级每日 AI 调用熔断 |
 | `ALPHA_VANTAGE_KEY` | 空 | 仅供内嵌的 Alpha Vantage provider 使用；yfinance 无需 key |
 | `CORS_ORIGINS` | localhost | 仅当前后端不同源时才需要 |
 | `KRONOS_ENABLED` | `auto` | Kronos K线预测；`auto` = 装了 torch 就启用，`0` 强制关闭 |
@@ -150,7 +150,8 @@ Vercel 后端会把 `/api/kronos/*` 服务器侧转发过去（无 CORS、前端
 | POST | `/api/factors/evolve` | 遗传算法因子进化（NDJSON 流：每代冠军 + 实时名人堂 + 留出期验证；`objective` = multi/ic） |
 | POST | `/api/factors/explain` | 用轻量模型把因子表达式翻译成经济含义 / 风格 / 失效场景（24h 缓存） |
 | GET | `/api/pipeline/config` | 端到端流水线配置：加权方案、起步因子、默认参数与取值范围 |
-| POST | `/api/pipeline/run` | 端到端量化投资：多因子信号 → 组合构建（等权 / 信号加权 / 波动率倒数 / 最小方差 / 风险平价）→ 含成本回测 → 风险归因 → 目标权重 |
+| POST | `/api/pipeline/run` | 端到端量化投资：多因子信号 → 组合构建（等权 / 信号加权 / 波动率倒数 / 最小方差 / 风险平价 / HRP / 均值-方差）→ 含成本回测 → 过拟合体检 → 风险归因 → 目标权重 |
+| POST | `/api/pipeline/memo` | 投委会备忘录：轻量模型基于本次运行的数字给出 deploy / paper_first / iterate / reject 结构化结论（需 AI key） |
 | POST | `/api/paper/track` | 模拟持仓前向跟踪（`kind` = strategy / factor / pipeline） |
 | GET | `/api/ai/status` | AI 是否可用、模型/轻量模型、当日 token 用量与限流配置 |
 | POST | `/api/ai/analyze` | 流式分析（NDJSON） |
@@ -191,23 +192,34 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
 
 ## 端到端量化投资（Pipeline）
 
-「端到端量化」标签页把研究到落地的完整链路串成一条可执行的流水线，六步走完：
+「端到端量化」标签页把研究到落地的完整链路串成一条可执行的流水线，六步走完，每一步的方法都有对应文献：
 
-1. **标的池与数据**：复用因子挖掘的 60 只美股 / 24 个币对日线面板（含磁盘缓存与数据源回退）；
-2. **Alpha 信号**：从因子库勾选 1–8 个因子（或用内置的反转 / 动量 / 低波 / 量能起步因子，也可手输 DSL 表达式），
-   逐因子截面排名后合成，权重按**样本内** |IC| 或等权，符号按样本内 IC 对齐——留出期从不参与加权；
-3. **组合构建**：Top-N 入选后按五种方案定权：等权、信号加权（排名线性）、波动率倒数、最小方差
-   （收缩协方差 + 投影梯度，多头 + 单票上限约束）、风险平价（等风险贡献不动点迭代）；单票权重上限、
-   再平衡周期、双边成本、可选**目标波动率**（只降杠杆不加杠杆，多余部分持现金）；
-4. **回测**：t 日收盘决策、t+1 日成交，换手计成本，**再平衡之间权重随价格漂移**（不做免费的每日再平衡）；
-   给出总收益 / 年化 / 波动 / 夏普 / 索提诺 / 卡玛 / 最大回撤 / 胜率、相对等权基准的超额、β、跟踪误差、信息比率，
-   前 80% 样本内与后 20% 留出期分列，月度热力图与年度表，并一键对比五种方案在同一信号下的表现；
-5. **风险与归因**：最深五次回撤（峰 / 谷 / 修复日期）、个股贡献 Top / Bottom 5、有效持仓数（1/HHI）、
-   上限触发比例、敞口曲线，以及自动告警（留出期夏普崩塌、换手过高、再平衡次数太少、过度集中、覆盖不足）；
-6. **部署**：最新一根完整 K 线上的目标权重表（可复制 CSV），一键部署到模拟持仓，从部署日起前向跟踪。
+1. **标的池与数据**：复用因子挖掘的 60 只美股 / 24 个币对日线面板（磁盘缓存 + 数据源回退），每只标的带行业 / 板块标签；
+2. **Alpha 信号**：从因子库勾选 1–8 个因子（或内置的反转 / 动量 / 低波 / 量能起步因子，或手输 DSL），逐因子截面排名后合成。
+   默认**滚动 IC 加权**：t 日的权重只用 t 日之前已经"揭晓"的 IC（扩展窗均值、滞后一个预测期），整段回测对合成权重都是样本外；
+   也可选静态 IC（前 80%）或等权。给出复合信号的 **IC 衰减曲线**（1–20 日，Grinold-Kahn 信息期限）和 **分位数收益**（Qlib 式五分组、
+   多空价差、单调性）；
+3. **组合构建**：Top-N 入选后七种定权方案——等权、信号加权、波动率倒数、最小方差（投影梯度）、风险平价（等风险贡献不动点）、
+   **层次风险平价 HRP**（López de Prado 2016，单链接聚类 + 递归二分）、**均值-方差（Grinold α = IC·σ·z）**；协方差用
+   **Ledoit-Wolf 解析收缩强度**（Schäfer-Strimmer 闭式）向对角收缩。约束与交易规则：单票上限（不可行时留现金）、可选向 1/N 收缩
+   （DeMiguel et al. 2009）、**持仓缓冲带**（已持有者在 Top-N+缓冲内继续持有，Qlib TopkDropout 思路）、**部分调仓**
+   （Gârleanu-Pedersen 2013）、双边成本、可选目标波动率（只降杠杆、余额持现金，Harvey et al. 2018）；
+4. **回测**：t 日收盘决策、t+1 日成交，换手计成本，再平衡之间权重随价格漂移。指标：总收益 / 年化 / 波动 / 夏普 / 索提诺 / 卡玛 /
+   最大回撤 / 胜率、超额、β、跟踪误差、信息比率；前 80% 样本内与后 20% 留出期分列；月度热力图与年度表；同一信号下七种方案一键对比。
+   **过拟合体检**：概率夏普 PSR、缩水夏普 DSR（N = 本次运行尝试过的配置数 + 浏览器里累计的历史运行数）、留出期 PSR、夏普 t 值
+   对照 Harvey-Liu-Zhu 的 3.0 门槛、最短记录长度 MinTRL vs 实际天数、年换手倍数、**盈亏平衡成本**；
+5. **风险与归因**：最深五次回撤、个股贡献 Top/Bottom、有效持仓数（1/HHI）、上限触发比例、敞口曲线、60 日滚动 β、
+   上/下行捕获比、CVaR 95%（对比基准）、**市场状态分层**（基准波动率三分位、趋势上下行）表现、
+   **Brinson-Fachler 行业归因**（配置效应 / 选股效应 / 交互）；自动告警：留出期夏普崩塌、换手过高、再平衡太少、过度集中、
+   覆盖不足、PSR < 0.9、t 值 < 2；
+6. **部署**：最新一根完整 K 线上的目标权重表（含行业分布，可复制 CSV），一键部署到模拟持仓，从部署日起前向跟踪；
+   配置了 AI 时可生成**投委会备忘录**（`POST /api/pipeline/memo`，轻量模型只能引用页面上的数字，强制结构化输出：
+   deploy / paper_first / iterate / reject + 优点 / 疑虑 / 下一步 / 统计局限）。
 
-组合构建与风险分析是从零实现的纯 numpy/pandas（`backend/app/services/portfolio.py`），不依赖外部优化器；
-流水线编排在 `backend/app/services/pipeline.py`，接口 `POST /api/pipeline/run`。
+组合构建与风险分析是从零实现的纯 numpy/pandas（`backend/app/services/portfolio.py`，不依赖 scipy 或外部优化器），
+流水线编排在 `backend/app/services/pipeline.py`，接口 `POST /api/pipeline/run`。文献：Ledoit & Wolf (2003/2004)、
+López de Prado (2016; Bailey & LdP 2012/2014)、Grinold (1994) / Grinold & Kahn、Gârleanu & Pedersen (2013)、
+DeMiguel-Garlappi-Uppal (2009)、Harvey-Liu-Zhu (2016)、Brinson-Fachler (1985)、Qlib (Yang et al. 2020)。
 
 ## 设计要点
 
