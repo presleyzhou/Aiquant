@@ -131,7 +131,13 @@ export interface PaperTrack {
   stats: PaperStats;
   pre: PaperStats;
   decay: { verdict: "holding" | "degraded" | "improved" | "insufficient"; sharpe_delta: number | null; excess_delta: number | null };
-  position: { state: "long" | "flat" | "holdings" | "unknown"; symbols?: string[]; since?: string };
+  position: {
+    state: "long" | "flat" | "holdings" | "unknown";
+    symbols?: string[];
+    /** Pipeline deployments: per-symbol target weights, aligned with `symbols`. */
+    weights_pct?: number[];
+    since?: string;
+  };
   trades_live: number | null;
   daily_returns: Array<{ time: number; ret_pct: number }>;
 }
@@ -392,6 +398,340 @@ export interface Charge extends OrderStatus {
   hosted_url: string | null;
 }
 
+/* ------------------------------------------------ end-to-end pipeline ---
+ * Mirrors backend/PIPELINE_CONTRACT.md exactly: data panel → factor DSL →
+ * composite signal → portfolio construction → risk/attribution → paper. */
+
+export interface PipelineFactorSpec {
+  expression: string;
+  invert: boolean;
+  horizon: number;
+}
+
+export interface PipelineStarterFactor extends PipelineFactorSpec {
+  zh: string;
+  en: string;
+}
+
+export interface PipelineScheme {
+  id: string;
+  zh: string;
+  en: string;
+  desc_zh: string;
+  desc_en: string;
+}
+
+export type PipelineLimitKey =
+  | "factors"
+  | "top_n"
+  | "rebalance"
+  | "max_weight"
+  | "cost_bps"
+  | "target_vol_pct"
+  | "vol_lookback"
+  | "hold_buffer"
+  | "trade_rate"
+  | "shrink_to_equal"
+  | "prior_trials";
+
+/** V2: `ic_expanding` re-estimates factor weights on an expanding window so
+ * every daily weight is out-of-sample; `ic` fixes them on the first 80%. */
+export type PipelineSignalWeighting = "ic_expanding" | "ic" | "equal";
+
+export interface PipelineConfig {
+  markets: string[];
+  universes: Record<string, string[]>;
+  schemes: PipelineScheme[];
+  /** V2; absent on a V1 server, in which case the UI falls back to the three ids. */
+  signal_weightings?: PipelineSignalWeighting[];
+  starter_factors: Record<string, PipelineStarterFactor[]>;
+  /** V3: group (sector) label per universe symbol, e.g. AAPL → "tech", BTC-USD → "layer1". */
+  sectors?: Record<string, string>;
+  defaults: {
+    scheme: string;
+    signal_weighting: PipelineSignalWeighting;
+    top_n: number;
+    rebalance: number;
+    max_weight: number;
+    cost_bps: number;
+    target_vol_pct: number | null;
+    vol_lookback: number;
+    horizon: number;
+    hold_buffer?: number;
+    trade_rate?: number;
+    /** V3: blend toward 1/N; 0 = off. */
+    shrink_to_equal?: number;
+  };
+  limits: Record<PipelineLimitKey, [number, number]>;
+}
+
+export interface PipelineRunRequest {
+  market: string;
+  factors: PipelineFactorSpec[];
+  signal_weighting?: PipelineSignalWeighting;
+  scheme?: string;
+  top_n?: number;
+  rebalance?: number;
+  max_weight?: number;
+  cost_bps?: number;
+  target_vol_pct?: number | null;
+  vol_lookback?: number;
+  /** A held name stays while ranked within top_n + buffer; 0 = plain Top-N. */
+  hold_buffer?: number;
+  /** Fraction of the distance to target traded per rebalance (0.1–1.0); 1 = full. */
+  trade_rate?: number;
+  /** V3: blend the scheme's weights toward 1/N (DeMiguel-Garlappi-Uppal 2009); 0 = off. */
+  shrink_to_equal?: number;
+  /** V3: pipeline runs already made in this browser; added to the Deflated Sharpe's N. */
+  prior_trials?: number;
+  compare?: boolean;
+}
+
+export interface PipelineSplitStats {
+  from: string;
+  to: string;
+  total_return_pct: number;
+  sharpe: number;
+  max_drawdown_pct: number;
+  excess_pct: number;
+  /** Probabilistic Sharpe of this split alone (holdout only in practice). */
+  psr?: number | null;
+}
+
+export interface PipelineAlternative {
+  scheme: string;
+  total_return_pct: number;
+  sharpe: number;
+  psr?: number | null;
+  max_drawdown_pct: number;
+  ann_vol_pct: number;
+  avg_turnover_pct: number;
+  /** V3.1: annualised Sharpe minus the equal-weight scheme's (0 on the equal row). */
+  delta_sharpe_vs_equal_ann?: number;
+  /** V3.1: two-sided Ledoit-Wolf (2008) block-bootstrap p-value for ΔSharpe = 0; null on the equal row. */
+  p_value_vs_equal?: number | null;
+}
+
+export interface PipelineContributor {
+  symbol: string;
+  contribution_pct: number;
+  avg_weight_pct: number;
+  days_held: number;
+}
+
+/** V3 signal check (Qlib-style): equal-weight, daily, gross-of-cost return of
+ * each composite-score quintile; bucket 1 = lowest score, 5 = highest. */
+export interface PipelineQuantiles {
+  buckets: Array<{ bucket: number; ann_return_pct: number | null }>;
+  /** Bucket 5 minus bucket 1, annualised. */
+  spread_ann_pct: number | null;
+  spread_sharpe: number | null;
+  /** Bucket returns rise with the score. */
+  monotonic: boolean | null;
+}
+
+export type PipelineRegimeId = "low_vol" | "mid_vol" | "high_vol" | "uptrend" | "downtrend";
+
+/** Benchmark 60-day realised-vol terciles and trend (above / below its 100-day average). */
+export interface PipelineRegime {
+  regime: PipelineRegimeId | string;
+  days: number;
+  ann_return_pct: number | null;
+  bench_ann_return_pct: number | null;
+  sharpe: number | null;
+  hit_rate_pct: number | null;
+}
+
+/** Brinson-Fachler vs the equal-weight benchmark, summed over days. */
+export interface PipelineAttribution {
+  allocation_pct: number;
+  selection_pct: number;
+  interaction_pct: number;
+  groups: PipelineAttributionGroup[];
+}
+
+export interface PipelineAttributionGroup {
+  group: string;
+  avg_weight_pct: number;
+  bench_weight_pct: number;
+  allocation_pct: number;
+  selection_pct: number;
+}
+
+export interface PipelineTargetWeight {
+  symbol: string;
+  weight_pct: number;
+  score_rank: number;
+  /** V3 sector / group id. */
+  group?: string;
+}
+
+export interface PipelineResult {
+  spec: PipelineRunRequest;
+  universe: { market: string; symbols: number; from: string; to: string; bars: number };
+  signal: {
+    weighting: string;
+    components: Array<
+      PipelineFactorSpec & {
+        is_ic: number;
+        oos_ic: number;
+        /** Latest weight (what the target book uses). */
+        weight: number;
+        /** Mean weight over the backtest — differs from `weight` under `ic_expanding`. */
+        avg_weight?: number;
+        standalone_sharpe: number;
+      }
+    >;
+    max_pair_corr: number;
+    /** Information-horizon (alpha decay) curve of the composite signal. */
+    ic_by_horizon?: Array<{ horizon: number; ic: number | null }>;
+    composite_is_ic?: number;
+    composite_oos_ic?: number | null;
+    /** V3 quintile check of the composite score. */
+    quantiles?: PipelineQuantiles;
+  };
+  portfolio: {
+    scheme: string;
+    top_n: number;
+    max_weight: number;
+    rebalance: number;
+    cost_bps: number;
+    target_vol_pct: number | null;
+    vol_lookback: number;
+    avg_effective_n: number;
+    avg_exposure_pct: number;
+    avg_turnover_pct: number;
+    rebalances: number;
+    annual_turnover_x?: number;
+    /** One-way cost per unit turnover at which excess over the benchmark is zero. */
+    breakeven_cost_bps?: number | null;
+    hold_buffer?: number;
+    trade_rate?: number;
+  };
+  backtest: {
+    span: { from: string; to: string };
+    stats: {
+      total_return_pct: number;
+      cagr_pct: number | null;
+      ann_vol_pct: number;
+      sharpe: number;
+      sortino: number;
+      calmar: number;
+      max_drawdown_pct: number;
+      win_rate_pct: number;
+      excess_pct: number;
+      beta: number;
+      tracking_error_pct: number;
+      information_ratio: number;
+      benchmark: {
+        total_return_pct: number;
+        cagr_pct: number | null;
+        ann_vol_pct: number;
+        sharpe: number;
+        max_drawdown_pct: number;
+      };
+    };
+    in_sample: PipelineSplitStats;
+    holdout: PipelineSplitStats;
+    /** Bailey & López de Prado: PSR = P(true Sharpe > 0); DSR deflates against
+     * the best of `trials` unskilled configurations tried in this run. */
+    overfitting?: {
+      psr: number | null;
+      dsr: number | null;
+      trials: number;
+      expected_max_sharpe_ann: number | null;
+      /** V3: Sharpe × √T; Harvey-Liu-Zhu (2016) hurdle is 3.0, below 2 is not a finding. */
+      t_stat?: number | null;
+      hlz_hurdle?: number;
+      /** Days needed for the Sharpe to be significant at 95%; null when Sharpe ≤ 0. */
+      min_track_record_days?: number | null;
+      track_days?: number;
+    };
+    equity_curve: Point[];
+    benchmark_curve: Point[];
+    drawdown_curve: Point[];
+    exposure_curve: Point[];
+    monthly_returns: Array<{ year: number; month: number; ret_pct: number; bench_pct: number }>;
+    yearly_returns: Array<{ year: number; ret_pct: number; bench_pct: number }>;
+  };
+  risk: {
+    drawdowns: Array<{ peak: string; trough: string; recovery: string | null; depth_pct: number; days: number }>;
+    contributors: PipelineContributor[];
+    detractors: PipelineContributor[];
+    concentration: { avg_effective_n: number; cap_binding_pct: number };
+    correlation_to_benchmark: number;
+    /** Compounded return in benchmark-up (down) months ÷ the benchmark's. */
+    capture?: { up: number | null; down: number | null; up_periods: number; down_periods: number };
+    /** Expected shortfall: mean of the worst 5% daily returns. */
+    cvar_95_pct?: number | null;
+    bench_cvar_95_pct?: number | null;
+    /** 60-day rolling beta to the equal-weight benchmark. */
+    rolling_beta?: Point[];
+    /** V3: may be empty on short histories. */
+    regimes?: PipelineRegime[];
+    attribution?: PipelineAttribution;
+  };
+  alternatives: PipelineAlternative[];
+  target_weights: {
+    as_of: string;
+    exposure_pct: number;
+    weights: PipelineTargetWeight[];
+    /** V3: target book summed per sector / group. */
+    groups?: Array<{ group: string; weight_pct: number }>;
+  };
+  warnings: string[];
+}
+
+/* ---------------------------------------- AI investment-committee memo ---
+ * Mirrors PIPELINE_CONTRACT_MEMO.md: the client sends exactly the summary it
+ * displays (no curves — the body is capped at 12 kB server-side). */
+
+export interface PipelineMemoRequest {
+  spec: PipelineRunRequest;
+  universe: PipelineResult["universe"];
+  signal: {
+    weighting: string;
+    components: Array<{ expression: string; is_ic: number; oos_ic: number; weight: number; standalone_sharpe: number }>;
+    max_pair_corr: number;
+    ic_by_horizon?: Array<{ horizon: number; ic: number | null }>;
+    composite_is_ic?: number;
+    composite_oos_ic?: number | null;
+    quantiles?: PipelineQuantiles;
+  };
+  portfolio: PipelineResult["portfolio"];
+  stats: PipelineResult["backtest"]["stats"];
+  in_sample: PipelineSplitStats;
+  holdout: PipelineSplitStats;
+  overfitting: PipelineResult["backtest"]["overfitting"];
+  risk: {
+    drawdowns: PipelineResult["risk"]["drawdowns"];
+    contributors: PipelineContributor[];
+    detractors: PipelineContributor[];
+    concentration: PipelineResult["risk"]["concentration"];
+    correlation_to_benchmark: number;
+    capture?: PipelineResult["risk"]["capture"];
+    cvar_95_pct?: number | null;
+    bench_cvar_95_pct?: number | null;
+    regimes?: PipelineRegime[];
+    attribution?: PipelineAttribution;
+  };
+  warnings: string[];
+  /** Current UI language — the memo is written in it. */
+  lang: "zh" | "en";
+}
+
+export type PipelineMemoVerdict = "deploy" | "paper_first" | "iterate" | "reject";
+
+export interface PipelineMemo {
+  verdict: PipelineMemoVerdict;
+  headline: string;
+  strengths: string[];
+  concerns: string[];
+  next_steps: string[];
+  honesty_note: string;
+  model: string;
+}
+
 export type AIEvent =
   | { type: "thinking"; text: string }
   | { type: "text"; text: string }
@@ -612,6 +952,23 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ account_secret, amount_usd, method, address }),
     }).then(json<Wallet & { id: string; status: string; amount: number }>),
+
+  pipelineConfig: () => fetch("/api/pipeline/config").then(json<PipelineConfig>),
+
+  pipelineRun: (body: PipelineRunRequest) =>
+    fetch("/api/pipeline/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<PipelineResult>),
+
+  /** 503 when no AI key (check `aiStatus().enabled` first), 429 on rate limit, 502 on an empty model reply. */
+  pipelineMemo: (body: PipelineMemoRequest) =>
+    fetch("/api/pipeline/memo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<PipelineMemo>),
 
   listingPayload: (id: string, token: string) =>
     fetch(`/api/marketplace/listings/${encodeURIComponent(id)}/payload?token=${encodeURIComponent(token)}`).then(

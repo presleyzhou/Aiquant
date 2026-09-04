@@ -30,12 +30,13 @@ from app.services.factor_mine import (
     _load_panel_blocking,
     portfolio_backtest_blocking,
 )
+from app.services.pipeline import current_holdings_blocking, run_pipeline_blocking
 
 router = APIRouter(prefix="/api/paper", tags=["paper"])
 
 
 class TrackRequest(BaseModel):
-    kind: str = Field(pattern="^(strategy|factor)$")
+    kind: str = Field(pattern="^(strategy|factor|pipeline)$")
     started_at: date
     config: dict = Field(default_factory=dict)
 
@@ -182,6 +183,24 @@ async def track(req: TrackRequest) -> dict:
         except Exception:
             position = {"state": "unknown"}
         trades_live = sum(1 for t in result.trades if (t.get("entry_time") or 0) >= start_epoch)
+
+    elif req.kind == "pipeline":
+        # the whole signal → portfolio → backtest chain, frozen as a spec
+        try:
+            result = await asyncio.to_thread(
+                run_pipeline_blocking, {**req.config, "compare": False}
+            )
+        except factor_dsl.FactorError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        full_eq, full_bench = result["backtest"]["equity_curve"], result["backtest"]["benchmark_curve"]
+        ann = 252 if result["spec"]["market"] == "us" else 365
+        trades_live = None
+        try:
+            position = await asyncio.to_thread(current_holdings_blocking, req.config)
+        except Exception:
+            position = {"state": "unknown"}
 
     else:  # factor
         expression = str(req.config.get("expression", ""))

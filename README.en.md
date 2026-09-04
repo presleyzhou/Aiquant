@@ -16,6 +16,8 @@ mining — every number recomputed from real data, ugly results shown as-is.
 | **Backtesting** | Next-bar-open fills, commission + slippage both sides, buy-and-hold benchmark always shown; SMA/EMA cross, RSI reversion, Kronos-signal strategies; walk-forward validation |
 | **Kronos forecasting** | Open-source K-line foundation model ([Kronos](https://github.com/shiyu-coder/Kronos), MIT) with per-market presets (business-day vs 24×7 calendars), hourly crypto mode, and a rolling **honest accuracy panel** that scores past forecasts against the always-bullish baseline |
 | **AI Factor Mining** | Chain-of-Alpha-style loop: Claude proposes factor expressions in a safe DSL (hand-rolled parser, never `eval`), a deterministic evaluator scores daily rank IC with an untouched holdout, and directive feedback steers each next round; cross-session memory, decay monitoring, cross-market transfer tests, multi-factor composites |
+| **End-to-End Pipeline** | Universe → multi-factor signal (expanding-window IC weights, so every day is out-of-sample; IC-decay curve, quintile spreads) → portfolio construction (equal / score / inverse-vol / min-variance / risk parity / **HRP** / **Grinold mean-variance** on a Ledoit-Wolf-shrunk covariance; caps, shrink-to-1/N, hold buffer, Gârleanu-Pedersen partial adjustment, vol targeting) → cost-aware backtest with price drift between rebalances, in-sample vs holdout, monthly heatmap, seven-scheme comparison with a Ledoit-Wolf bootstrap test of each scheme against 1/N → **overfitting check** (Probabilistic & Deflated Sharpe with an honest trial count, Sharpe t-stat vs the Harvey-Liu-Zhu hurdle, minimum track record length, breakeven cost) → risk & attribution (drawdowns, contributors, effective N, beta/TE/IR, capture ratios, CVaR, regime table, Brinson sector attribution) → target weights, one-click deploy to paper trading and an optional AI investment-committee memo. Pure numpy/pandas |
+
 | **Factor report card** | One-click pre-trade diagnostics per factor: quintile returns and monotonicity, IC decay across horizons with best holding period, Top-N turnover and cost-adjusted spread, 4-fold rolling IC and up/down-market split, horizon-adjusted t-stat vs the t ≥ 3 bar; A/B/C grades plus actionable suggestions (`POST /api/factors/analyze`) |
 | **Paper trading** | Deploy any strategy/factor at a real date; NAV replays the rule from that day — everything after is out-of-sample by construction. Each card shows current position, a backtest-vs-live comparison with an edge-decay verdict, drawdown alerts, notes and CSV export; an equal-weight overview combines all deployments |
 | **AI Analyst & Strategy Lab** | Claude with real tool access (quotes, indicators, backtests) and honesty rules: every cited number must come from a tool result |
@@ -27,6 +29,7 @@ mining — every number recomputed from real data, ugly results shown as-is.
 - Factor acceptance requires same-sign holdout confirmation; the holdout never enters LLM feedback; an empty factor zoo is a valid outcome.
 - Kronos gets its own report card: rolling historical forecasts scored against what actually happened.
 - Paper deployments freeze configs at real dates — forward honesty, not curve-fit hindsight.
+- Pipeline weights decided on day t earn returns from day t+1; covariances use trailing windows only; vol targeting only ever de-levers; the trailing 20% is reported as a separate holdout.
 
 ## Quick start
 
@@ -45,7 +48,7 @@ Everything runs without keys (AI panels show a clear disabled notice). Optional 
 ## Tests
 
 ```bash
-cd backend && python -m pytest -q     # 98 tests, no network
+cd backend && python -m pytest -q     # 162 tests, no network
 cd frontend && npx tsc -b && npm run e2e  # hermetic Playwright smoke
 ```
 
