@@ -801,8 +801,8 @@ def analyze_factor_blocking(
     n_sym = ranked.notna().sum(axis=1).clip(lower=1)
     thresh = 1 - (top_n / n_sym)
     top = (ranked.ge(thresh, axis=0)) if sign > 0 else (ranked.le(1 - thresh, axis=0))
-    prev = top.shift(horizon)
-    changed = (top & ~prev.fillna(False).astype(bool)).sum(axis=1) / top.sum(axis=1).clip(lower=1)
+    prev = top.astype(float).shift(horizon).fillna(0.0).astype(bool)  # version-proof bool shift
+    changed = (top & ~prev).sum(axis=1) / top.sum(axis=1).clip(lower=1)
     turnover = float(changed.iloc[horizon:].mean())  # fraction of names replaced per rebalance
     rank_autocorr = float(ranked.corrwith(ranked.shift(1), axis=1).mean())
     cost_pp = turnover * 2 * cost_bps / 100  # buy + sell, in % per period

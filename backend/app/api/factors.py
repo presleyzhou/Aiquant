@@ -285,3 +285,6 @@ async def factor_analyze(req: AnalyzeRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - surface the reason instead of a bare 500
+        log.exception("factor report failed")
+        raise HTTPException(status_code=500, detail=f"report failed: {type(exc).__name__}: {exc}") from exc
