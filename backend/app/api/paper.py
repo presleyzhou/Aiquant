@@ -138,7 +138,7 @@ async def track(req: TrackRequest) -> dict:
     start_epoch = int(datetime(
         req.started_at.year, req.started_at.month, req.started_at.day, tzinfo=UTC
     ).timestamp())
-    if req.started_at > date.today():  # noqa: DTZ011
+    if req.started_at > date.today():
         raise HTTPException(status_code=400, detail="deployment date is in the future")
 
     position: dict = {"state": "unknown"}
@@ -179,7 +179,7 @@ async def track(req: TrackRequest) -> dict:
             flipped = signals != signals.iloc[-1]
             since_idx = flipped[::-1].idxmax() if flipped.any() else signals.index[0]
             position = {"state": state, "since": str(pd.Timestamp(since_idx).date()), "symbols": [symbol]}
-        except Exception:  # noqa: BLE001 - position is decorative; never fail tracking
+        except Exception:
             position = {"state": "unknown"}
         trades_live = sum(1 for t in result.trades if (t.get("entry_time") or 0) >= start_epoch)
 
@@ -204,7 +204,7 @@ async def track(req: TrackRequest) -> dict:
         # (the newest row is often partial — a few symbols not yet printed).
         try:
             position = await asyncio.to_thread(_factor_holdings, expression, market, top_n, invert)
-        except Exception:  # noqa: BLE001 - position is decorative; never fail tracking
+        except Exception:
             position = {"state": "unknown"}
 
     post_eq = _rebase(full_eq, start_epoch, None)
@@ -227,7 +227,7 @@ async def track(req: TrackRequest) -> dict:
         "kind": req.kind,
         "started_at": str(req.started_at),
         "as_of": str(as_of),
-        "days_live": (date.today() - req.started_at).days,  # noqa: DTZ011
+        "days_live": (date.today() - req.started_at).days,
         "equity_curve": post_eq,
         "benchmark_curve": post_bench,
         "stats": post,

@@ -71,6 +71,9 @@ export interface PurchaseRecord {
   provider: string;
   demo: boolean;
   at: string;
+  /** Server-signed entitlement; releases paid community payloads. */
+  token?: string;
+  method?: string;
 }
 
 const PURCHASES_KEY = "aiquant.purchases";
@@ -359,4 +362,30 @@ export function updatePaperNote(id: string, note: string): PaperDeployment[] {
   const next = savedPaper().map((p) => (p.id === id ? { ...p, note: note.slice(0, 120) } : p));
   localStorage.setItem(PAPER_KEY, JSON.stringify(next));
   return next;
+}
+
+// -------------------------------------------------------------------- seller
+
+/** Seller identity is a random secret this browser generated once; the
+ * server stores only its hash. Losing it means losing control of listings —
+ * it is included in the data export for that reason. */
+const SELLER_KEY = "aiquant.seller";
+
+export function sellerSecret(): string {
+  let s = localStorage.getItem(SELLER_KEY);
+  if (!s || s.length < 16) {
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    s = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    localStorage.setItem(SELLER_KEY, s);
+  }
+  return s;
+}
+
+const STRIPE_ACCT_KEY = "aiquant.stripe_account";
+export function stripeAccount(): string | null {
+  return localStorage.getItem(STRIPE_ACCT_KEY);
+}
+export function setStripeAccount(id: string): void {
+  localStorage.setItem(STRIPE_ACCT_KEY, id);
 }

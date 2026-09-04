@@ -128,6 +128,22 @@ async function mockApi(page: Page) {
         trades_live: 3,
         daily_returns: Array.from({ length: 30 }, (_, i) => ({ time: 1_700_000_000 + i * 86_400, ret_pct: (i % 3) - 1 })),
       });
+    if (path === "/api/payments/config")
+      return json({ methods: { card: false, crypto: false }, providers: { card: null, crypto: null }, demo: true,
+        connect: false, platform_fee_pct: 10, persistence: "file", note: "演示", provider: "demo", real: false });
+    if (path === "/api/payments/checkout")
+      return json({ order_id: "demo_e2e", provider: "demo", method: "card", status: "pending", demo: true,
+        item_id: "c_e2e", amount: "3.50", currency: "USD", hosted_url: null });
+    if (path.startsWith("/api/payments/orders/demo/"))
+      return json({ order_id: "demo_e2e", provider: "demo", status: "confirmed", demo: true, item_id: "c_e2e", token: "tok.sig" });
+    if (path === "/api/marketplace/listings")
+      return json({ persistence: "file", item: {
+        id: "c_e2e", type: "strategy", name: "E2E 社区策略", tagline: "测试上架", description: "测试", author: "e2e", version: "1.0",
+        tags: ["测试"], tier: "paid", risk: "medium", integration: {}, price: { amount: "3.50", currency: "USD" },
+        community: true, locked: true, payout_method: "crypto", created_at: 1, sales: 0 } });
+    if (path === "/api/marketplace/listings/mine") return json({ listings: [], persistence: "file" });
+    if (path.startsWith("/api/marketplace/listings/c_e2e/payload"))
+      return json({ id: "c_e2e", integration: { backtest: { strategy: "sma_cross", fast: 20, slow: 50 } } });
     // anything unmocked answers empty-but-valid, never hangs
     return json({});
   });
@@ -255,4 +271,24 @@ test("paper page shows position, decay verdict and backtest-vs-live table", asyn
   await expect(cards).toHaveCount(2);
   await cards.first().getByTitle("移除").click();
   await expect(cards).toHaveCount(1);
+});
+
+test("marketplace: list a paid strategy, buy it in demo mode, payload unlocks", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "市场" }).click();
+  await page.getByRole("button", { name: /出售我的策略/ }).click();
+  const dialog = page.getByRole("dialog", { name: "上架到市场" });
+  await dialog.locator("input[type=number]").first().fill("3.5");
+  await dialog.getByLabel("名称").fill("E2E 社区策略");
+  await dialog.getByPlaceholder("0x… / bc1…").fill("0x1234567890abcdef1234567890abcdef12345678");
+  await dialog.getByRole("button", { name: "上架" }).click();
+  await expect(page.getByText("已上架 ✓", { exact: false })).toBeVisible();
+  const card = page.locator(".mk-card", { hasText: "E2E 社区策略" });
+  await expect(card).toBeVisible();
+  await card.click();
+  await page.getByRole("button", { name: /购买/ }).click();
+  await page.getByRole("button", { name: /模拟支付完成/ }).click();
+  // detail modal stays open; entitlement stored, payload merged → run button appears
+  await expect(page.getByRole("button", { name: /在回测中运行/ })).toBeVisible();
+  await expect(page.getByText("演示购买")).toBeVisible();
 });

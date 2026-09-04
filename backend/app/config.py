@@ -39,10 +39,32 @@ class Settings(BaseSettings):
     alpha_vantage_key: str | None = None
 
     # --- marketplace payments (optional) ---
-    # With a Coinbase Commerce API key set, paid marketplace items check out
-    # through real hosted crypto payments; without it the flow runs in a
-    # clearly-labelled demo mode where no value moves.
+    # Two independent rails, each real only when its key is present:
+    #  * cards / Apple Pay / Google Pay (+ Alipay, WeChat Pay when enabled in
+    #    the Stripe dashboard) via Stripe Checkout,
+    #  * crypto (BTC / ETH / USDC / …) via Coinbase Commerce hosted checkout.
+    # Without any key the flow runs in a clearly-labelled demo mode where no
+    # value moves. Webhook secrets enable signed server-side confirmations.
+    stripe_secret_key: str | None = None
+    stripe_webhook_secret: str | None = None
+    # Comma list passed to Checkout; "card" alone also enables wallets.
+    stripe_payment_methods: str = "card"
     coinbase_commerce_api_key: str | None = None
+    coinbase_webhook_secret: str | None = None
+    # Signs entitlement tokens and seller ownership. REQUIRED for tokens to
+    # survive serverless cold starts; unset → random per process (dev only).
+    marketplace_secret: str | None = None
+    # Platform take on community sales (Stripe Connect application fee, or
+    # what the platform keeps when settling crypto payouts manually).
+    platform_fee_pct: float = 10.0
+    # Public site URL used for payment return links when the client sends none.
+    site_url: str = "https://aiquant-rust.vercel.app"
+    # Upstash / Vercel KV REST credentials → durable listings + order ledger.
+    # Unset → JSON file in the cache dir (ephemeral on serverless; labelled).
+    kv_rest_api_url: str | None = None
+    kv_rest_api_token: str | None = None
+    rl_listings_per_day: int = 5
+    rl_checkout_per_hour: int = 30
 
     # --- market data ---
     quote_cache_seconds: int = 15

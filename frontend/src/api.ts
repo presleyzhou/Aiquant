@@ -233,23 +233,62 @@ export interface BacktestResult {
 
 export interface MarketItem {
   id: string;
-  type: "strategy" | "skill" | "data";
+  type: "strategy" | "skill" | "data" | "factor";
   name: string;
   tagline: string;
   description: string;
   author: string;
   version: string;
   tags: string[];
-  tier: "free" | "key_required" | "planned";
+  tier: "free" | "key_required" | "planned" | "paid";
   risk: "low" | "medium" | "high" | null;
   integration: {
     backtest?: Record<string, unknown>;
     prompt_template?: string;
     connector?: string;
     env_key?: string;
+    factor?: FactorPayload;
   };
   status?: { state: string; label: string };
   price: { amount: string; currency: string } | null;
+  /** Community (user-listed) item fields. */
+  community?: boolean;
+  locked?: boolean;
+  payout_method?: string;
+  sales?: number;
+  created_at?: number;
+}
+
+export interface FactorPayload {
+  expression: string;
+  market: string;
+  horizon: number;
+  is_ic?: number;
+  is_icir?: number;
+  oos_ic?: number;
+  hypothesis?: string;
+}
+
+export interface MyListing extends Omit<MarketItem, "status"> {
+  status: string;
+  demo_sales: number;
+  gross_usd: number;
+  net_usd: number;
+  payout: { method: string; address?: string; asset?: string; stripe_account?: string };
+}
+
+export interface ListingCreate {
+  seller_secret: string;
+  type: "strategy" | "factor";
+  name: string;
+  tagline: string;
+  description: string;
+  author: string;
+  tags: string[];
+  price_usd: number;
+  risk?: "low" | "medium" | "high" | null;
+  payload: Record<string, unknown>;
+  payout: { method: "none" | "crypto" | "stripe"; address?: string; asset?: string; stripe_account?: string };
 }
 
 export interface SymbolHit {
@@ -260,21 +299,45 @@ export interface SymbolHit {
 }
 
 export interface PaymentConfig {
+  methods: { card: boolean; crypto: boolean };
+  providers: { card: string | null; crypto: string | null };
+  demo: boolean;
+  connect: boolean;
+  platform_fee_pct: number;
+  persistence: "kv" | "file";
+  note: string;
   provider: string;
   real: boolean;
-  note: string;
 }
 
-export interface Charge {
-  charge_id: string;
+export type PayMethod = "card" | "crypto";
+
+export interface Checkout {
+  order_id: string;
+  provider: string;
+  method: PayMethod;
+  status: "pending" | "confirmed" | "failed";
+  demo: boolean;
+  item_id: string;
+  amount: string;
+  currency: string;
+  hosted_url: string | null;
+  expires_at?: string | number;
+}
+
+export interface OrderStatus {
+  order_id: string;
   provider: string;
   status: "pending" | "confirmed" | "failed";
   demo: boolean;
   item_id?: string;
-  amount?: string;
-  currency?: string;
+  token?: string;
+}
+
+/** @deprecated legacy crypto-only shape; kept for older callers. */
+export interface Charge extends OrderStatus {
+  charge_id: string;
   hosted_url: string | null;
-  expires_at?: string;
 }
 
 export type AIEvent =
@@ -409,15 +472,57 @@ export const api = {
 
   paymentConfig: () => fetch("/api/payments/config").then(json<PaymentConfig>),
 
-  createCharge: (item_id: string) =>
-    fetch("/api/payments/charges", {
+  createCheckout: (item_id: string, method: PayMethod, return_url: string) =>
+    fetch("/api/payments/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_id, method, return_url }),
+    }).then(json<Checkout>),
+
+  orderStatus: (provider: string, order_id: string, item_id: string) =>
+    fetch(
+      `/api/payments/orders/${encodeURIComponent(provider)}/${encodeURIComponent(order_id)}?item_id=${encodeURIComponent(item_id)}`,
+    ).then(json<OrderStatus>),
+
+  confirmDemo: (order_id: string, item_id: string) =>
+    fetch(`/api/payments/orders/demo/${encodeURIComponent(order_id)}/confirm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ item_id }),
-    }).then(json<Charge>),
+    }).then(json<OrderStatus>),
 
-  chargeStatus: (charge_id: string) =>
-    fetch(`/api/payments/charges/${encodeURIComponent(charge_id)}`).then(json<Charge>),
+  connectOnboard: (email: string, return_url: string) =>
+    fetch("/api/payments/connect/onboard", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email || null, return_url }),
+    }).then(json<{ account_id: string; url: string }>),
+
+  createListing: (body: ListingCreate) =>
+    fetch("/api/marketplace/listings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<{ item: MarketItem; persistence: string }>),
+
+  myListings: (seller_secret: string) =>
+    fetch("/api/marketplace/listings/mine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seller_secret }),
+    }).then(json<{ listings: MyListing[]; persistence: string }>),
+
+  removeListing: (id: string, seller_secret: string) =>
+    fetch(`/api/marketplace/listings/${encodeURIComponent(id)}/remove`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seller_secret }),
+    }).then(json<{ removed: string }>),
+
+  listingPayload: (id: string, token: string) =>
+    fetch(`/api/marketplace/listings/${encodeURIComponent(id)}/payload?token=${encodeURIComponent(token)}`).then(
+      json<{ id: string; integration: MarketItem["integration"] }>,
+    ),
 };
 
 export interface WalkForwardFold {

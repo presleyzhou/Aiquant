@@ -90,6 +90,11 @@ export default function App() {
   // Shared-link replay: switch to the right workspace, add the symbol, and
   // (for backtests) queue the preset — panels handle the rest themselves.
   useEffect(() => {
+    // Payment / Connect return links land on the market view.
+    if (new URLSearchParams(window.location.search).get("view") === "market") {
+      switchView("market");
+      return;
+    }
     const share = parseShareFromUrl();
     if (!share) return;
     const market = share.market as MarketId;

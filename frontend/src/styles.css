@@ -3166,3 +3166,33 @@ tbody tr:hover td {
 .pp-compare td { text-align: right; padding: 4px 6px; font-family: var(--mono, ui-monospace, monospace); }
 .pp-compare td.up { color: var(--up, #3be0a0); }
 .pp-compare td.dn { color: var(--dn, #ff6384); }
+
+/* ---- marketplace: buy/sell ---------------------------------------------- */
+.mk-hero__actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; position: relative; z-index: 1; }
+.mk-paybadges { display: inline-flex; gap: 6px; margin-left: auto; }
+.mk-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px dashed rgba(59,224,255,0.25); color: var(--muted); }
+.mk-chip.is-on { border-style: solid; color: var(--accent); border-color: rgba(59,224,255,0.5); }
+.mk-chip--demo { color: var(--amber); border-color: rgba(255,176,0,0.5); border-style: solid; }
+.mk-notice { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; padding: 10px 14px; border: 1px solid rgba(59,224,255,0.35); background: rgba(59,224,255,0.06); border-radius: 8px; font-size: 13px; }
+.mk-notice .mk-close { margin-left: auto; }
+.mk-badge--community { color: #fff; border-color: rgba(255,255,255,0.3); }
+.mk-badge--free { color: var(--up, #3be0a0); }
+.mk-persist-note { font-size: 11.5px; margin: 0 0 10px; }
+.pay-methods__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 10px; }
+.pay-method { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 14px; border-radius: 10px; border: 1px solid rgba(59,224,255,0.25); background: rgba(255,255,255,0.02); color: var(--fg); cursor: pointer; font: inherit; }
+.pay-method:hover { border-color: var(--accent); background: rgba(59,224,255,0.06); }
+.pay-method b { font-size: 14px; }
+.pay-method .dim { font-size: 11.5px; }
+.mk-modal--sell { max-width: 640px; }
+.mk-form { display: flex; flex-direction: column; gap: 10px; }
+.mk-form__row { display: flex; flex-wrap: wrap; gap: 10px; }
+.mk-form__row .mk-field { flex: 1; min-width: 120px; }
+.mk-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.mk-field input, .mk-field select, .mk-field textarea { font: inherit; font-size: 13px; color: var(--fg); background: rgba(255,255,255,0.03); border: 1px solid rgba(59,224,255,0.2); border-radius: 6px; padding: 7px 9px; }
+.mk-field input:focus, .mk-field select:focus, .mk-field textarea:focus { outline: none; border-color: var(--accent); }
+.mk-radio { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 6px 10px; border: 1px solid rgba(59,224,255,0.2); border-radius: 999px; cursor: pointer; }
+.mk-mine { margin: 0 0 14px; }
+.mk-mine__table th, .mk-mine__table td { white-space: nowrap; }
+@media (max-width: 640px) {
+  .mk-paybadges { margin-left: 0; }
+}
