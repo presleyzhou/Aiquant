@@ -239,6 +239,8 @@ DeMiguel-Garlappi-Uppal (2009)、Ledoit & Wolf (2008)、Harvey-Liu-Zhu (2016)、
 
 **市场支持买卖双边，支付走托管供应商，且诚实分层。** 买方：`STRIPE_SECRET_KEY` 开启银行卡 / Apple Pay / Google Pay（Stripe Checkout，`STRIPE_PAYMENT_METHODS` 可追加 `alipay,wechat_pay`），`COINBASE_COMMERCE_API_KEY` 开启数字货币（Coinbase Commerce 托管页，BTC / ETH / USDC…）；两条通道各自独立，卡号与私钥都不经过本站。支付确认后服务器签发 HMAC 权益凭证（`MARKETPLACE_SECRET`），付费社区内容的策略参数 / 因子表达式只凭凭证释放；`STRIPE_WEBHOOK_SECRET` / `COINBASE_WEBHOOK_SECRET` 启用签名校验的 webhook 入账。卖方：任何人可把自己的策略或因子库里的因子上架（免费或付费），收款选数字货币钱包（平台代收、扣 `PLATFORM_FEE_PCT` 后按周结算）或 Stripe Connect Express（开户链接一键跳转，成交时 Stripe 自动分账）。上架与订单账本存 Upstash / Vercel KV（`KV_REST_API_URL` + `KV_REST_API_TOKEN`），未配置时落到临时文件并在界面明示。两条通道都未配置时进入**明确标注的演示模式** —— 不展示收款地址、服务端永不伪造「已支付」、演示凭证永久带 demo 标记、演示成交不计入卖家销量。
 
+**因子体检报告（实盘前诊断）。** 每个因子一键生成 AlphaEval / Alphalens 式的实务诊断：五分层持有期收益与单调性、IC 随持有期（1/3/5/10/20/40）的衰减曲线与最佳持有期、Top-N 在再平衡周期上的换手与扣双边成本后的多空价差（每期与年化）、4 段滚动窗口 IC 与牛熊分段 IC、按持有期修正的 IC t 统计量（对照 Harvey–Liu–Zhu 的 t ≥ 3 门槛）。五个维度各给 A/B/C 评级，并输出可执行建议（换持有期、换手过高、扣成本为负、非单调、牛熊不对称、分段不稳、显著性不足）。接口 `POST /api/factors/analyze`；前端在因子库与进化实验室的每个因子旁提供「🩺 体检」。
+
 **站内钱包（充值 → 余额购买 → 卖家入账 → 提现）。** 买家可先用银行卡或数字货币充值到站内余额（$1–$2000），再用余额一键购买；扣款即时、凭证即时签发，卖家钱包按扣除平台费后的净额入账，并可申请提现（冻结余额、站长人工打款，流水可查）。钱包账户就是浏览器持有的那把密钥（与卖家身份同一把，已含在数据导出中），服务器只存哈希；真实余额与演示余额分开记账、永不混用，演示余额买到的是演示凭证且不会给卖家入账。充值订单的入账对轮询与 webhook 幂等，重复回调不会重复记账。
 
 **市场里的每个条目都接在真实引擎上。** 借鉴 FinceptTerminal「100+ 连接器 / 37 个 agent」的市场概念，但这里没有装饰品：策略条目携带的参数就是 `POST /api/analytics/backtest` 的合法请求体（有测试保证），点「在回测中运行」会切回终端并立即执行；AI 技能安装后进入 AI 面板的快捷提问（`{symbol}` 自动替换为当前标的）；数据源条目的状态是当前进程实时计算的（哪个在驱动站点、哪个已内嵌待接入、哪个缺 key）。也刻意**没有**编造安装量和评分——这是一个站长自营目录，不该假装是社区市场。安装状态存在浏览器 localStorage，没有引入数据库。

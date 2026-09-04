@@ -20,6 +20,7 @@ from app.services.factor_gp import evolve_stream
 from app.services.factor_mine import (
     MODES,
     UNIVERSES,
+    analyze_factor_blocking,
     check_factor_blocking,
     composite_backtest_blocking,
     mine_stream,
@@ -265,3 +266,25 @@ async def explain_factor(req: ExplainRequest) -> dict:
             disk_cache.store(key, result)
             return {**result, "cached": False}
     raise HTTPException(status_code=502, detail="model did not return an explanation")
+
+
+class AnalyzeRequest(CheckRequest):
+    top_n: int = Field(5, ge=2, le=20)
+    cost_bps: float = Field(10.0, ge=0, le=100)
+
+
+@router.post("/analyze")
+async def factor_analyze(req: AnalyzeRequest) -> dict:
+    """Practitioner report card: quantile spread, IC decay by horizon, turnover
+    and cost-adjusted spread, walk-forward folds, bull/bear split, t-stat."""
+    try:
+        return await asyncio.to_thread(
+            analyze_factor_blocking, req.expression, req.market, req.horizon, req.top_n, req.cost_bps
+        )
+    except factor_dsl.FactorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - surface the reason instead of a bare 500
+        log.exception("factor report failed")
+        raise HTTPException(status_code=500, detail=f"report failed: {type(exc).__name__}: {exc}") from exc
