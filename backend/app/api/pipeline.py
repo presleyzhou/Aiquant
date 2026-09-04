@@ -37,6 +37,8 @@ class PipelineRequest(BaseModel):
     vol_lookback: int = Field(60, ge=20, le=120)
     hold_buffer: int = Field(4, ge=0, le=20, description="a held name stays while ranked within top_n + buffer")
     trade_rate: float = Field(1.0, ge=0.1, le=1.0, description="fraction of the distance to the target traded per rebalance")
+    shrink_to_equal: float = Field(0.0, ge=0.0, le=1.0, description="blend optimised weights toward 1/N (DeMiguel et al. 2009)")
+    prior_trials: int = Field(0, ge=0, le=10_000, description="configurations already tried by this user; inflates the DSR's N")
     compare: bool = True
 
 

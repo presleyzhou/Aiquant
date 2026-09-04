@@ -339,3 +339,71 @@ def test_v2_report_fields_and_all_schemes():
         assert "avg_weight" in c
     mv = pipeline.run_pipeline_blocking({**SPEC, "scheme": "mean_variance"}, panel=panel)
     assert sum(w["weight_pct"] for w in mv["target_weights"]["weights"]) == pytest.approx(100, abs=0.5)
+
+
+# ------------------------------------------------- V3: honesty & attribution
+
+
+def test_min_track_record_and_tstat():
+    rng = np.random.default_rng(0)
+    strong = pd.Series(0.002 + rng.normal(0, 0.005, 400))
+    assert portfolio.min_track_record_length(strong) < 400  # already long enough
+    assert portfolio.sharpe_tstat(strong) > 3
+    losing = pd.Series(-0.001 + rng.normal(0, 0.01, 400))
+    assert portfolio.min_track_record_length(losing) is None  # no length rescues a negative Sharpe
+
+
+def test_regime_table_covers_vol_terciles_and_trend():
+    idx = pd.date_range("2023-01-01", periods=600, freq="D")
+    rng = np.random.default_rng(1)
+    bench = pd.Series(rng.normal(0.0003, 0.01, 600), index=idx)
+    port = bench * 0.8 + rng.normal(0.0002, 0.004, 600)
+    rows = portfolio.regime_table(port, bench, 252)
+    assert {r["regime"] for r in rows} == {"low_vol", "mid_vol", "high_vol", "uptrend", "downtrend"}
+    assert sum(r["days"] for r in rows if r["regime"].endswith("_vol")) == 600 - 59  # after the 60-day warmup
+
+
+def test_quantile_returns_are_monotone_for_an_oracle_signal():
+    panel = _panel(500, 20, seed=3)
+    ret = panel["close"].pct_change()
+    q = portfolio.quantile_returns(ret.shift(-1), ret, 252)  # tomorrow's return as today's score
+    assert q["monotonic"] is True and q["spread_ann_pct"] > 50
+    noise = portfolio.quantile_returns(pd.DataFrame(np.random.default_rng(0).normal(size=ret.shape), index=ret.index, columns=ret.columns), ret, 252)
+    assert abs(noise["spread_ann_pct"]) < 40
+
+
+def test_brinson_effects_sum_to_active_return():
+    idx = pd.date_range("2024-01-01", periods=5, freq="D")
+    syms = ["A", "B", "C", "D"]
+    groups = {"A": "g1", "B": "g1", "C": "g2", "D": "g2"}
+    rng = np.random.default_rng(5)
+    returns = pd.DataFrame(rng.normal(0, 0.01, (5, 4)), index=idx, columns=syms)
+    bench_w = pd.DataFrame(0.25, index=idx, columns=syms)
+    held = pd.DataFrame([[0.5, 0.1, 0.3, 0.1]] * 5, index=idx, columns=syms)
+    out = portfolio.brinson(held, bench_w, returns, groups)
+    active = float(((held - bench_w) * returns).sum().sum()) * 100
+    assert out["allocation_pct"] + out["selection_pct"] + out["interaction_pct"] == pytest.approx(active, abs=0.01)
+    assert {g["group"] for g in out["groups"]} == {"g1", "g2"}
+
+
+def test_every_universe_symbol_has_a_sector():
+    for market, symbols in pipeline.UNIVERSES.items():
+        assert all(s in pipeline.SECTORS for s in symbols), market
+
+
+def test_v3_report_fields_prior_trials_and_shrink():
+    panel = _panel(600, 30, seed=5)
+    real = pipeline.UNIVERSES["us"][:30]
+    panel = {k: v.set_axis(real, axis=1) for k, v in panel.items()}
+    res = pipeline.run_pipeline_blocking({**SPEC, "scheme": "score", "prior_trials": 40, "shrink_to_equal": 0.5}, panel=panel)
+    json.dumps(res)
+    over = res["backtest"]["overfitting"]
+    assert over["trials"] >= 40 + 1 and over["hlz_hurdle"] == 3.0 and "t_stat" in over
+    assert res["signal"]["quantiles"]["buckets"] and len(res["signal"]["quantiles"]["buckets"]) == 5
+    assert res["risk"]["attribution"]["groups"] and res["risk"]["regimes"]
+    assert res["target_weights"]["groups"] and all("group" in w for w in res["target_weights"]["weights"])
+    # shrinking a score-weighted book halfway to 1/N flattens the weights
+    plain = pipeline.run_pipeline_blocking({**SPEC, "scheme": "score", "shrink_to_equal": 0.0}, panel=panel)
+    spread = lambda r: max(w["weight_pct"] for w in r["target_weights"]["weights"]) - min(w["weight_pct"] for w in r["target_weights"]["weights"])  # noqa: E731
+    assert spread(res) < spread(plain)
+    assert client.post("/api/pipeline/run", json={**SPEC, "prior_trials": -1}).status_code == 422

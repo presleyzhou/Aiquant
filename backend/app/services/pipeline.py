@@ -72,15 +72,34 @@ STARTER_FACTORS: dict[str, list[dict[str, Any]]] = {
     ],
 }
 
+# Group labels for attribution. US = GICS-style sectors of the 60-name
+# universe; crypto = the categories the market itself talks in.
+SECTORS: dict[str, str] = {
+    **{s: "tech" for s in ("AAPL", "MSFT", "NVDA", "AVGO", "CRM", "AMD", "ORCL", "ADBE", "CSCO", "INTC", "QCOM", "TXN", "IBM")},
+    **{s: "communication" for s in ("GOOG", "META", "NFLX", "DIS")},
+    **{s: "consumer" for s in ("AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT")},
+    **{s: "staples" for s in ("COST", "WMT", "PG", "KO", "PEP", "PM")},
+    **{s: "financials" for s in ("JPM", "V", "MA", "BAC", "GS", "MS", "BLK", "AXP")},
+    **{s: "health" for s in ("UNH", "LLY", "JNJ", "MRK", "ABBV", "PFE", "TMO", "AMGN")},
+    **{s: "industrials" for s in ("CAT", "HON", "UPS", "BA", "GE", "LIN")},
+    **{s: "energy" for s in ("XOM", "CVX", "COP")},
+    **{s: "utilities_realestate" for s in ("NEE", "DUK", "AMT", "PLD")},
+    **{s: "layer1" for s in ("BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "ADA-USD", "AVAX-USD", "DOT-USD", "TRX-USD", "NEAR-USD", "ATOM-USD", "APT-USD", "HBAR-USD")},
+    **{s: "layer2" for s in ("ARB-USD", "OP-USD")},
+    **{s: "payments" for s in ("XRP-USD", "LTC-USD", "XLM-USD", "ETC-USD")},
+    **{s: "defi_infra" for s in ("LINK-USD", "UNI-USD", "INJ-USD", "FIL-USD")},
+    **{s: "meme" for s in ("DOGE-USD", "SHIB-USD")},
+}
+
 DEFAULTS: dict[str, Any] = {
     "scheme": "inverse_vol", "signal_weighting": "ic_expanding", "top_n": 8, "rebalance": 10,
     "max_weight": 0.25, "cost_bps": 7.0, "target_vol_pct": None, "vol_lookback": 60, "horizon": 10,
-    "hold_buffer": 4, "trade_rate": 1.0,
+    "hold_buffer": 4, "trade_rate": 1.0, "shrink_to_equal": 0.0,
 }
 LIMITS: dict[str, list] = {
     "factors": [1, 8], "top_n": [2, 20], "rebalance": [1, 30], "max_weight": [0.05, 1.0],
     "cost_bps": [0, 50], "target_vol_pct": [5, 40], "vol_lookback": [20, 120],
-    "hold_buffer": [0, 20], "trade_rate": [0.1, 1.0],
+    "hold_buffer": [0, 20], "trade_rate": [0.1, 1.0], "shrink_to_equal": [0.0, 1.0], "prior_trials": [0, 10_000],
 }
 SIGNAL_WEIGHTINGS: tuple[str, ...] = ("ic_expanding", "ic", "equal")
 IC_HORIZONS: tuple[int, ...] = (1, 2, 3, 5, 10, 15, 20)
@@ -95,6 +114,7 @@ def config() -> dict:
         "universes": {k: list(v) for k, v in UNIVERSES.items()},
         "schemes": SCHEME_INFO,
         "signal_weightings": list(SIGNAL_WEIGHTINGS),
+        "sectors": SECTORS,
         "starter_factors": STARTER_FACTORS,
         "defaults": DEFAULTS,
         "limits": LIMITS,
@@ -152,6 +172,10 @@ def normalize_spec(raw: dict) -> dict:
         "vol_lookback": int(_clamp(raw.get("vol_lookback", DEFAULTS["vol_lookback"]), *LIMITS["vol_lookback"], cast=int)),
         "hold_buffer": int(_clamp(raw.get("hold_buffer", DEFAULTS["hold_buffer"]), *LIMITS["hold_buffer"], cast=int)),
         "trade_rate": round(_clamp(raw.get("trade_rate", DEFAULTS["trade_rate"]), *LIMITS["trade_rate"]), 3),
+        "shrink_to_equal": round(_clamp(raw.get("shrink_to_equal", DEFAULTS["shrink_to_equal"]), *LIMITS["shrink_to_equal"]), 3),
+        # configurations the user already tried before this run (the client
+        # counts them) — they inflate the Deflated Sharpe's N honestly
+        "prior_trials": int(_clamp(raw.get("prior_trials", 0) or 0, *LIMITS["prior_trials"], cast=int)),
         "compare": bool(raw.get("compare", True)),
     }
 
@@ -303,6 +327,11 @@ def _decide_weights(
     selected = _select(candidates, top_n, spec["hold_buffer"], held or set())
     sub = trailing[selected.index]
     w = portfolio.construct(scheme, selected.values, sub.values, spec["max_weight"], ic=ic)
+    if spec.get("shrink_to_equal", 0) > 0 and len(w):
+        # DeMiguel-Garlappi-Uppal (2009): optimisers rarely beat 1/N out of
+        # sample; blending toward it hedges estimation error
+        lam = spec["shrink_to_equal"]
+        w = (1 - lam) * w + lam * (w.sum() / len(w))
     scale = 1.0
     if spec["target_vol_pct"]:
         scale = portfolio.vol_scale(w, sub.values, spec["target_vol_pct"] / 100.0, ann)
@@ -341,6 +370,7 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
     gross = np.zeros(T)
     turnover = np.zeros(T)
     exposure = np.zeros(T)
+    held_hist = np.zeros((T, N))
     contrib = np.zeros(N)
     days_held = np.zeros(N)
     weight_sum = np.zeros(N)
@@ -371,6 +401,7 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
         active = held > 1e-12
         days_held += active
         weight_sum += held
+        held_hist[i] = held
         exposure[i] = float(held.sum())
         held = held * (1 + r) / (1 + g) if abs(1 + g) > 1e-9 else held
         # decide the next weights on today's close
@@ -409,6 +440,9 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
         "bench": bench_s,
         "turnover": pd.Series(turnover[first:], index=index),
         "exposure": pd.Series(exposure[first:], index=index),
+        "held": pd.DataFrame(held_hist[first:], index=index, columns=symbols),
+        "bench_w": bench_w.shift(1).loc[index],
+        "returns": ret.loc[index],
         "contrib": pd.Series(contrib, index=symbols),
         "days_held": pd.Series(days_held, index=symbols),
         "avg_weight": pd.Series(np.divide(weight_sum, np.maximum(days_held, 1)), index=symbols),
@@ -494,12 +528,20 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
     if sim["last_target"] is not None:
         ts, w, _scale = sim["last_target"]
         ordered = w.sort_values(ascending=False)
+        by_group: dict[str, float] = {}
+        for sym, v in ordered.items():
+            by_group[SECTORS.get(str(sym), "other")] = by_group.get(SECTORS.get(str(sym), "other"), 0.0) + float(v)
         target = {
             "as_of": str(pd.Timestamp(ts).date()),
             "exposure_pct": round(float(w.sum()) * 100, 1),
             "weights": [
-                {"symbol": str(sym), "weight_pct": round(float(v) * 100, 2), "score_rank": rank}
+                {"symbol": str(sym), "weight_pct": round(float(v) * 100, 2), "score_rank": rank,
+                 "group": SECTORS.get(str(sym), "other")}
                 for rank, (sym, v) in enumerate(ordered.items(), start=1)
+            ],
+            "groups": [
+                {"group": g, "weight_pct": round(v * 100, 2)}
+                for g, v in sorted(by_group.items(), key=lambda kv: -kv[1])
             ],
         }
 
@@ -511,15 +553,23 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
 
     psr = portfolio.probabilistic_sharpe(net)
     holdout_psr = portfolio.probabilistic_sharpe(net.iloc[split:])
-    dsr = portfolio.deflated_sharpe(net, trial_sharpes or [])
+    dsr = portfolio.deflated_sharpe(net, trial_sharpes or [], extra_trials=spec.get("prior_trials", 0))
     capture = portfolio.capture_ratios(net, bench)
     rolling = pd.concat([net, bench], axis=1).dropna()
     rb = rolling.iloc[:, 0].rolling(60).cov(rolling.iloc[:, 1]) / rolling.iloc[:, 1].rolling(60).var()
     rolling_beta = rb.dropna()
 
+    tstat = portfolio.sharpe_tstat(net)
+    min_trl = portfolio.min_track_record_length(net)
+    regimes = portfolio.regime_table(net, bench, ann)
+    groups = {k: v for k, v in SECTORS.items()}
+    attribution = portfolio.brinson(sim["held"], sim["bench_w"], sim["returns"], groups)
+
     warnings: list[str] = []
     if psr is not None and psr < 0.9:
         warnings.append("low_psr")
+    if tstat is not None and tstat < 2:
+        warnings.append("not_significant")
     if (is_stats["sharpe"] is not None and oos_stats["sharpe"] is not None
             and oos_stats["sharpe"] < is_stats["sharpe"] - 0.5 and oos_stats["excess_pct"] < 0):
         warnings.append("holdout_sharpe_collapsed")
@@ -563,6 +613,10 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
                 "dsr": _r(dsr["dsr"], 3),
                 "trials": dsr["trials"],
                 "expected_max_sharpe_ann": _r(dsr["expected_max_sharpe"] * np.sqrt(ann) if dsr["expected_max_sharpe"] is not None else None, 2),
+                "t_stat": tstat,
+                "hlz_hurdle": 3.0,
+                "min_track_record_days": min_trl,
+                "track_days": int(len(net)),
             },
             "equity_curve": _curve(equity),
             "benchmark_curve": _curve(bench_eq),
@@ -581,6 +635,8 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
             "cvar_95_pct": portfolio.cvar(net, 0.95),
             "bench_cvar_95_pct": portfolio.cvar(bench, 0.95),
             "rolling_beta": _curve(rolling_beta, 3),
+            "regimes": regimes,
+            "attribution": attribution,
         },
         "alternatives": alternatives,
         "target_weights": target,
@@ -604,6 +660,7 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
 
     scores, signal, ranked_list = build_signal(spec, panel)
     ic = signal["composite_is_ic"]
+    signal["quantiles"] = portfolio.quantile_returns(scores, close.pct_change(), 252 if spec["market"] == "us" else 365)
     sim = simulate(scores, panel, spec, ic=ic)
     trials: list[float] = []  # every configuration evaluated → the DSR's N
 

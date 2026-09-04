@@ -503,7 +503,7 @@ def probabilistic_sharpe(returns: pd.Series, benchmark_sr: float = 0.0) -> float
     return norm_cdf((sr - benchmark_sr) * math.sqrt(t - 1) / math.sqrt(denom))
 
 
-def deflated_sharpe(returns: pd.Series, trial_sharpes: list[float]) -> dict:
+def deflated_sharpe(returns: pd.Series, trial_sharpes: list[float], extra_trials: int = 0) -> dict:
     """DSR (Bailey & López de Prado 2014): PSR against the Sharpe one would
     expect from the BEST of N unskilled trials,
 
@@ -513,8 +513,10 @@ def deflated_sharpe(returns: pd.Series, trial_sharpes: list[float]) -> dict:
     number of configurations actually evaluated in this run — the scheme
     comparison and each factor's standalone test all count as trials."""
     trials = [float(x) for x in trial_sharpes if x is not None and np.isfinite(x)]
-    n = len(trials)
-    if n < 2:
+    # `extra_trials` are configurations tried earlier (counted by the client);
+    # they raise N but we only know this run's Sharpe dispersion
+    n = len(trials) + max(0, int(extra_trials))
+    if len(trials) < 2:
         return {"trials": n, "expected_max_sharpe": None, "dsr": probabilistic_sharpe(returns)}
     var = float(np.var(trials, ddof=1))
     gamma = 0.5772156649015329
@@ -550,3 +552,151 @@ def cvar(returns: pd.Series, level: float = 0.95) -> float | None:
     if k < 3:
         return None
     return round(float(r.iloc[:k].mean()) * 100, 2)
+
+
+def min_track_record_length(returns: pd.Series, benchmark_sr: float = 0.0, confidence: float = 0.95) -> int | None:
+    """MinTRL (Bailey & López de Prado 2012): the number of periods needed for
+    the observed Sharpe to be significantly above `benchmark_sr`,
+
+        MinTRL = 1 + (1 − γ3·SR + (γ4 − 1)/4 · SR²) · (z_α / (SR − SR*))²
+
+    Returns None when SR <= SR* (no length would ever suffice)."""
+    r = returns.dropna()
+    if len(r) < 30:
+        return None
+    sd = float(r.std(ddof=1))
+    if sd <= _EPS:
+        return None
+    sr = float(r.mean() / sd)
+    if sr <= benchmark_sr:
+        return None
+    skew = float(((r - r.mean()) ** 3).mean() / sd**3)
+    kurt = float(((r - r.mean()) ** 4).mean() / sd**4)
+    z = norm_ppf(confidence)
+    return int(math.ceil(1 + (1 - skew * sr + (kurt - 1) / 4 * sr * sr) * (z / (sr - benchmark_sr)) ** 2))
+
+
+def sharpe_tstat(returns: pd.Series) -> float | None:
+    """t-statistic of the mean return, t ≈ SR_period · sqrt(T). Harvey, Liu &
+    Zhu (2016) argue a new strategy should clear t > 3 given how many have
+    been tried; t < 2 is not even a conventional finding."""
+    r = returns.dropna()
+    sd = float(r.std(ddof=1))
+    if len(r) < 30 or sd <= _EPS:
+        return None
+    return round(float(r.mean() / sd * math.sqrt(len(r))), 2)
+
+
+def regime_table(net: pd.Series, bench: pd.Series, ann: int) -> list[dict]:
+    """Performance conditional on the benchmark's state: realised-vol
+    terciles (60-day) and trend (above / below its 100-day average). Three
+    years is often a single regime — this shows whether the result is one
+    bull run or holds up when the tape changes."""
+    frame = pd.DataFrame({"p": net, "b": bench}).dropna()
+    if len(frame) < 150:
+        return []
+    vol = frame["b"].rolling(60).std()
+    trend_level = (1 + frame["b"]).cumprod()
+    trend = trend_level > trend_level.rolling(100).mean()
+    tri = pd.qcut(vol.rank(method="first"), 3, labels=["low_vol", "mid_vol", "high_vol"])
+    rows = []
+
+    def row(label: str, mask: pd.Series) -> None:
+        part = frame[mask.fillna(False).astype(bool)]
+        if len(part) < 20:
+            return
+        sd = float(part["p"].std(ddof=1))
+        rows.append({
+            "regime": label,
+            "days": int(len(part)),
+            "ann_return_pct": round(float(part["p"].mean() * ann) * 100, 2),
+            "bench_ann_return_pct": round(float(part["b"].mean() * ann) * 100, 2),
+            "sharpe": round(float(part["p"].mean() / sd * np.sqrt(ann)), 2) if sd > _EPS else None,
+            "hit_rate_pct": round(float((part["p"] > part["b"]).mean() * 100), 1),
+        })
+
+    for label in ("low_vol", "mid_vol", "high_vol"):
+        row(label, tri == label)
+    row("uptrend", trend & trend_level.rolling(100).mean().notna())
+    row("downtrend", ~trend & trend_level.rolling(100).mean().notna())
+    return rows
+
+
+def quantile_returns(scores: pd.DataFrame, returns: pd.DataFrame, ann: int, buckets: int = 5) -> dict:
+    """Qlib-style signal check: equal-weight the names in each score quantile,
+    rebalanced daily with a one-bar lag, gross of costs. A good signal shows
+    monotone bucket returns and a positive top-minus-bottom spread."""
+    sc = scores.reindex(index=returns.index, columns=returns.columns)
+    ranks = sc.rank(axis=1, pct=True).shift(1)  # decided at t-1, earns t
+    valid = ranks.notna() & returns.notna()
+    if int(valid.any(axis=1).sum()) < 60:
+        return {"buckets": [], "spread_ann_pct": None, "monotonic": None}
+    out = []
+    series = []
+    for k in range(buckets):
+        lo, hi = k / buckets, (k + 1) / buckets
+        member = (ranks > lo) & (ranks <= hi) if k > 0 else (ranks <= hi)
+        member = member & valid
+        w = member.div(member.sum(axis=1).replace(0, np.nan), axis=0)
+        r = (w * returns.fillna(0)).sum(axis=1)
+        r = r[member.sum(axis=1) > 0]
+        series.append(r)
+        out.append({"bucket": k + 1, "ann_return_pct": round(float(r.mean() * ann) * 100, 2) if len(r) else None})
+    both = pd.concat([series[-1], series[0]], axis=1).dropna()
+    spread = both.iloc[:, 0] - both.iloc[:, 1]
+    vals = [b["ann_return_pct"] for b in out if b["ann_return_pct"] is not None]
+    sd = float(spread.std(ddof=1)) if len(spread) > 2 else 0.0
+    return {
+        "buckets": out,
+        "spread_ann_pct": round(float(spread.mean() * ann) * 100, 2) if len(spread) else None,
+        "spread_sharpe": round(float(spread.mean() / sd * np.sqrt(ann)), 2) if sd > _EPS else None,
+        "monotonic": bool(all(b >= a for a, b in zip(vals, vals[1:]))) if len(vals) == buckets else None,
+    }
+
+
+def brinson(held: pd.DataFrame, bench_w: pd.DataFrame, returns: pd.DataFrame, groups: dict[str, str]) -> dict:
+    """Brinson-Fachler attribution against the equal-weight benchmark, summed
+    over days (arithmetic):
+        allocation  = Σ_g (w_g − W_g)(B_g − B)
+        selection   = Σ_g W_g (R_g − B_g)
+        interaction = Σ_g (w_g − W_g)(R_g − B_g)
+    where w/W are portfolio/benchmark group weights, R_g/B_g the group
+    returns inside each, B the total benchmark return."""
+    syms = [c for c in returns.columns if c in held.columns]
+    if not syms:
+        return {"allocation_pct": None, "selection_pct": None, "interaction_pct": None, "groups": []}
+    g = pd.Series({s: groups.get(str(s), "other") for s in syms})
+    r = returns[syms].fillna(0.0)
+    w = held[syms].fillna(0.0)
+    bw = bench_w[syms].fillna(0.0)
+    labels = sorted(set(g.values))
+    alloc = sel = inter = 0.0
+    per_group = []
+    b_total = (bw * r).sum(axis=1)
+    for label in labels:
+        cols = [s for s in syms if g[s] == label]
+        wg, Wg = w[cols].sum(axis=1), bw[cols].sum(axis=1)
+        Rg = (w[cols] * r[cols]).sum(axis=1) / wg.replace(0, np.nan)
+        Bg = (bw[cols] * r[cols]).sum(axis=1) / Wg.replace(0, np.nan)
+        Rg = Rg.fillna(Bg).fillna(0.0)
+        Bg = Bg.fillna(0.0)
+        a = ((wg - Wg) * (Bg - b_total)).sum()
+        se = (Wg * (Rg - Bg)).sum()
+        it = ((wg - Wg) * (Rg - Bg)).sum()
+        alloc += a
+        sel += se
+        inter += it
+        per_group.append({
+            "group": label,
+            "avg_weight_pct": round(float(wg.mean()) * 100, 2),
+            "bench_weight_pct": round(float(Wg.mean()) * 100, 2),
+            "allocation_pct": round(float(a) * 100, 2),
+            "selection_pct": round(float(se) * 100, 2),
+        })
+    per_group.sort(key=lambda x: -x["avg_weight_pct"])
+    return {
+        "allocation_pct": round(float(alloc) * 100, 2),
+        "selection_pct": round(float(sel) * 100, 2),
+        "interaction_pct": round(float(inter) * 100, 2),
+        "groups": per_group,
+    }
