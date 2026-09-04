@@ -284,9 +284,11 @@ export function markTriggered(id: string): PriceAlert[] {
 
 const PAPER_KEY = "aiquant.paper";
 
+export type PaperKind = "strategy" | "factor" | "pipeline";
+
 export interface PaperDeployment {
   id: string;
-  kind: "strategy" | "factor";
+  kind: PaperKind;
   name: string;
   config: Record<string, unknown>;
   startedAt: string; // YYYY-MM-DD
@@ -298,7 +300,7 @@ export function savedPaper(): PaperDeployment[] {
 }
 
 export function deployPaper(
-  kind: "strategy" | "factor",
+  kind: PaperKind,
   name: string,
   config: Record<string, unknown>,
 ): PaperDeployment[] {

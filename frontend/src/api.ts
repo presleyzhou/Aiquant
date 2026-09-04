@@ -100,7 +100,13 @@ export interface PaperTrack {
   stats: PaperStats;
   pre: PaperStats;
   decay: { verdict: "holding" | "degraded" | "improved" | "insufficient"; sharpe_delta: number | null; excess_delta: number | null };
-  position: { state: "long" | "flat" | "holdings" | "unknown"; symbols?: string[]; since?: string };
+  position: {
+    state: "long" | "flat" | "holdings" | "unknown";
+    symbols?: string[];
+    /** Pipeline deployments: per-symbol target weights, aligned with `symbols`. */
+    weights_pct?: number[];
+    since?: string;
+  };
   trades_live: number | null;
   daily_returns: Array<{ time: number; ret_pct: number }>;
 }
@@ -361,6 +367,167 @@ export interface Charge extends OrderStatus {
   hosted_url: string | null;
 }
 
+/* ------------------------------------------------ end-to-end pipeline ---
+ * Mirrors backend/PIPELINE_CONTRACT.md exactly: data panel → factor DSL →
+ * composite signal → portfolio construction → risk/attribution → paper. */
+
+export interface PipelineFactorSpec {
+  expression: string;
+  invert: boolean;
+  horizon: number;
+}
+
+export interface PipelineStarterFactor extends PipelineFactorSpec {
+  zh: string;
+  en: string;
+}
+
+export interface PipelineScheme {
+  id: string;
+  zh: string;
+  en: string;
+  desc_zh: string;
+  desc_en: string;
+}
+
+export type PipelineLimitKey =
+  | "factors"
+  | "top_n"
+  | "rebalance"
+  | "max_weight"
+  | "cost_bps"
+  | "target_vol_pct"
+  | "vol_lookback";
+
+export interface PipelineConfig {
+  markets: string[];
+  universes: Record<string, string[]>;
+  schemes: PipelineScheme[];
+  starter_factors: Record<string, PipelineStarterFactor[]>;
+  defaults: {
+    scheme: string;
+    signal_weighting: "ic" | "equal";
+    top_n: number;
+    rebalance: number;
+    max_weight: number;
+    cost_bps: number;
+    target_vol_pct: number | null;
+    vol_lookback: number;
+    horizon: number;
+  };
+  limits: Record<PipelineLimitKey, [number, number]>;
+}
+
+export interface PipelineRunRequest {
+  market: string;
+  factors: PipelineFactorSpec[];
+  signal_weighting?: "ic" | "equal";
+  scheme?: string;
+  top_n?: number;
+  rebalance?: number;
+  max_weight?: number;
+  cost_bps?: number;
+  target_vol_pct?: number | null;
+  vol_lookback?: number;
+  compare?: boolean;
+}
+
+export interface PipelineSplitStats {
+  from: string;
+  to: string;
+  total_return_pct: number;
+  sharpe: number;
+  max_drawdown_pct: number;
+  excess_pct: number;
+}
+
+export interface PipelineAlternative {
+  scheme: string;
+  total_return_pct: number;
+  sharpe: number;
+  max_drawdown_pct: number;
+  ann_vol_pct: number;
+  avg_turnover_pct: number;
+}
+
+export interface PipelineContributor {
+  symbol: string;
+  contribution_pct: number;
+  avg_weight_pct: number;
+  days_held: number;
+}
+
+export interface PipelineResult {
+  spec: PipelineRunRequest;
+  universe: { market: string; symbols: number; from: string; to: string; bars: number };
+  signal: {
+    weighting: string;
+    components: Array<
+      PipelineFactorSpec & { is_ic: number; oos_ic: number; weight: number; standalone_sharpe: number }
+    >;
+    max_pair_corr: number;
+  };
+  portfolio: {
+    scheme: string;
+    top_n: number;
+    max_weight: number;
+    rebalance: number;
+    cost_bps: number;
+    target_vol_pct: number | null;
+    vol_lookback: number;
+    avg_effective_n: number;
+    avg_exposure_pct: number;
+    avg_turnover_pct: number;
+    rebalances: number;
+  };
+  backtest: {
+    span: { from: string; to: string };
+    stats: {
+      total_return_pct: number;
+      cagr_pct: number | null;
+      ann_vol_pct: number;
+      sharpe: number;
+      sortino: number;
+      calmar: number;
+      max_drawdown_pct: number;
+      win_rate_pct: number;
+      excess_pct: number;
+      beta: number;
+      tracking_error_pct: number;
+      information_ratio: number;
+      benchmark: {
+        total_return_pct: number;
+        cagr_pct: number | null;
+        ann_vol_pct: number;
+        sharpe: number;
+        max_drawdown_pct: number;
+      };
+    };
+    in_sample: PipelineSplitStats;
+    holdout: PipelineSplitStats;
+    equity_curve: Point[];
+    benchmark_curve: Point[];
+    drawdown_curve: Point[];
+    exposure_curve: Point[];
+    monthly_returns: Array<{ year: number; month: number; ret_pct: number; bench_pct: number }>;
+    yearly_returns: Array<{ year: number; ret_pct: number; bench_pct: number }>;
+  };
+  risk: {
+    drawdowns: Array<{ peak: string; trough: string; recovery: string | null; depth_pct: number; days: number }>;
+    contributors: PipelineContributor[];
+    detractors: PipelineContributor[];
+    concentration: { avg_effective_n: number; cap_binding_pct: number };
+    correlation_to_benchmark: number;
+  };
+  alternatives: PipelineAlternative[];
+  target_weights: {
+    as_of: string;
+    exposure_pct: number;
+    weights: Array<{ symbol: string; weight_pct: number; score_rank: number }>;
+  };
+  warnings: string[];
+}
+
 export type AIEvent =
   | { type: "thinking"; text: string }
   | { type: "text"; text: string }
@@ -574,6 +741,15 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ account_secret, amount_usd, method, address }),
     }).then(json<Wallet & { id: string; status: string; amount: number }>),
+
+  pipelineConfig: () => fetch("/api/pipeline/config").then(json<PipelineConfig>),
+
+  pipelineRun: (body: PipelineRunRequest) =>
+    fetch("/api/pipeline/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<PipelineResult>),
 
   listingPayload: (id: string, token: string) =>
     fetch(`/api/marketplace/listings/${encodeURIComponent(id)}/payload?token=${encodeURIComponent(token)}`).then(

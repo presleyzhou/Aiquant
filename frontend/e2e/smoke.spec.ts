@@ -129,6 +129,93 @@ async function mockApi(page: Page) {
             discovered: [{ expression: "rank(delta(close, 5))", gen: 2, is_ic: 0.051, is_icir: 0.3, oos_ic: 0.04, complexity: 3, accepted: true, reasons: [], invert: false, total_return_pct: 33.3, cagr_pct: 12.1, sharpe: 1.23, max_drawdown_pct: -9.9, bench_return_pct: 20 }] },
         ].map((e) => JSON.stringify(e)).join("\n") + "\n",
       });
+    if (path === "/api/pipeline/config")
+      return json({
+        markets: ["us", "crypto"],
+        universes: { us: ["AAPL", "MSFT", "NVDA", "INTC"], crypto: ["BTC-USD", "ETH-USD"] },
+        schemes: [
+          { id: "equal", zh: "等权 Top-N", en: "Equal-weight Top-N", desc_zh: "入选标的等权", desc_en: "Equal weight" },
+          { id: "score", zh: "信号加权", en: "Score-weighted", desc_zh: "按信号强弱", desc_en: "By signal strength" },
+          { id: "inverse_vol", zh: "波动率倒数", en: "Inverse volatility", desc_zh: "波动越低权重越高", desc_en: "Lower vol, more weight" },
+          { id: "min_variance", zh: "最小方差", en: "Minimum variance", desc_zh: "最低组合波动", desc_en: "Lowest variance" },
+          { id: "risk_parity", zh: "风险平价", en: "Risk parity", desc_zh: "风险贡献相同", desc_en: "Equal risk contribution" },
+        ],
+        starter_factors: {
+          us: [
+            { expression: "neg(delta(close, 5) / ts_std(returns, 20))", zh: "短期反转", en: "Short-term reversal", invert: false, horizon: 10 },
+            { expression: "rank(ts_mean(returns, 60))", zh: "中期动量", en: "Medium-term momentum", invert: false, horizon: 10 },
+          ],
+          crypto: [
+            { expression: "rank(ts_mean(returns, 30))", zh: "月度动量", en: "Monthly momentum", invert: false, horizon: 10 },
+          ],
+        },
+        defaults: { scheme: "inverse_vol", signal_weighting: "ic", top_n: 8, rebalance: 10, max_weight: 0.25, cost_bps: 7,
+          target_vol_pct: null, vol_lookback: 60, horizon: 10 },
+        limits: { factors: [1, 8], top_n: [2, 20], rebalance: [1, 30], max_weight: [0.05, 1.0], cost_bps: [0, 50],
+          target_vol_pct: [5, 40], vol_lookback: [20, 120] },
+      });
+    if (path === "/api/pipeline/run") {
+      const body = route.request().postDataJSON() as { factors?: unknown[]; scheme?: string } | null;
+      const factors = Array.isArray(body?.factors) && body.factors.length > 0
+        ? body.factors
+        : [{ expression: "neg(delta(close, 5) / ts_std(returns, 20))", invert: false, horizon: 10 }];
+      const scheme = body?.scheme ?? "inverse_vol";
+      const split = (from: string, to: string, ret: number, sharpe: number) =>
+        ({ from, to, total_return_pct: ret, sharpe, max_drawdown_pct: -9.5, excess_pct: ret - 20 });
+      return json({
+        spec: { market: "us", factors, signal_weighting: "ic", scheme, top_n: 8, rebalance: 10, max_weight: 0.25,
+          cost_bps: 7, target_vol_pct: null, vol_lookback: 60, compare: true },
+        universe: { market: "us", symbols: 4, from: "2023-09-05", to: "2026-09-03", bars: 752 },
+        signal: {
+          weighting: "ic",
+          components: (factors as Array<{ expression: string; invert: boolean; horizon: number }>).map((f, i) => ({
+            ...f, is_ic: 0.021 - i * 0.004, oos_ic: 0.012, weight: 1 / factors.length, standalone_sharpe: 0.81 })),
+          max_pair_corr: 0.31,
+        },
+        portfolio: { scheme, top_n: 8, max_weight: 0.25, rebalance: 10, cost_bps: 7, target_vol_pct: null, vol_lookback: 60,
+          avg_effective_n: 6.4, avg_exposure_pct: 100.0, avg_turnover_pct: 3.1, rebalances: 60 },
+        backtest: {
+          span: { from: "2023-12-01", to: "2026-09-03" },
+          stats: { total_return_pct: 41.2, cagr_pct: 13.4, ann_vol_pct: 15.2, sharpe: 0.88, sortino: 1.21, calmar: 0.9,
+            max_drawdown_pct: -14.9, win_rate_pct: 53.1, excess_pct: 6.3, beta: 0.82, tracking_error_pct: 6.1, information_ratio: 0.7,
+            benchmark: { total_return_pct: 34.9, cagr_pct: 11.5, ann_vol_pct: 16.0, sharpe: 0.74, max_drawdown_pct: -18.2 } },
+          in_sample: split("2023-12-01", "2025-09-01", 30.1, 1.02),
+          holdout: split("2025-09-02", "2026-09-03", 8.5, 0.61),
+          equity_curve: curve(),
+          benchmark_curve: curve(120, 34),
+          drawdown_curve: curve(120, 0).map((p) => ({ ...p, value: -2 })),
+          exposure_curve: curve(120, 0).map((p) => ({ ...p, value: 100 })),
+          monthly_returns: Array.from({ length: 20 }, (_, i) => ({
+            year: 2024 + Math.floor(i / 12), month: (i % 12) + 1, ret_pct: ((i * 7) % 11) - 4, bench_pct: ((i * 5) % 9) - 3 })),
+          yearly_returns: [{ year: 2024, ret_pct: 12.1, bench_pct: 9.7 }, { year: 2025, ret_pct: 15.3, bench_pct: 14.0 }],
+        },
+        risk: {
+          drawdowns: [
+            { peak: "2024-03-01", trough: "2024-04-10", recovery: "2024-06-02", depth_pct: -12.3, days: 40 },
+            { peak: "2025-11-03", trough: "2026-01-20", recovery: null, depth_pct: -9.1, days: 78 },
+          ],
+          contributors: [{ symbol: "NVDA", contribution_pct: 4.2, avg_weight_pct: 10.1, days_held: 230 }],
+          detractors: [{ symbol: "INTC", contribution_pct: -2.1, avg_weight_pct: 6.0, days_held: 120 }],
+          concentration: { avg_effective_n: 6.4, cap_binding_pct: 30.0 },
+          correlation_to_benchmark: 0.85,
+        },
+        alternatives: [
+          { scheme: "equal", total_return_pct: 38.0, sharpe: 0.81, max_drawdown_pct: -16.0, ann_vol_pct: 16.1, avg_turnover_pct: 2.9 },
+          { scheme, total_return_pct: 41.2, sharpe: 0.88, max_drawdown_pct: -14.9, ann_vol_pct: 15.2, avg_turnover_pct: 3.1 },
+          { scheme: "risk_parity", total_return_pct: 36.5, sharpe: 0.79, max_drawdown_pct: -13.8, ann_vol_pct: 14.4, avg_turnover_pct: 3.6 },
+        ].filter((a, i, arr) => arr.findIndex((b) => b.scheme === a.scheme) === i),
+        target_weights: {
+          as_of: "2026-09-03", exposure_pct: 100.0,
+          weights: [
+            { symbol: "AAPL", weight_pct: 25.0, score_rank: 1 },
+            { symbol: "MSFT", weight_pct: 25.0, score_rank: 2 },
+            { symbol: "NVDA", weight_pct: 25.0, score_rank: 3 },
+            { symbol: "INTC", weight_pct: 25.0, score_rank: 4 },
+          ],
+        },
+        warnings: ["few_rebalances"],
+      });
+    }
     if (path === "/api/paper/track")
       return json({
         kind: "strategy", started_at: "2024-01-15", as_of: "2024-06-01", days_live: 138,
@@ -210,7 +297,7 @@ test("loads the terminal with watchlist and chart", async ({ page }) => {
   await expect(page.getByText("123.45").first()).toBeVisible({ timeout: 15_000 });
 });
 
-test("switches across all four tabs", async ({ page }) => {
+test("switches across all tabs", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "数字货币" }).click();
   await expect(page.getByText("BTC-USD").first()).toBeVisible();
@@ -220,6 +307,9 @@ test("switches across all four tabs", async ({ page }) => {
 
   await page.getByRole("button", { name: "因子挖掘" }).click();
   await expect(page.getByText("Loop Engineering")).toBeVisible();
+
+  await page.getByRole("button", { name: "端到端量化", exact: true }).click();
+  await expect(page.getByText("端到端量化投资")).toBeVisible();
 
   await page.getByRole("button", { name: "市场", exact: true }).click();
   await expect(page.getByText("可运行策略")).toBeVisible();
@@ -332,4 +422,34 @@ test("wallet: demo top-up credits the balance and pays for an item", async ({ pa
   await page.getByRole("button", { name: /用演示余额支付/ }).click();
   await expect(page.getByRole("button", { name: /在回测中运行/ })).toBeVisible();
   await expect(page.getByText("演示购买")).toBeVisible();
+});
+
+test("pipeline: tick a starter factor, run the six stages, deploy to paper", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "端到端量化", exact: true }).click();
+  await expect(page.getByText("端到端量化投资")).toBeVisible();
+  // before any factor is ticked the run button is disabled — honesty by construction
+  const run = page.getByTestId("pl-run");
+  await expect(run).toBeDisabled();
+  await page.getByRole("checkbox", { name: "短期反转" }).check();
+  await expect(run).toBeEnabled();
+  await run.click();
+  // ④ headline stats: Sharpe alongside its benchmark
+  await expect(page.getByTestId("pl-sharpe")).toContainText("0.88");
+  await expect(page.getByTestId("pl-sharpe")).toContainText("0.74");
+  // warnings are translated, not shown as raw codes
+  await expect(page.getByText("调仓次数过少", { exact: false })).toBeVisible();
+  // ⑥ target weights + deploy
+  const weights = page.getByTestId("pl-weights");
+  await expect(weights).toBeVisible();
+  await expect(weights.getByText("AAPL")).toBeVisible();
+  const deploy = page.getByTestId("pl-deploy");
+  await expect(deploy).toBeVisible();
+  await deploy.click();
+  await expect(page.getByTestId("pl-deployed")).toBeVisible();
+  // the deployment landed in browser storage with the pipeline kind
+  const kinds = await page.evaluate(() =>
+    (JSON.parse(localStorage.getItem("aiquant.paper") ?? "[]") as Array<{ kind: string }>).map((d) => d.kind),
+  );
+  expect(kinds).toContain("pipeline");
 });

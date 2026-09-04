@@ -232,7 +232,8 @@ function Card({ dep, track, confirming, onRemove, onRefresh, onNote }: CardProps
     <div className={`panel pp-card ${ok && track.decay.verdict === "degraded" ? "pp-card--degraded" : ""}`}>
       <div className="panel__head">
         <span className="panel__title">
-          {dep.kind === "factor" ? "⛏" : "📈"} {dep.name}
+          {dep.kind === "factor" ? "⛏" : dep.kind === "pipeline" ? "⚙" : "📈"} {dep.name}
+          <span className="pp-chip pp-kind">{t(`pp.kind.${dep.kind}`)}</span>
         </span>
         <span className="panel__meta pp-card__meta">
           {t("pp.since", { d: dep.startedAt })}
@@ -348,12 +349,19 @@ function PositionChip({ track }: { track: PaperTrack }) {
     return <span className="pp-chip pp-chip--long">▲ {t("pp.pos.long", { d: p.since ?? "" })}</span>;
   if (p.state === "flat")
     return <span className="pp-chip pp-chip--flat">▽ {t("pp.pos.flat", { d: p.since ?? "" })}</span>;
-  if (p.state === "holdings")
+  if (p.state === "holdings") {
+    const symbols = p.symbols ?? [];
+    const weights = p.weights_pct;
+    // Pipeline deployments carry target weights aligned with the symbols.
+    const label = symbols
+      .map((s, i) => (weights && weights[i] !== undefined ? `${s} ${weights[i].toFixed(1)}%` : s))
+      .join(" · ");
     return (
       <span className="pp-chip pp-chip--long" title={t("pp.pos.holdingsTitle", { d: p.since ?? "" })}>
-        ◧ {t("pp.pos.holdings")} {(p.symbols ?? []).join(" · ")}
+        ◧ {t("pp.pos.holdings")} {label}
       </span>
     );
+  }
   return <span className="pp-chip">{t("pp.pos.unknown")}</span>;
 }
 

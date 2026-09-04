@@ -10,6 +10,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 // mounted (hidden) so its state survives tab switches.
 const StrategyLab = lazy(() => import("./components/StrategyLab").then((m) => ({ default: m.StrategyLab })));
 const FactorLab = lazy(() => import("./components/FactorLab").then((m) => ({ default: m.FactorLab })));
+const PipelinePage = lazy(() => import("./components/PipelinePage").then((m) => ({ default: m.PipelinePage })));
 const PaperPage = lazy(() => import("./components/PaperPage").then((m) => ({ default: m.PaperPage })));
 const MarketPage = lazy(() => import("./components/MarketPage").then((m) => ({ default: m.MarketPage })));
 import { parseShareFromUrl } from "./share";
@@ -31,7 +32,7 @@ import {
   type MarketProfile,
 } from "./markets";
 
-type View = MarketId | "lab" | "factors" | "paper" | "market";
+type View = MarketId | "lab" | "factors" | "pipeline" | "paper" | "market";
 
 function loadWatchlist(profile: MarketProfile): string[] {
   try {
@@ -178,6 +179,7 @@ export default function App() {
               ["crypto", t("nav.crypto")],
               ["lab", t("nav.lab")],
               ["factors", t("nav.factors")],
+              ["pipeline", t("nav.pipeline")],
               ["paper", t("nav.paper")],
               ["market", t("nav.market")],
             ] as Array<[View, string]>
@@ -255,6 +257,11 @@ export default function App() {
         {visited.has("factors") && (
           <ErrorBoundary name="因子挖掘">
             <FactorLab hidden={view !== "factors"} aiEnabled={ai.enabled} />
+          </ErrorBoundary>
+        )}
+        {visited.has("pipeline") && (
+          <ErrorBoundary name="端到端量化">
+            <PipelinePage hidden={view !== "pipeline"} />
           </ErrorBoundary>
         )}
         {visited.has("paper") && (
