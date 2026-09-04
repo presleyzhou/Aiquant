@@ -50,6 +50,20 @@ async function mockApi(page: Page) {
             version: "1.0",
             payload: { strategy: "sma_cross", fast: 50, slow: 200 },
           },
+          {
+            id: "trend-sniper-pro",
+            type: "strategy",
+            name: "趋势狙击 Pro 10/40",
+            tagline: "付费策略（测试）",
+            description: "测试",
+            author: "AIQUANT",
+            version: "1.0",
+            tags: ["趋势"],
+            tier: "paid",
+            risk: "medium",
+            integration: { backtest: { strategy: "ema_cross", fast: 10, slow: 40 } },
+            price: { amount: "4.99", currency: "USD" },
+          },
         ],
       });
     if (path === "/api/factors/config")
@@ -144,6 +158,16 @@ async function mockApi(page: Page) {
     if (path === "/api/marketplace/listings/mine") return json({ listings: [], persistence: "file" });
     if (path.startsWith("/api/marketplace/listings/c_e2e/payload"))
       return json({ id: "c_e2e", integration: { backtest: { strategy: "sma_cross", fast: 20, slow: 50 } } });
+    if (path === "/api/wallet") return json({ balance_usd: 0, demo_usd: 0, entries: [] });
+    if (path === "/api/wallet/topup")
+      return json({ kind: "topup", order_id: "demo_top", provider: "demo", method: "card", status: "pending", demo: true,
+        amount: "25.00", currency: "USD", hosted_url: null });
+    if (path.startsWith("/api/wallet/topup/demo/"))
+      return json({ order_id: "demo_top", provider: "demo", status: "confirmed", demo: true, kind: "topup",
+        wallet: { balance_usd: 0, demo_usd: 25, entries: [{ id: "e1", kind: "topup", amount: 25, demo: true, ref: "demo_top", note: "demo", at: 1_700_000_000 }] } });
+    if (path === "/api/wallet/purchase")
+      return json({ order_id: "wal_1", provider: "wallet", status: "confirmed", demo: true, item_id: "trend-sniper-pro", token: "tok.sig",
+        wallet: { balance_usd: 0, demo_usd: 20.01, entries: [] } });
     // anything unmocked answers empty-but-valid, never hangs
     return json({});
   });
@@ -289,6 +313,23 @@ test("marketplace: list a paid strategy, buy it in demo mode, payload unlocks", 
   await page.getByRole("button", { name: /购买/ }).click();
   await page.getByRole("button", { name: /模拟支付完成/ }).click();
   // detail modal stays open; entitlement stored, payload merged → run button appears
+  await expect(page.getByRole("button", { name: /在回测中运行/ })).toBeVisible();
+  await expect(page.getByText("演示购买")).toBeVisible();
+});
+
+test("wallet: demo top-up credits the balance and pays for an item", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "市场" }).click();
+  await page.getByRole("button", { name: "充值", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "钱包充值" });
+  await dialog.getByRole("button", { name: /演示充值 \$25/ }).click();
+  await dialog.getByRole("button", { name: /模拟支付完成/ }).click();
+  await expect(page.getByText("演示充值 $25.00 已记入演示余额")).toBeVisible();
+  await expect(page.locator(".mk-wallet__demo")).toHaveText("+$25.00 demo");
+  // buy a priced catalogue item from the demo balance
+  await page.locator(".mk-card", { hasText: "趋势狙击" }).first().click();
+  await page.getByRole("button", { name: /购买/ }).click();
+  await page.getByRole("button", { name: /用演示余额支付/ }).click();
   await expect(page.getByRole("button", { name: /在回测中运行/ })).toBeVisible();
   await expect(page.getByText("演示购买")).toBeVisible();
 });

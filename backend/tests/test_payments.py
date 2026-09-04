@@ -138,3 +138,69 @@ def test_priced_catalog_items_are_fully_functional():
     BacktestRequest(symbol="SPY", **strategy["integration"]["backtest"])
     skill = marketplace.get_item("deep-due-diligence")
     assert "{symbol}" in skill["integration"]["prompt_template"]
+
+
+# ------------------------------------------------------------------ wallet
+
+
+BUYER = "b" * 32
+
+
+def test_wallet_topup_purchase_and_seller_credit():
+    from app.services import wallet
+
+    client = TestClient(app)
+    # empty wallet
+    w = client.post("/api/wallet", json={"account_secret": BUYER}).json()
+    assert w == {"balance_usd": 0.0, "demo_usd": 0.0, "entries": []}
+
+    # demo top-up (no rails configured) lands in the DEMO balance only
+    t = client.post("/api/wallet/topup", json={"account_secret": BUYER, "amount_usd": 20, "method": "card"}).json()
+    assert t["demo"] is True and t["kind"] == "topup"
+    c = client.post(f"/api/wallet/topup/demo/{t['order_id']}/confirm", json={"account_secret": BUYER, "amount_usd": 20}).json()
+    assert c["wallet"]["demo_usd"] == 20.0 and c["wallet"]["balance_usd"] == 0.0
+    # idempotent: confirming the same order twice does not double-credit
+    c2 = client.post(f"/api/wallet/topup/demo/{t['order_id']}/confirm", json={"account_secret": BUYER, "amount_usd": 20}).json()
+    assert c2["wallet"]["demo_usd"] == 20.0
+
+    # list something, buy it with the wallet → demo entitlement, no seller credit
+    item = client.post("/api/marketplace/listings", json=_listing()).json()["item"]
+    p = client.post("/api/wallet/purchase", json={"account_secret": BUYER, "item_id": item["id"]})
+    assert p.status_code == 200, p.text
+    body = p.json()
+    assert body["demo"] is True and body["wallet"]["demo_usd"] == 15.5
+    assert listings.verify_entitlement(body["token"], item["id"])["demo"] is True
+    seller_wallet = wallet.view(wallet.account_hash(SELLER))
+    assert seller_wallet["balance_usd"] == 0.0  # demo money never reaches sellers
+
+    # a REAL credit (as a confirmed Stripe order would produce) pays the seller net of fee
+    wallet.credit(wallet.account_hash(BUYER), 10, demo=False, ref="cs_test_1")
+    body = client.post("/api/wallet/purchase", json={"account_secret": BUYER, "item_id": item["id"]}).json()
+    assert body["demo"] is False and body["wallet"]["balance_usd"] == 5.5
+    assert wallet.view(wallet.account_hash(SELLER))["balance_usd"] == 4.05  # 4.50 minus 10 %
+
+    # sellers cannot buy their own listing; insufficient funds is a 400
+    assert client.post("/api/wallet/purchase", json={"account_secret": SELLER, "item_id": item["id"]}).status_code == 400
+    wallet.debit(wallet.account_hash(BUYER), 5.5, ref="x", kind="purchase")
+    wallet.debit(wallet.account_hash(BUYER), 15.5, ref="y", kind="purchase")  # drain demo too
+    r = client.post("/api/wallet/purchase", json={"account_secret": BUYER, "item_id": item["id"]})
+    assert r.status_code == 400 and "insufficient" in r.json()["detail"]
+
+    # seller withdraws real balance; demo balance is never withdrawable
+    wd = client.post("/api/wallet/withdraw", json={"account_secret": SELLER, "amount_usd": 4, "method": "crypto", "address": "0x" + "c" * 40})
+    assert wd.status_code == 200 and wd.json()["status"] == "pending" and wd.json()["balance_usd"] == 0.05
+    assert client.post("/api/wallet/withdraw", json={"account_secret": BUYER, "amount_usd": 5, "method": "crypto", "address": "0x" + "c" * 40}).status_code == 400
+
+
+def test_settle_routes_topup_metadata_to_wallet():
+    from app.services import wallet
+
+    h = wallet.account_hash(BUYER)
+    out = payments._settle({"kind": "topup", "account": h, "amount": "25.00"}, "cs_topup_1", "stripe", "25.00", None)
+    assert out["kind"] == "topup" and out["wallet"]["balance_usd"] == 25.0
+    # replayed webhook → no double credit
+    payments._settle({"kind": "topup", "account": h, "amount": "25.00"}, "cs_topup_1", "stripe", "25.00", None)
+    assert wallet.view(h)["balance_usd"] == 25.0
+    # item metadata still confirms an item
+    out = payments._settle({"item_id": "trend-sniper-pro"}, "cs_item_1", "stripe", "4.99", None)
+    assert out["status"] == "confirmed" and "token" in out

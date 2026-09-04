@@ -3196,3 +3196,15 @@ tbody tr:hover td {
 @media (max-width: 640px) {
   .mk-paybadges { margin-left: 0; }
 }
+
+/* ---- wallet -------------------------------------------------------------- */
+.mk-wallet { display: inline-flex; align-items: baseline; gap: 8px; padding: 6px 12px; border-radius: 999px; border: 1px solid rgba(59,224,255,0.35); background: rgba(59,224,255,0.06); color: var(--fg); font: inherit; cursor: pointer; }
+.mk-wallet:hover { border-color: var(--accent); }
+.mk-wallet__label { font-size: 11px; color: var(--muted); }
+.mk-wallet b { font-family: var(--mono, ui-monospace, monospace); font-size: 15px; color: var(--accent); }
+.mk-wallet__demo { font-size: 11px; color: var(--amber); }
+.pay-wallet { padding: 10px 12px; border: 1px solid rgba(59,224,255,0.25); border-radius: 10px; margin-bottom: 12px; background: rgba(59,224,255,0.04); }
+.pay-wallet__row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; font-size: 13px; }
+.pay-wallet__row b { font-family: var(--mono, ui-monospace, monospace); color: var(--accent); }
+.topup-amounts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.topup-custom { width: 130px; }

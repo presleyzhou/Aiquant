@@ -332,6 +332,27 @@ export interface OrderStatus {
   demo: boolean;
   item_id?: string;
   token?: string;
+  wallet?: Wallet;
+}
+
+export interface WalletEntry {
+  id: string;
+  kind: "topup" | "purchase" | "sale" | "withdraw";
+  amount: number;
+  demo: boolean;
+  ref: string;
+  note: string;
+  at: number;
+}
+
+export interface Wallet {
+  balance_usd: number;
+  demo_usd: number;
+  entries: WalletEntry[];
+}
+
+export interface TopUpCheckout extends Omit<Checkout, "item_id"> {
+  kind: "topup";
 }
 
 /** @deprecated legacy crypto-only shape; kept for older callers. */
@@ -518,6 +539,41 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ seller_secret }),
     }).then(json<{ removed: string }>),
+
+  wallet: (account_secret: string) =>
+    fetch("/api/wallet", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_secret }),
+    }).then(json<Wallet>),
+
+  walletTopUp: (account_secret: string, amount_usd: number, method: PayMethod, return_url: string) =>
+    fetch("/api/wallet/topup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_secret, amount_usd, method, return_url }),
+    }).then(json<TopUpCheckout>),
+
+  walletTopUpDemoConfirm: (order_id: string, account_secret: string, amount_usd: number) =>
+    fetch(`/api/wallet/topup/demo/${encodeURIComponent(order_id)}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_secret, amount_usd }),
+    }).then(json<OrderStatus & { wallet: Wallet }>),
+
+  walletPurchase: (account_secret: string, item_id: string) =>
+    fetch("/api/wallet/purchase", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_secret, item_id }),
+    }).then(json<OrderStatus & { wallet: Wallet }>),
+
+  walletWithdraw: (account_secret: string, amount_usd: number, method: "crypto" | "bank", address: string) =>
+    fetch("/api/wallet/withdraw", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_secret, amount_usd, method, address }),
+    }).then(json<Wallet & { id: string; status: string; amount: number }>),
 
   listingPayload: (id: string, token: string) =>
     fetch(`/api/marketplace/listings/${encodeURIComponent(id)}/payload?token=${encodeURIComponent(token)}`).then(

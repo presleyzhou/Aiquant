@@ -8,6 +8,7 @@ import {
   type MyListing,
   type PayMethod,
   type PaymentConfig,
+  type Wallet,
 } from "../api";
 import {
   installedIds,
@@ -70,6 +71,13 @@ export function MarketPage({ onRunStrategy }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [persistence, setPersistence] = useState<string | null>(null);
+  const [wallet, setWallet] = useState<Wallet | null>(null);
+  const [topping, setTopping] = useState(false);
+  const [showWallet, setShowWallet] = useState(false);
+
+  const loadWallet = useCallback(() => {
+    api.wallet(sellerSecret()).then(setWallet).catch(() => setWallet(null));
+  }, []);
 
   /** Merge a paid community payload into the visible catalogue. */
   const unlock = useCallback((item: MarketItem, token: string) => {
@@ -102,11 +110,12 @@ export function MarketPage({ onRunStrategy }: Props) {
 
   useEffect(() => {
     loadItems();
+    loadWallet();
     api
       .paymentConfig()
       .then((c) => setPayConfig(c && c.methods ? c : null))
       .catch(() => setPayConfig(null));
-  }, [loadItems]);
+  }, [loadItems, loadWallet]);
 
   // Return links from Stripe Checkout / Connect onboarding.
   useEffect(() => {
@@ -115,7 +124,21 @@ export function MarketPage({ onRunStrategy }: Props) {
     const provider = params.get("provider");
     const item = params.get("item");
     const connect = params.get("connect");
-    if (order && provider && item) {
+    const topup = params.get("topup");
+    if (order && provider && topup) {
+      setNotice(t("pay.verifying"));
+      api
+        .orderStatus(provider, order, "")
+        .then((st) => {
+          if (st.status === "confirmed") {
+            setNotice(t("wallet.topupDone", { a: topup }));
+            loadWallet();
+            setShowWallet(true);
+          } else if (st.status === "pending") setNotice(t("pay.pendingReturn"));
+          else setNotice(t("pay.expired"));
+        })
+        .catch((err: Error) => setNotice(`${t("pay.verifyFail")}: ${err.message}`));
+    } else if (order && provider && item) {
       setNotice(t("pay.verifying"));
       api
         .orderStatus(provider, order, item)
@@ -235,7 +258,13 @@ export function MarketPage({ onRunStrategy }: Props) {
           </span>
         </div>
         <div className="mk-hero__actions">
-          <button className="btn btn--primary" onClick={() => setSelling(true)}>{t("sell.cta")}</button>
+          <button className="mk-wallet" onClick={() => setShowWallet((v) => !v)} title={t("wallet.title")}>
+            <span className="mk-wallet__label">{t("wallet.balance")}</span>
+            <b>${(wallet?.balance_usd ?? 0).toFixed(2)}</b>
+            {wallet && wallet.demo_usd > 0 && <span className="mk-wallet__demo">+${wallet.demo_usd.toFixed(2)} demo</span>}
+          </button>
+          <button className="btn btn--primary" onClick={() => setTopping(true)}>{t("wallet.topup")}</button>
+          <button className="btn" onClick={() => setSelling(true)}>{t("sell.cta")}</button>
           <button className="btn" onClick={() => setShowMine((v) => !v)}>
             {showMine ? t("sell.hideMine") : t("sell.mine")}
           </button>
@@ -254,6 +283,10 @@ export function MarketPage({ onRunStrategy }: Props) {
           <span>{notice}</span>
           <button className="mk-close" onClick={() => setNotice(null)} aria-label={t("mk.close")}>✕</button>
         </div>
+      )}
+
+      {showWallet && (
+        <WalletPanel wallet={wallet} onTopUp={() => setTopping(true)} onChanged={loadWallet} />
       )}
 
       {showMine && (
@@ -320,8 +353,27 @@ export function MarketPage({ onRunStrategy }: Props) {
         <PaymentModal
           item={paying}
           config={payConfig}
+          wallet={wallet}
+          onTopUp={() => {
+            setPaying(null);
+            setTopping(true);
+          }}
+          onWallet={setWallet}
           onClose={() => setPaying(null)}
           onPaid={(record) => onPaid(paying, record)}
+        />
+      )}
+
+      {topping && (
+        <TopUpModal
+          config={payConfig}
+          onClose={() => setTopping(false)}
+          onDone={(w, msg) => {
+            setTopping(false);
+            if (w) setWallet(w);
+            setNotice(msg);
+            setShowWallet(true);
+          }}
         />
       )}
 
@@ -567,10 +619,13 @@ function DetailModal({
 /* ---------------------------------------------------------------- payment */
 
 function PaymentModal({
-  item, config, onClose, onPaid,
+  item, config, wallet, onTopUp, onWallet, onClose, onPaid,
 }: {
   item: MarketItem;
   config: PaymentConfig | null;
+  wallet: Wallet | null;
+  onTopUp: () => void;
+  onWallet: (w: Wallet) => void;
   onClose: () => void;
   onPaid: (record: PurchaseRecord) => void;
 }) {
@@ -581,6 +636,24 @@ function PaymentModal({
   const [busy, setBusy] = useState(false);
   const pollRef = useRef<number | undefined>(undefined);
   const demo = !config || config.demo;
+  const price = Number(item.price?.amount ?? 0);
+  const realOk = (wallet?.balance_usd ?? 0) + 1e-9 >= price;
+  const demoOk = (wallet?.demo_usd ?? 0) + 1e-9 >= price;
+  const canWallet = realOk || demoOk;
+
+  const payWithWallet = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const st = await api.walletPurchase(sellerSecret(), item.id);
+      if (st.wallet) onWallet(st.wallet);
+      onPaid({ chargeId: st.order_id, provider: "wallet", demo: st.demo, at: new Date().toISOString(), token: st.token, method: "wallet" });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const start = async (m: PayMethod) => {
     setMethod(m);
@@ -602,9 +675,9 @@ function PaymentModal({
 
   // Demo mode has one path — start it immediately.
   useEffect(() => {
-    if (demo && !checkout && !busy && !error) void start("card");
+    if (demo && !canWallet && !checkout && !busy && !error) void start("card");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [demo]);
+  }, [demo, canWallet]);
 
   // Crypto: poll the provider until confirmed/failed.
   useEffect(() => {
@@ -666,6 +739,25 @@ function PaymentModal({
         <div className="mk-modal__body">
           {error && <div className="err">{error}</div>}
 
+          {!checkout && (
+            <div className="pay-wallet">
+              <div className="pay-wallet__row">
+                <span>
+                  {t("wallet.balance")} <b>${(wallet?.balance_usd ?? 0).toFixed(2)}</b>
+                  {wallet && wallet.demo_usd > 0 && <span className="dim"> · demo ${wallet.demo_usd.toFixed(2)}</span>}
+                </span>
+                {canWallet ? (
+                  <button className="btn btn--primary" disabled={busy} onClick={payWithWallet}>
+                    {realOk ? t("wallet.payWith", { a: price.toFixed(2) }) : t("wallet.payWithDemo", { a: price.toFixed(2) })}
+                  </button>
+                ) : (
+                  <button className="btn" onClick={onTopUp}>{t("wallet.topupThenBuy")}</button>
+                )}
+              </div>
+              {!demo && <p className="dim" style={{ fontSize: 11.5, margin: "6px 0 0" }}>{t("wallet.orDirect")}</p>}
+            </div>
+          )}
+
           {!demo && !checkout && (
             <div className="pay-methods">
               <p className="mk-desc" style={{ fontSize: 12.5 }}>{t("pay.choose")}</p>
@@ -712,7 +804,7 @@ function PaymentModal({
             </div>
           )}
 
-          {demo && !checkout && !error && <div className="empty">{t("pay.creating")}</div>}
+          {demo && !canWallet && !checkout && !error && <div className="empty">{t("pay.creating")}</div>}
 
           {checkout?.demo && (
             <div className="pay-panel pay-panel--demo">
@@ -1112,6 +1204,236 @@ function MyListingsPanel({
       {config && !config.demo && (
         <p className="dim" style={{ fontSize: 11.5, margin: "8px 0 0" }}>{t("sell.settleNote")}</p>
       )}
+    </section>
+  );
+}
+
+/* ---------------------------------------------------------------- wallet */
+
+const TOPUPS = [10, 25, 50, 100];
+
+function TopUpModal({
+  config, onClose, onDone,
+}: {
+  config: PaymentConfig | null;
+  onClose: () => void;
+  onDone: (wallet: Wallet | null, message: string) => void;
+}) {
+  const { t } = useT();
+  const [amount, setAmount] = useState(25);
+  const [custom, setCustom] = useState("");
+  const [checkout, setCheckout] = useState<(Checkout & { kind?: string }) | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pollRef = useRef<number | undefined>(undefined);
+  const demo = !config || config.demo;
+  const value = custom ? Number(custom) : amount;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const start = async (m: PayMethod) => {
+    if (!(value >= 1 && value <= 2000)) {
+      setError(t("wallet.amountRange"));
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const c = await api.walletTopUp(sellerSecret(), value, m, returnUrl());
+      setCheckout(c as unknown as Checkout);
+      if (!c.demo && m === "card" && c.hosted_url) window.location.assign(c.hosted_url);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // crypto: poll until confirmed
+  useEffect(() => {
+    if (!checkout || checkout.demo || checkout.method !== "crypto") return;
+    const poll = async () => {
+      try {
+        const st = await api.orderStatus(checkout.provider, checkout.order_id, "");
+        if (st.status === "confirmed") {
+          window.clearInterval(pollRef.current);
+          onDone(st.wallet ?? null, t("wallet.topupDone", { a: value.toFixed(2) }));
+        } else if (st.status === "failed") setError(t("pay.expired"));
+      } catch {
+        /* retry next tick */
+      }
+    };
+    pollRef.current = window.setInterval(poll, 4000);
+    return () => window.clearInterval(pollRef.current);
+  }, [checkout, onDone, t, value]);
+
+  const confirmDemo = async () => {
+    if (!checkout) return;
+    setBusy(true);
+    try {
+      const st = await api.walletTopUpDemoConfirm(checkout.order_id, sellerSecret(), value);
+      onDone(st.wallet, t("wallet.topupDemoDone", { a: value.toFixed(2) }));
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mk-overlay mk-overlay--pay" onClick={onClose}>
+      <div className="mk-modal mk-modal--pay" style={{ "--tint": "59, 224, 255" } as never} onClick={(e) => e.stopPropagation()} role="dialog" aria-label={t("wallet.topupTitle")}>
+        <div className="mk-modal__head">
+          <div style={{ minWidth: 0 }}>
+            <div className="mk-modal__name">{t("wallet.topupTitle")}</div>
+            <div className="mk-card__tagline">{t("wallet.topupSub")}</div>
+          </div>
+          <button className="mk-close" onClick={onClose} aria-label={t("mk.close")}>✕</button>
+        </div>
+        <div className="mk-modal__body">
+          {error && <div className="err">{error}</div>}
+          {!checkout && (
+            <>
+              <div className="topup-amounts">
+                {TOPUPS.map((a) => (
+                  <button key={a} className={`chip${!custom && amount === a ? " is-on" : ""}`} onClick={() => { setAmount(a); setCustom(""); }}>
+                    ${a}
+                  </button>
+                ))}
+                <input className="input topup-custom" type="number" min={1} max={2000} placeholder={t("wallet.custom")} value={custom} onChange={(e) => setCustom(e.target.value)} aria-label={t("wallet.custom")} />
+              </div>
+              {demo ? (
+                <div className="pay-panel pay-panel--demo" style={{ marginTop: 12 }}>
+                  <div className="pay-demo-flag">{t("pay.demoFlag")}</div>
+                  <p className="mk-desc" style={{ fontSize: 12.5 }}>{config?.note ?? t("pay.demoNote")}</p>
+                  <p className="dim" style={{ fontSize: 11.5, margin: "8px 0 0" }}>{t("wallet.demoTopupNote")}</p>
+                  <button className="btn btn--primary" style={{ marginTop: 12 }} disabled={busy} onClick={() => start("card")}>
+                    {t("wallet.demoTopupCta", { a: value.toFixed(2) })}
+                  </button>
+                </div>
+              ) : (
+                <div className="pay-methods">
+                  <p className="mk-desc" style={{ fontSize: 12.5, marginTop: 12 }}>{t("pay.choose")}</p>
+                  <div className="pay-methods__grid">
+                    {config?.methods.card && (
+                      <button className="pay-method" disabled={busy} onClick={() => start("card")}>
+                        <b>{t("pay.method.card")}</b>
+                        <span className="dim">{t("pay.method.cardSub")}</span>
+                      </button>
+                    )}
+                    {config?.methods.crypto && (
+                      <button className="pay-method" disabled={busy} onClick={() => start("crypto")}>
+                        <b>{t("pay.method.crypto")}</b>
+                        <span className="dim">{t("pay.method.cryptoSub")}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+          {checkout?.demo && (
+            <div className="pay-panel pay-panel--demo">
+              <div className="pay-demo-flag">{t("pay.demoFlag")}</div>
+              <p className="mk-desc" style={{ fontSize: 12.5 }}>{t("wallet.demoConfirmNote", { a: value.toFixed(2) })}</p>
+              <button className="btn btn--primary" style={{ marginTop: 12 }} disabled={busy} onClick={confirmDemo}>
+                {t("wallet.demoConfirm")}
+              </button>
+            </div>
+          )}
+          {checkout && !checkout.demo && checkout.method === "card" && (
+            <div className="pay-panel">
+              <p className="mk-desc" style={{ fontSize: 12.5 }}>{t("pay.redirecting")}</p>
+              <a className="btn btn--primary" href={checkout.hosted_url ?? "#"} style={{ display: "inline-block", textDecoration: "none", marginTop: 10 }}>{t("pay.goto")}</a>
+            </div>
+          )}
+          {checkout && !checkout.demo && checkout.method === "crypto" && (
+            <div className="pay-panel">
+              <p className="mk-desc" style={{ fontSize: 12.5 }}>{t("pay.created", { id: checkout.order_id })}</p>
+              <a className="btn btn--primary" href={checkout.hosted_url ?? "#"} target="_blank" rel="noreferrer" style={{ display: "inline-block", textDecoration: "none", marginTop: 10 }}>{t("pay.goto")}</a>
+              <p className="dim" style={{ fontSize: 11.5, marginTop: 10 }}>{t("pay.waiting")}</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WalletPanel({ wallet, onTopUp, onChanged }: { wallet: Wallet | null; onTopUp: () => void; onChanged: () => void }) {
+  const { t } = useT();
+  const [amount, setAmount] = useState("");
+  const [address, setAddress] = useState("");
+  const [method, setMethod] = useState<"crypto" | "bank">("crypto");
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const withdraw = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await api.walletWithdraw(sellerSecret(), Number(amount), method, address.trim());
+      setMsg(t("wallet.withdrawDone", { id: res.id, a: res.amount.toFixed(2) }));
+      setAmount("");
+      onChanged();
+    } catch (err) {
+      setMsg((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const KIND: Record<string, MsgKey> = {
+    topup: "wallet.k.topup", purchase: "wallet.k.purchase", sale: "wallet.k.sale", withdraw: "wallet.k.withdraw",
+  };
+
+  return (
+    <section className="panel mk-mine">
+      <div className="panel__head">
+        <span className="panel__title">{t("wallet.title")}</span>
+        <span className="panel__meta">
+          {t("wallet.meta", { b: (wallet?.balance_usd ?? 0).toFixed(2), d: (wallet?.demo_usd ?? 0).toFixed(2) })}
+          <button className="ghost" style={{ marginLeft: 8 }} onClick={onTopUp}>{t("wallet.topup")}</button>
+        </span>
+      </div>
+      <p className="dim" style={{ fontSize: 11.5, margin: "0 0 8px" }}>{t("wallet.note")}</p>
+      {wallet && wallet.entries.length > 0 ? (
+        <div style={{ overflowX: "auto" }}>
+          <table className="pp-compare mk-mine__table">
+            <thead>
+              <tr><th style={{ textAlign: "left" }}>{t("wallet.col.when")}</th><th style={{ textAlign: "left" }}>{t("wallet.col.kind")}</th><th style={{ textAlign: "left" }}>{t("wallet.col.note")}</th><th>{t("wallet.col.amount")}</th></tr>
+            </thead>
+            <tbody>
+              {wallet.entries.map((e) => (
+                <tr key={e.id}>
+                  <td style={{ textAlign: "left" }} className="dim">{new Date(e.at * 1000).toLocaleDateString()}</td>
+                  <td style={{ textAlign: "left" }}>{t(KIND[e.kind] ?? "wallet.k.topup")}{e.demo ? <span className="mk-badge mk-badge--demo" style={{ marginLeft: 6 }}>demo</span> : null}</td>
+                  <td style={{ textAlign: "left" }} className="dim">{e.note || e.ref}</td>
+                  <td className={e.amount >= 0 ? "up" : "dn"}>{e.amount >= 0 ? "+" : ""}${e.amount.toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="empty" style={{ padding: 14 }}>{t("wallet.empty")}</div>
+      )}
+      <form className="mk-form__row" style={{ marginTop: 10, alignItems: "flex-end" }} onSubmit={withdraw}>
+        <label className="mk-field"><span>{t("wallet.withdrawAmount")}</span><input type="number" min={1} step="0.01" required value={amount} onChange={(e) => setAmount(e.target.value)} /></label>
+        <label className="mk-field"><span>{t("wallet.withdrawMethod")}</span>
+          <select value={method} onChange={(e) => setMethod(e.target.value as "crypto" | "bank")}>
+            <option value="crypto">{t("sell.payout.crypto")}</option>
+            <option value="bank">{t("wallet.bank")}</option>
+          </select>
+        </label>
+        <label className="mk-field" style={{ flex: 3 }}><span>{t("wallet.withdrawTo")}</span><input required minLength={6} value={address} onChange={(e) => setAddress(e.target.value)} placeholder={method === "crypto" ? "0x… / bc1…" : "IBAN / 账户"} /></label>
+        <button className="btn" type="submit" disabled={busy || !wallet || wallet.balance_usd < 1}>{t("wallet.withdraw")}</button>
+      </form>
+      {msg && <p className="dim" style={{ fontSize: 12, margin: "8px 0 0" }}>{msg}</p>}
     </section>
   );
 }
