@@ -77,6 +77,12 @@ class EvolveRequest(BaseModel):
     mode: str = Field("standard")
     seeds: list[str] = Field(default_factory=list, max_length=10)  # warm-start zoo factors
     seed: int | None = Field(default=None, description="RNG seed for reproducibility")
+    objective: str = Field("multi", pattern="^(ic|multi)$")
+
+
+class ExplainRequest(BaseModel):
+    expression: str = Field(min_length=1, max_length=240)
+    market: str = Field("us", pattern="^(us|crypto)$")
 
 
 class CheckRequest(BaseModel):
@@ -181,7 +187,7 @@ async def evolve(req: EvolveRequest) -> StreamingResponse:
         try:
             async for event in evolve_stream(
                 req.market, req.horizon, req.population, req.generations, req.mode,
-                [s[:240] for s in req.seeds], req.seed,
+                [s[:240] for s in req.seeds], req.seed, req.objective,
             ):
                 yield json.dumps(event, default=str) + "\n"
         except Exception as exc:
@@ -193,3 +199,69 @@ async def evolve(req: EvolveRequest) -> StreamingResponse:
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+EXPLAIN_TOOL = {
+    "name": "submit_explanation",
+    "description": "Deliver the plain-language reading of a factor expression.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "meaning": {"type": "string", "description": "两句中文：这个表达式在衡量什么、为什么可能与未来收益相关。"},
+            "style": {"type": "string", "enum": ["momentum", "reversal", "volatility", "volume", "liquidity", "range", "mixed"]},
+            "caveat": {"type": "string", "description": "一句中文：最可能的失效场景或过拟合风险。"},
+        },
+        "required": ["meaning", "style", "caveat"],
+    },
+}
+
+
+@router.post(
+    "/explain",
+    dependencies=[Depends(limiter("explain", "rl_explain_per_day", 86_400, global_attr="rl_global_ai_per_day"))],
+)
+async def explain_factor(req: ExplainRequest) -> dict:
+    """Plain-language reading of a (GP- or LLM-mined) factor. Light model,
+    cached 24h per expression — the interpretability layer for black-box GP."""
+    from app.config import get_settings
+    from app.services import disk_cache, usage
+    from app.services.llm import analyst
+
+    # validate the expression through the DSL first; never send garbage to the model
+    try:
+        factor_dsl.parse(req.expression)
+    except factor_dsl.FactorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not analyst.enabled:
+        raise HTTPException(status_code=503, detail="AI is not configured")
+
+    key = f"explain-{req.market}-{req.expression}"
+    cached = disk_cache.load(key, ttl_seconds=86_400)
+    if isinstance(cached, dict):
+        return {**cached, "cached": True}
+
+    settings = get_settings()
+    response = await analyst.client.messages.create(
+        model=settings.claude_model_light,
+        max_tokens=400,
+        system=(
+            "你是量化研究助手。给定一个截面因子表达式（DSL：字段 open/high/low/close/volume/"
+            "returns/vwap；ts_* 为时序滚动算子，rank/zscore 为截面算子），用通俗中文解释它衡量什么、"
+            "属于哪类风格、最可能的失效场景。只解释表达式本身，不编造回测数字。通过 submit_explanation 输出。"
+        ),
+        messages=[{"role": "user", "content": f"市场：{'加密货币' if req.market == 'crypto' else '美股'}\n因子：{req.expression}"}],
+        tools=[EXPLAIN_TOOL],
+        tool_choice={"type": "tool", "name": "submit_explanation"},
+    )
+    usage.record(settings.claude_model_light, getattr(response.usage, "input_tokens", 0), getattr(response.usage, "output_tokens", 0))
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "submit_explanation":
+            result = {
+                "expression": req.expression,
+                "meaning": str(block.input.get("meaning", ""))[:500],
+                "style": str(block.input.get("style", "mixed")),
+                "caveat": str(block.input.get("caveat", ""))[:300],
+            }
+            disk_cache.store(key, result)
+            return {**result, "cached": False}
+    raise HTTPException(status_code=502, detail="model did not return an explanation")

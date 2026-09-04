@@ -3,6 +3,7 @@ import { api, type Quote } from "./api";
 import { AIPanel } from "./components/AIPanel";
 import { BacktestPanel } from "./components/BacktestPanel";
 import { Tour } from "./components/Tour";
+import { UsagePopover } from "./components/UsagePopover";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // Code-split the heavy views: each loads on first visit and then stays
@@ -205,10 +206,7 @@ export default function App() {
                   ? t("status.connecting")
                   : t("status.closed")}
           </span>
-          <span className="status">
-            <span className={`dot ${ai.enabled ? "dot--on" : "dot--off"}`} />
-            AI {ai.enabled ? (ai.model ?? "on") : t("status.ai.off")}
-          </span>
+          <UsagePopover model={ai.enabled ? (ai.model ?? "on") : null} />
           {activeQuote?.as_of && (
             <span className="status dim">
               {t("status.updated")} {new Date(activeQuote.as_of).toLocaleTimeString()}

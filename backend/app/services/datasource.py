@@ -182,9 +182,23 @@ class MarketDataService:
         if isinstance(cached, pd.DataFrame) and not cached.empty:
             return cached
 
-        df = yf.Ticker(symbol).history(period=period, interval=interval)
+        try:
+            df = yf.Ticker(symbol).history(period=period, interval=interval)
+        except Exception as exc:  # yfinance raised (rate limit, parse error…)
+            log.warning("yfinance failed for %s: %s — trying fallback source", symbol, exc)
+            df = pd.DataFrame()
         if df.empty:
-            raise LookupError(f"no history for {symbol!r} (period={period}, interval={interval})")
+            # Secondary source: Stooq (US daily) / Binance (crypto). A yfinance
+            # outage must not take every panel down with it.
+            from app.services import fallback_data
+
+            try:
+                df = fallback_data.fetch(symbol, period, interval)
+                log.info("served %s from fallback source", symbol)
+            except Exception as exc:
+                raise LookupError(
+                    f"no history for {symbol!r} (period={period}, interval={interval}); fallback: {exc}"
+                ) from exc
         # yfinance can hand back rows with NaN OHLC at the edges of a window
         # (stale first bar, in-progress last bar). A single NaN poisons every
         # downstream rolling stat, so drop those rows before anyone sees them.

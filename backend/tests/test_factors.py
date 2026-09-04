@@ -447,3 +447,59 @@ def test_gp_simplify_collapses_idempotent_nesting():
     # different windows are NOT collapsed — that nesting is meaningful
     kept = factor_dsl.parse("ts_min(ts_min(returns, 60), 3)")
     assert to_expr(simplify(kept)) == "ts_min(ts_min(returns, 60), 3)"
+
+
+# ------------------------------------------------------------ fallback data
+
+
+def test_fallback_routes_by_symbol(monkeypatch):
+    from app.services import fallback_data
+
+    calls = []
+    monkeypatch.setattr(fallback_data, "stooq_daily", lambda s, p: calls.append(("stooq", s)) or _panel(80, 1)["close"].rename(columns={"S0": "Close"}))
+    monkeypatch.setattr(fallback_data, "binance_klines", lambda s, p, i: calls.append(("binance", s)) or _panel(80, 1)["close"].rename(columns={"S0": "Close"}))
+    fallback_data.fetch("AAPL", "1y", "1d")
+    fallback_data.fetch("BTC-USD", "1y", "1h")
+    assert calls == [("stooq", "AAPL"), ("binance", "BTC-USD")]
+    with pytest.raises(LookupError):
+        fallback_data.fetch("AAPL", "1y", "1h")  # no intraday fallback for equities
+
+
+def test_history_uses_fallback_when_yfinance_empty(monkeypatch, tmp_path):
+    import pandas as pd
+
+    from app.services import datasource, fallback_data
+
+    monkeypatch.setenv("AIQUANT_CACHE_DIR", str(tmp_path))
+
+    class _EmptyTicker:
+        def __init__(self, *_): pass
+        def history(self, **_): return pd.DataFrame()
+
+    monkeypatch.setattr(datasource.yf, "Ticker", _EmptyTicker)
+    idx = pd.date_range("2025-01-01", periods=50, freq="D", tz="UTC")
+    frame = pd.DataFrame({"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 10.0}, index=idx)
+    monkeypatch.setattr(fallback_data, "fetch", lambda s, p, i: frame)
+    out = datasource.market_data._fetch_history_blocking("ZZZQ", "1y", "1d")
+    assert len(out) == 50 and "Close" in out.columns
+
+
+def test_universe_sizes():
+    from app.services.factor_mine import UNIVERSES
+
+    assert len(UNIVERSES["us"]) >= 55 and len(UNIVERSES["crypto"]) >= 20
+    assert len(set(UNIVERSES["us"])) == len(UNIVERSES["us"])  # no duplicates
+
+
+def test_explain_requires_valid_expression():
+    client = TestClient(app)
+    assert client.post("/api/factors/explain", json={"expression": "eval(x)", "market": "us"}).status_code == 400
+
+
+def test_gp_objective_scoring_prefers_stable():
+    from app.services.factor_gp import score
+
+    noisy = {"is_ic": 0.05, "is_icir": 0.05, "stability": 0.2, "complexity": 5}
+    stable = {"is_ic": 0.05, "is_icir": 0.6, "stability": 0.95, "complexity": 5}
+    assert score(stable, "multi") > score(noisy, "multi")
+    assert score(stable, "ic") == score(noisy, "ic")  # pure-IC objective ignores stability

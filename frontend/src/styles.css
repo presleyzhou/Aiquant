@@ -2329,6 +2329,23 @@ tbody tr:hover td {
   color: var(--cyan);
 }
 
+.explain__body { margin-top: 6px; font-size: 11px; }
+.explain__body p { margin: 4px 0; line-height: 1.55; }
+.usage { position: relative; display: inline-block; }
+.status--btn { background: none; border: none; cursor: pointer; font: inherit; color: inherit; padding: 0; }
+.status--btn:hover { color: var(--amber); }
+.usage__panel {
+  position: absolute; left: 0; top: calc(100% + 8px); z-index: 80; width: 300px;
+  background: var(--panel-alt); border: 1px solid var(--border-bright); border-radius: 7px;
+  box-shadow: 0 16px 40px -8px rgba(0, 0, 0, 0.7); padding: 10px 12px; font-size: 12px; text-align: left;
+}
+.usage__head { color: var(--amber); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; margin: 4px 0 6px; }
+.usage__row { display: flex; justify-content: space-between; padding: 2px 0; }
+.usage__row--sub { font-size: 11px; padding-left: 8px; }
+.usage__limits { font-size: 11px; margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; }
+.usage__data { margin-top: 10px; border-top: 1px solid var(--border); }
+.usage__actions { display: flex; gap: 6px; margin-bottom: 6px; }
+
 /* ------------------------------------------------------------- news panel --- */
 
 .news-panel {

@@ -3,6 +3,7 @@ import { streamNDJSON } from "../api";
 import { useT } from "../i18n";
 import { saveFactors, savedFactors } from "../store";
 import { EquityChart } from "./EquityChart";
+import { ExplainButton } from "./ExplainButton";
 
 interface Champion {
   expression: string;
@@ -73,7 +74,7 @@ interface DoneEvent {
 /** Genetic-programming factor evolution: no LLM, no API key — expression
  * trees evolve under |IC| fitness with parsimony and novelty pressure. The
  * holdout is consulted exactly once at the end, per hall-of-fame factor. */
-export function EvolveLab() {
+export function EvolveLab({ aiEnabled = false }: { aiEnabled?: boolean }) {
   const { t } = useT();
   const [market, setMarket] = useState("us");
   const [horizon, setHorizon] = useState(10);
@@ -81,6 +82,7 @@ export function EvolveLab() {
   const [generations, setGenerations] = useState(15);
   const [mode, setMode] = useState("standard");
   const [warmStart, setWarmStart] = useState(true);
+  const [objective, setObjective] = useState<"ic" | "multi">("multi");
 
   const [running, setRunning] = useState(false);
   const [gens, setGens] = useState<GenEvent[]>([]);
@@ -118,7 +120,7 @@ export function EvolveLab() {
     try {
       await streamNDJSON(
         "/api/factors/evolve",
-        { market, horizon, population, generations, mode, seeds },
+        { market, horizon, population, generations, mode, seeds, objective },
         (event) => {
           const e = event as unknown as { type: string } & Record<string, unknown>;
           if (e.type === "gen") setGens((prev) => [...prev, e as unknown as GenEvent]);
@@ -190,6 +192,13 @@ export function EvolveLab() {
             <span className="field__label">{t("gp.generations")}</span>
             <select className="select" value={generations} onChange={(e) => setGenerations(Number(e.target.value))} disabled={running}>
               {[5, 10, 15, 20, 30].map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span className="field__label">{t("gp.objective")}</span>
+            <select className="select" value={objective} onChange={(e) => setObjective(e.target.value as "ic" | "multi")} disabled={running}>
+              <option value="multi">{t("gp.obj.multi")}</option>
+              <option value="ic">{t("gp.obj.ic")}</option>
             </select>
           </label>
           <label className="field">
@@ -324,6 +333,7 @@ export function EvolveLab() {
                         <div className={`fl-badge ${d.accepted ? "fl-badge--ok" : "fl-badge--warn"}`}>
                           {d.accepted ? t("fl.accepted") : `${t("fl.rejected")} · ${d.reasons.join("；")}`}
                         </div>
+                        <ExplainButton expression={d.expression} market={market} enabled={aiEnabled} />
                       </div>
                       <div className="lab-saved__actions">
                         <button className="btn btn--mini" disabled={added.has(d.expression)} onClick={() => addToZoo(d)}>

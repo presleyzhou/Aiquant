@@ -90,6 +90,29 @@ export interface PaperTrack {
   };
 }
 
+export interface FactorExplanation {
+  expression: string;
+  meaning: string;
+  style: string;
+  caveat: string;
+  cached: boolean;
+}
+
+export interface AiStatus {
+  enabled: boolean;
+  model: string | null;
+  effort: string | null;
+  light_model?: string | null;
+  usage_today?: {
+    day: string;
+    calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    by_model: Record<string, { calls: number; input_tokens: number; output_tokens: number }>;
+  };
+  limits?: Record<string, number>;
+}
+
 export interface KronosBar {
   time: number;
   close: number;
@@ -305,6 +328,13 @@ export const api = {
       body: JSON.stringify(body),
     }).then(json<PaperTrack>),
 
+  factorExplain: (expression: string, market: string) =>
+    fetch("/api/factors/explain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expression, market }),
+    }).then(json<FactorExplanation>),
+
   factorComposite: (body: Record<string, unknown>) =>
     fetch("/api/factors/composite", {
       method: "POST",
@@ -344,7 +374,7 @@ export const api = {
 
   aiStatus: () =>
     fetch("/api/ai/status").then(
-      json<{ enabled: boolean; model: string | null; effort: string | null }>,
+      json<AiStatus>,
     ),
 
   marketItems: (type?: string, q?: string) => {

@@ -147,7 +147,8 @@ Vercel 后端会把 `/api/kronos/*` 服务器侧转发过去（无 CORS、前端
 | POST | `/api/factors/backtest` | 单因子 Top-N 等权组合回测（含成本与等权基准） |
 | POST | `/api/factors/composite` | 多因子合成回测（等权 / 样本内 IC 加权） |
 | POST | `/api/factors/check` | 因子体检：全窗/留出/近60日 IC（衰减监控与跨市场移植检验共用） |
-| POST | `/api/factors/evolve` | 遗传算法因子进化（NDJSON 流：每代冠军 + 名人堂留出期验证） |
+| POST | `/api/factors/evolve` | 遗传算法因子进化（NDJSON 流：每代冠军 + 实时名人堂 + 留出期验证；`objective` = multi/ic） |
+| POST | `/api/factors/explain` | 用轻量模型把因子表达式翻译成经济含义 / 风格 / 失效场景（24h 缓存） |
 | GET | `/api/ai/status` | AI 是否可用、模型/轻量模型、当日 token 用量与限流配置 |
 | POST | `/api/ai/analyze` | 流式分析（NDJSON） |
 | WS | `/ws/quotes` | 实时报价推送 |
@@ -165,7 +166,7 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
 [Chain-of-Alpha](https://arxiv.org/abs/2508.06312) 的生成/优化双链、
 [AlphaAgent](https://arxiv.org/pdf/2502.16789) 的复杂度正则、QuantAgent 的经验累积）：
 
-1. **生成**：Claude 每轮通过强制工具调用提交 N 个因子表达式（安全 DSL，手写解析器，绝不 eval）；
+1. **生成**：Claude 每轮通过强制工具调用提交 N 个因子表达式（安全 DSL，手写解析器，绝不 eval）；标的池为 60 只美股（覆盖 11 个行业）/ 24 个币对；
 2. **评估**：服务端确定性数学 —— 对 24 只美股 / 16 个币对的截面逐日计算 Rank IC，
    前 80% 样本内、后 20% 留出期，另查与已入选因子的冗余度与表达式复杂度；
 3. **反馈**：结果压缩为指令式反馈（信号弱→增强、不稳→平滑、冗余→换结构、解析错误→原文引用）
@@ -178,6 +179,12 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
 锦标赛选择 + 子树交叉/变异；可用因子库**热启动**（Warm-Start GP）。每代实时显示冠军因子的累计收益、
 年化、夏普、最大回撤、IC 与进化代数；结束时留出期对名人堂逐个验证，入选者一键进因子库。
 接口 `POST /api/factors/evolve`（NDJSON 流）。参考 AutoAlpha、Warm-Start GP、AlphaEvolve、AlphaForge。
+
+**数据源冗余**：yfinance 为主源；失败时美股日线自动回退到 Stooq、加密回退到 Binance 公开 K 线接口
+（`backend/app/services/fallback_data.py`），单点故障不再拖垮全站。
+
+**本地数据备份**：页头 AI 状态芯片点开可见当日 token 用量与限流配置，并可一键导出/导入本浏览器内的
+全部数据（自选、因子库、模拟持仓、预警），用于跨设备迁移。
 
 ## 设计要点
 

@@ -41,15 +41,27 @@ from app.services.llm import ClaudeUnavailable, analyst
 log = logging.getLogger("aiquant.factors")
 
 UNIVERSES: dict[str, list[str]] = {
+    # 60 US large caps spanning all 11 GICS sectors — a 24-name cross-section
+    # made daily rank IC too noisy to trust.
     "us": [
-        "AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "TSLA", "AVGO",
-        "JPM", "V", "UNH", "XOM", "LLY", "JNJ", "PG", "HD",
-        "COST", "MRK", "ABBV", "CRM", "AMD", "NFLX", "WMT", "BAC",
+        # tech / comms
+        "AAPL", "MSFT", "NVDA", "GOOG", "META", "AVGO", "CRM", "AMD", "NFLX", "ORCL", "ADBE", "CSCO",
+        # consumer
+        "AMZN", "TSLA", "HD", "COST", "WMT", "MCD", "NKE", "SBUX", "LOW", "TGT",
+        # financials
+        "JPM", "V", "MA", "BAC", "GS", "MS", "BLK", "AXP",
+        # health care
+        "UNH", "LLY", "JNJ", "MRK", "ABBV", "PFE", "TMO", "AMGN",
+        # industrials / materials / energy / utilities / real estate
+        "CAT", "HON", "UPS", "BA", "GE", "LIN", "XOM", "CVX", "COP", "NEE", "DUK", "AMT", "PLD",
+        # staples / misc
+        "PG", "KO", "PEP", "PM", "DIS", "INTC", "QCOM", "TXN", "IBM",
     ],
     "crypto": [
         "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "DOGE-USD",
         "ADA-USD", "AVAX-USD", "DOT-USD", "LTC-USD", "LINK-USD", "TRX-USD",
-        "SHIB-USD", "NEAR-USD", "UNI-USD", "ATOM-USD",
+        "SHIB-USD", "NEAR-USD", "UNI-USD", "ATOM-USD", "XLM-USD", "ETC-USD",
+        "FIL-USD", "APT-USD", "ARB-USD", "OP-USD", "INJ-USD", "HBAR-USD",
     ],
 }
 
@@ -83,7 +95,8 @@ def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
 
     # Disk layer: survives process restarts and serverless instance churn,
     # and cuts the 40-ticker × 3y Yahoo download to one fetch per TTL window.
-    disk = disk_cache.load(f"panel-{market}", _PANEL_TTL)
+    cache_key = f"panel-{market}-{len(UNIVERSES[market])}"  # universe size in the key: expansions refresh
+    disk = disk_cache.load(cache_key, _PANEL_TTL)
     if isinstance(disk, dict) and "close" in disk:
         _PANEL_CACHE[market] = (time.time(), disk)
         return disk
@@ -118,7 +131,7 @@ def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
     panel["vwap"] = (panel["high"] + panel["low"] + close) / 3
 
     _PANEL_CACHE[market] = (time.time(), panel)
-    disk_cache.store(f"panel-{market}", panel)
+    disk_cache.store(cache_key, panel)
     return panel
 
 

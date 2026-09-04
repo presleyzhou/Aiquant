@@ -20,6 +20,7 @@ import { deployPaper } from "../store";
 import { DeployButton } from "./DeployButton";
 import { EquityChart } from "./EquityChart";
 import { EvolveLab } from "./EvolveLab";
+import { ExplainButton } from "./ExplainButton";
 import { ShareButton } from "./ShareButton";
 
 /** One evaluated candidate (or a failed parse). */
@@ -343,7 +344,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
         </div>
 
         {engine === "gp" ? (
-          <EvolveLab />
+          <EvolveLab aiEnabled={aiEnabled} />
         ) : !aiEnabled ? (
           <div className="notice" style={{ maxWidth: 560 }}>
             {t("lab.aiOff")}
@@ -617,6 +618,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                                 </div>
                               )}
                               {tr === "pending" && <div className="fl-badge dim">⇄ …</div>}
+                              <ExplainButton expression={f.expression} market={f.market} enabled={aiEnabled} />
                             </div>
                             <div className="lab-saved__actions">
                               <button

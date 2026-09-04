@@ -49,6 +49,12 @@ BINOPS = ["+", "-", "*", "/"]
 CONSTS = [0.5, 1.0, 2.0]
 
 PARSIMONY = 0.0015          # fitness penalty per AST node (bloat control)
+# Multi-objective (weighted scalarization): reward stability (ICIR) and low
+# turnover (day-to-day rank autocorrelation) alongside raw |IC|, so the hall
+# of fame fills with factors a portfolio can actually hold — AlphaForge-style.
+OBJECTIVES = {"ic", "multi"}
+ICIR_TARGET = 0.5
+TURNOVER_WEIGHT = 0.02
 REDUNDANCY_FACTOR = 0.5     # fitness multiplier when too correlated with the HOF
 HOF_SIZE = 8
 TRANSFORM_OPS = set(TS_UNARY) | set(CROSS) | {"ts_corr"}
@@ -193,6 +199,16 @@ def canonical(node: Node) -> str | None:
 # ------------------------------------------------------------- evolution
 
 
+def score(m: dict, objective: str) -> float:
+    """Raw (pre-niching) fitness of one evaluated genome."""
+    base = abs(m["is_ic"])
+    if objective == "multi":
+        stability_bonus = 0.6 + 0.4 * min(1.0, abs(m["is_icir"]) / ICIR_TARGET)
+        turnover_pen = TURNOVER_WEIGHT * (1.0 - max(0.0, min(1.0, m.get("stability", 1.0))))
+        base = base * stability_bonus - turnover_pen
+    return base - PARSIMONY * m["complexity"]
+
+
 def evolve_blocking(
     market: str,
     horizon: int,
@@ -202,6 +218,7 @@ def evolve_blocking(
     seeds: list[str],
     rng_seed: int | None,
     emit,
+    objective: str = "multi",
 ) -> dict:
     """Run the GA synchronously, calling `emit(event)` after each generation.
     Returns the final report (also emitted as the `done` event by the caller)."""
@@ -210,6 +227,7 @@ def evolve_blocking(
     population_size = max(20, min(80, population_size))
     generations = max(3, min(40, generations))
     mode = mode if mode in MODES else "standard"
+    objective = objective if objective in OBJECTIVES else "multi"
     min_ic, _ = MODES[mode]
     rng = random.Random(rng_seed)
 
@@ -230,7 +248,7 @@ def evolve_blocking(
         if m is None or not (abs(m["is_ic"]) >= 0):  # None or NaN
             cache[expr] = None
             return -1.0, None
-        fit = abs(m["is_ic"]) - PARSIMONY * m["complexity"]
+        fit = score(m, objective)
         # niching: discount ideas the hall of fame already covers
         ranked = m["_values"]
         for other in hof_values:
@@ -383,6 +401,7 @@ def evolve_blocking(
                 "is_icir": m["is_icir"],
                 "oos_ic": m["oos_ic"],
                 "complexity": m["complexity"],
+                "stability": m.get("stability"),
                 "accepted": accepted,
                 "reasons": reasons,
                 "invert": m["is_ic"] < 0,
@@ -410,6 +429,7 @@ def evolve_blocking(
         "market": market,
         "horizon": horizon,
         "mode": mode,
+        "objective": objective,
         "min_ic": min_ic,
         "best_abs_ic": max([abs(m["is_ic"]) for m in cache.values() if m is not None] or [0.0]),
         "generations": len(history),
@@ -437,6 +457,7 @@ async def evolve_stream(
     mode: str,
     seeds: list[str],
     rng_seed: int | None = None,
+    objective: str = "multi",
 ) -> AsyncIterator[dict]:
     """Bridge the synchronous GA to an NDJSON stream via a worker thread + queue."""
     import asyncio
@@ -450,7 +471,8 @@ async def evolve_stream(
     def worker() -> None:
         try:
             report = evolve_blocking(
-                market, horizon, population_size, generations, mode, seeds, rng_seed, emit
+                market, horizon, population_size, generations, mode, seeds, rng_seed, emit,
+                objective,
             )
             emit(report)
         except Exception as exc:  # surface, don't hang the stream

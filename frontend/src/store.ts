@@ -315,3 +315,41 @@ export function deletePaper(id: string): PaperDeployment[] {
   localStorage.setItem(PAPER_KEY, JSON.stringify(next));
   return next;
 }
+
+/* ------------------------------------------------------ backup / migrate ---
+ * Everything the app keeps lives in this browser. Export/import moves it to
+ * another device — the no-account answer until server-side sync exists. */
+
+const EXPORT_PREFIX = "aiquant.";
+
+export function exportAllData(): string {
+  const data: Record<string, unknown> = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith(EXPORT_PREFIX)) {
+      try {
+        data[key] = JSON.parse(localStorage.getItem(key) ?? "null");
+      } catch {
+        data[key] = localStorage.getItem(key);
+      }
+    }
+  }
+  return JSON.stringify({ app: "aiquant", version: 1, exportedAt: new Date().toISOString(), data }, null, 2);
+}
+
+/** Returns the number of keys restored, or -1 on a malformed file. */
+export function importAllData(text: string): number {
+  try {
+    const parsed = JSON.parse(text) as { app?: string; data?: Record<string, unknown> };
+    if (parsed.app !== "aiquant" || !parsed.data) return -1;
+    let n = 0;
+    for (const [key, value] of Object.entries(parsed.data)) {
+      if (!key.startsWith(EXPORT_PREFIX)) continue;
+      localStorage.setItem(key, typeof value === "string" ? value : JSON.stringify(value));
+      n++;
+    }
+    return n;
+  } catch {
+    return -1;
+  }
+}
