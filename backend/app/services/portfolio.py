@@ -700,3 +700,34 @@ def brinson(held: pd.DataFrame, bench_w: pd.DataFrame, returns: pd.DataFrame, gr
         "interaction_pct": round(float(inter) * 100, 2),
         "groups": per_group,
     }
+
+
+def sharpe_difference_test(a: pd.Series, b: pd.Series, draws: int = 1000, seed: int = 0) -> dict:
+    """Is strategy a's Sharpe really higher than b's? Ledoit & Wolf (2008,
+    J. Empirical Finance) — the paired difference of Sharpe ratios under a
+    circular block bootstrap (block length ≈ T^(1/3)), which respects the
+    autocorrelation and fat tails of daily returns. Returns the observed
+    per-period ΔSR and a two-sided p-value for ΔSR = 0."""
+    both = pd.concat([a, b], axis=1).dropna()
+    t = len(both)
+    if t < 60:
+        return {"delta_sharpe": None, "p_value": None}
+    x = both.to_numpy(dtype=float)
+
+    def sr(m: np.ndarray) -> np.ndarray:
+        mu = m.mean(axis=-2)
+        sd = m.std(axis=-2, ddof=1)
+        return np.where(sd > _EPS, mu / np.where(sd > _EPS, sd, 1.0), 0.0)
+
+    observed = sr(x)
+    delta_obs = float(observed[0] - observed[1])
+    block = max(2, int(round(t ** (1 / 3))))
+    rng = np.random.default_rng(seed)
+    n_blocks = int(np.ceil(t / block))
+    starts = rng.integers(0, t, size=(draws, n_blocks))
+    idx = (starts[:, :, None] + np.arange(block)[None, None, :]).reshape(draws, -1)[:, :t] % t
+    boot = x[idx]                      # (draws, t, 2)
+    deltas = sr(boot)[:, 0] - sr(boot)[:, 1]
+    centred = deltas - deltas.mean()
+    p = float((np.abs(centred) >= abs(delta_obs)).mean())
+    return {"delta_sharpe": round(delta_obs, 4), "p_value": round(p, 3)}

@@ -452,3 +452,29 @@ def test_memo_returns_structured_verdict_from_forced_tool_call(monkeypatch):
     assert body["verdict"] == "paper_first" and len(body["concerns"]) == 2
     assert captured["tool_choice"] == {"type": "tool", "name": "submit_memo"}
     assert "1.9" in captured["messages"][0]["content"]  # the model saw our numbers, not a paraphrase
+
+
+# ------------------------------------------- V3.1: Sharpe difference test
+
+
+def test_sharpe_difference_test_detects_a_real_gap_and_not_noise():
+    rng = np.random.default_rng(7)
+    idx = pd.date_range("2023-01-01", periods=750, freq="D")
+    base = pd.Series(rng.normal(0.0003, 0.01, 750), index=idx)
+    better = base + 0.0015  # same noise, clearly higher mean
+    twin = base + rng.normal(0, 0.0005, 750)
+    strong = portfolio.sharpe_difference_test(better, base)
+    same = portfolio.sharpe_difference_test(twin, base)
+    assert strong["delta_sharpe"] > 0 and strong["p_value"] < 0.05
+    assert same["p_value"] > 0.05
+    assert portfolio.sharpe_difference_test(base.iloc[:30], base.iloc[:30])["p_value"] is None
+
+
+def test_alternatives_carry_the_equal_weight_test():
+    panel = _panel(600, 30, seed=5)
+    res = pipeline.run_pipeline_blocking({**SPEC, "compare": True}, panel=panel)
+    by = {a["scheme"]: a for a in res["alternatives"]}
+    assert by["equal"]["delta_sharpe_vs_equal_ann"] == 0.0 and by["equal"]["p_value_vs_equal"] is None
+    for scheme, row in by.items():
+        if scheme != "equal":
+            assert row["p_value_vs_equal"] is not None and 0 <= row["p_value_vs_equal"] <= 1

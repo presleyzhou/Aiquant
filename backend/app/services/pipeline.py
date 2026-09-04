@@ -675,16 +675,30 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
 
     alternatives: list[dict] = []
     if spec["compare"]:
+        sims: dict[str, dict] = {}
         for scheme in portfolio.SCHEMES:
             if scheme == spec["scheme"]:
-                alternatives.append(_summary(sim))
+                sims[scheme] = sim
                 continue
             try:
                 alt = simulate(scores, panel, spec, scheme=scheme, ic=ic)
-                alternatives.append(_summary(alt))
+                sims[scheme] = alt
                 trials.append(_daily_sharpe(alt))
             except factor_dsl.FactorError:
                 continue
+        # every scheme is tested against 1/N (DeMiguel et al.): the Sharpe gap
+        # and a Ledoit-Wolf bootstrap p-value — "better" has to survive noise
+        equal = sims.get("equal")
+        for scheme, s_ in sims.items():
+            row = _summary(s_)
+            if equal is not None and scheme != "equal":
+                test = portfolio.sharpe_difference_test(s_["net"], equal["net"])
+                row["delta_sharpe_vs_equal_ann"] = _r(test["delta_sharpe"] * np.sqrt(sim["ann"]) if test["delta_sharpe"] is not None else None, 2)
+                row["p_value_vs_equal"] = test["p_value"]
+            else:
+                row["delta_sharpe_vs_equal_ann"] = 0.0 if scheme == "equal" else None
+                row["p_value_vs_equal"] = None
+            alternatives.append(row)
     trials.append(_daily_sharpe(sim))
 
     return report(spec, panel, signal, sim, alternatives, universe, [t for t in trials if t is not None])
