@@ -139,7 +139,10 @@ async function mockApi(page: Page) {
           { id: "inverse_vol", zh: "波动率倒数", en: "Inverse volatility", desc_zh: "波动越低权重越高", desc_en: "Lower vol, more weight" },
           { id: "min_variance", zh: "最小方差", en: "Minimum variance", desc_zh: "最低组合波动", desc_en: "Lowest variance" },
           { id: "risk_parity", zh: "风险平价", en: "Risk parity", desc_zh: "风险贡献相同", desc_en: "Equal risk contribution" },
+          { id: "hrp", zh: "层次风险平价 HRP", en: "Hierarchical Risk Parity", desc_zh: "相关性聚类分配风险", desc_en: "Cluster-based risk split" },
+          { id: "mean_variance", zh: "均值-方差（Grinold α）", en: "Mean-variance (Grinold alpha)", desc_zh: "α 对协方差最优化", desc_en: "Alpha vs covariance" },
         ],
+        signal_weightings: ["ic_expanding", "ic", "equal"],
         starter_factors: {
           us: [
             { expression: "neg(delta(close, 5) / ts_std(returns, 20))", zh: "短期反转", en: "Short-term reversal", invert: false, horizon: 10 },
@@ -149,10 +152,10 @@ async function mockApi(page: Page) {
             { expression: "rank(ts_mean(returns, 30))", zh: "月度动量", en: "Monthly momentum", invert: false, horizon: 10 },
           ],
         },
-        defaults: { scheme: "inverse_vol", signal_weighting: "ic", top_n: 8, rebalance: 10, max_weight: 0.25, cost_bps: 7,
-          target_vol_pct: null, vol_lookback: 60, horizon: 10 },
+        defaults: { scheme: "inverse_vol", signal_weighting: "ic_expanding", top_n: 8, rebalance: 10, max_weight: 0.25, cost_bps: 7,
+          target_vol_pct: null, vol_lookback: 60, horizon: 10, hold_buffer: 4, trade_rate: 1.0 },
         limits: { factors: [1, 8], top_n: [2, 20], rebalance: [1, 30], max_weight: [0.05, 1.0], cost_bps: [0, 50],
-          target_vol_pct: [5, 40], vol_lookback: [20, 120] },
+          target_vol_pct: [5, 40], vol_lookback: [20, 120], hold_buffer: [0, 20], trade_rate: [0.1, 1.0] },
       });
     if (path === "/api/pipeline/run") {
       const body = route.request().postDataJSON() as { factors?: unknown[]; scheme?: string } | null;
@@ -163,24 +166,34 @@ async function mockApi(page: Page) {
       const split = (from: string, to: string, ret: number, sharpe: number) =>
         ({ from, to, total_return_pct: ret, sharpe, max_drawdown_pct: -9.5, excess_pct: ret - 20 });
       return json({
-        spec: { market: "us", factors, signal_weighting: "ic", scheme, top_n: 8, rebalance: 10, max_weight: 0.25,
-          cost_bps: 7, target_vol_pct: null, vol_lookback: 60, compare: true },
+        spec: { market: "us", factors, signal_weighting: "ic_expanding", scheme, top_n: 8, rebalance: 10, max_weight: 0.25,
+          cost_bps: 7, target_vol_pct: null, vol_lookback: 60, hold_buffer: 4, trade_rate: 1.0, compare: true },
         universe: { market: "us", symbols: 4, from: "2023-09-05", to: "2026-09-03", bars: 752 },
         signal: {
-          weighting: "ic",
+          weighting: "ic_expanding",
           components: (factors as Array<{ expression: string; invert: boolean; horizon: number }>).map((f, i) => ({
-            ...f, is_ic: 0.021 - i * 0.004, oos_ic: 0.012, weight: 1 / factors.length, standalone_sharpe: 0.81 })),
+            ...f, is_ic: 0.021 - i * 0.004, oos_ic: 0.012, weight: 1 / factors.length, avg_weight: 0.9 / factors.length,
+            standalone_sharpe: 0.81 })),
           max_pair_corr: 0.31,
+          // V2: alpha-decay curve (one null = too few samples) + composite ICs
+          ic_by_horizon: [
+            { horizon: 1, ic: 0.005 }, { horizon: 2, ic: 0.01 }, { horizon: 3, ic: -0.002 }, { horizon: 5, ic: 0.012 },
+            { horizon: 10, ic: 0.018 }, { horizon: 15, ic: 0.021 }, { horizon: 20, ic: null },
+          ],
+          composite_is_ic: 0.011,
+          composite_oos_ic: 0.008,
         },
         portfolio: { scheme, top_n: 8, max_weight: 0.25, rebalance: 10, cost_bps: 7, target_vol_pct: null, vol_lookback: 60,
-          avg_effective_n: 6.4, avg_exposure_pct: 100.0, avg_turnover_pct: 3.1, rebalances: 60 },
+          avg_effective_n: 6.4, avg_exposure_pct: 100.0, avg_turnover_pct: 3.1, rebalances: 60,
+          annual_turnover_x: 12.9, breakeven_cost_bps: 52.1, hold_buffer: 4, trade_rate: 1.0 },
         backtest: {
           span: { from: "2023-12-01", to: "2026-09-03" },
           stats: { total_return_pct: 41.2, cagr_pct: 13.4, ann_vol_pct: 15.2, sharpe: 0.88, sortino: 1.21, calmar: 0.9,
             max_drawdown_pct: -14.9, win_rate_pct: 53.1, excess_pct: 6.3, beta: 0.82, tracking_error_pct: 6.1, information_ratio: 0.7,
             benchmark: { total_return_pct: 34.9, cagr_pct: 11.5, ann_vol_pct: 16.0, sharpe: 0.74, max_drawdown_pct: -18.2 } },
           in_sample: split("2023-12-01", "2025-09-01", 30.1, 1.02),
-          holdout: split("2025-09-02", "2026-09-03", 8.5, 0.61),
+          holdout: { ...split("2025-09-02", "2026-09-03", 8.5, 0.61), psr: 0.906 },
+          overfitting: { psr: 0.982, dsr: 0.859, trials: 9, expected_max_sharpe_ann: 0.7 },
           equity_curve: curve(),
           benchmark_curve: curve(120, 34),
           drawdown_curve: curve(120, 0).map((p) => ({ ...p, value: -2 })),
@@ -198,11 +211,16 @@ async function mockApi(page: Page) {
           detractors: [{ symbol: "INTC", contribution_pct: -2.1, avg_weight_pct: 6.0, days_held: 120 }],
           concentration: { avg_effective_n: 6.4, cap_binding_pct: 30.0 },
           correlation_to_benchmark: 0.85,
+          capture: { up: 0.94, down: 0.71, up_periods: 14, down_periods: 4 },
+          cvar_95_pct: -1.47,
+          bench_cvar_95_pct: -0.7,
+          rolling_beta: curve(120, 0).map((p, i) => ({ ...p, value: 0.85 + 0.2 * Math.sin(i / 9) })),
         },
         alternatives: [
-          { scheme: "equal", total_return_pct: 38.0, sharpe: 0.81, max_drawdown_pct: -16.0, ann_vol_pct: 16.1, avg_turnover_pct: 2.9 },
-          { scheme, total_return_pct: 41.2, sharpe: 0.88, max_drawdown_pct: -14.9, ann_vol_pct: 15.2, avg_turnover_pct: 3.1 },
-          { scheme: "risk_parity", total_return_pct: 36.5, sharpe: 0.79, max_drawdown_pct: -13.8, ann_vol_pct: 14.4, avg_turnover_pct: 3.6 },
+          { scheme: "equal", total_return_pct: 38.0, sharpe: 0.81, psr: 0.951, max_drawdown_pct: -16.0, ann_vol_pct: 16.1, avg_turnover_pct: 2.9 },
+          { scheme, total_return_pct: 41.2, sharpe: 0.88, psr: 0.979, max_drawdown_pct: -14.9, ann_vol_pct: 15.2, avg_turnover_pct: 3.1 },
+          { scheme: "risk_parity", total_return_pct: 36.5, sharpe: 0.79, psr: 0.902, max_drawdown_pct: -13.8, ann_vol_pct: 14.4, avg_turnover_pct: 3.6 },
+          { scheme: "hrp", total_return_pct: 37.2, sharpe: 0.84, psr: null, max_drawdown_pct: -13.1, ann_vol_pct: 14.0, avg_turnover_pct: 3.4 },
         ].filter((a, i, arr) => arr.findIndex((b) => b.scheme === a.scheme) === i),
         target_weights: {
           as_of: "2026-09-03", exposure_pct: 100.0,
@@ -431,12 +449,25 @@ test("pipeline: tick a starter factor, run the six stages, deploy to paper", asy
   // before any factor is ticked the run button is disabled — honesty by construction
   const run = page.getByTestId("pl-run");
   await expect(run).toBeDisabled();
+  // ③ all seven scheme cards come from config, including the V2 HRP card
+  const schemeCards = page.getByRole("radiogroup", { name: "权重方案" }).getByRole("radio");
+  await expect(schemeCards).toHaveCount(7);
+  await expect(page.getByRole("radio", { name: /层次风险平价 HRP/ })).toBeVisible();
   await page.getByRole("checkbox", { name: "短期反转" }).check();
   await expect(run).toBeEnabled();
   await run.click();
   // ④ headline stats: Sharpe alongside its benchmark
   await expect(page.getByTestId("pl-sharpe")).toContainText("0.88");
   await expect(page.getByTestId("pl-sharpe")).toContainText("0.74");
+  // ④ V2 overfitting check: PSR printed and coloured green (≥ 0.95)
+  const psr = page.getByTestId("pl-psr");
+  await expect(psr).toBeVisible();
+  await expect(psr).toContainText("0.98");
+  await expect(psr.locator(".pl-tone--ok")).toBeVisible();
+  // ② alpha-decay bars and ⑤ capture / rolling beta rendered from the V2 fields
+  await expect(page.getByTestId("pl-ic-decay")).toBeVisible();
+  await expect(page.getByTestId("pl-capture")).toContainText("0.94");
+  await expect(page.getByTestId("pl-rolling-beta")).toBeVisible();
   // warnings are translated, not shown as raw codes
   await expect(page.getByText("调仓次数过少", { exact: false })).toBeVisible();
   // ⑥ target weights + deploy

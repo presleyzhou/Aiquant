@@ -397,16 +397,24 @@ export type PipelineLimitKey =
   | "max_weight"
   | "cost_bps"
   | "target_vol_pct"
-  | "vol_lookback";
+  | "vol_lookback"
+  | "hold_buffer"
+  | "trade_rate";
+
+/** V2: `ic_expanding` re-estimates factor weights on an expanding window so
+ * every daily weight is out-of-sample; `ic` fixes them on the first 80%. */
+export type PipelineSignalWeighting = "ic_expanding" | "ic" | "equal";
 
 export interface PipelineConfig {
   markets: string[];
   universes: Record<string, string[]>;
   schemes: PipelineScheme[];
+  /** V2; absent on a V1 server, in which case the UI falls back to the three ids. */
+  signal_weightings?: PipelineSignalWeighting[];
   starter_factors: Record<string, PipelineStarterFactor[]>;
   defaults: {
     scheme: string;
-    signal_weighting: "ic" | "equal";
+    signal_weighting: PipelineSignalWeighting;
     top_n: number;
     rebalance: number;
     max_weight: number;
@@ -414,6 +422,8 @@ export interface PipelineConfig {
     target_vol_pct: number | null;
     vol_lookback: number;
     horizon: number;
+    hold_buffer?: number;
+    trade_rate?: number;
   };
   limits: Record<PipelineLimitKey, [number, number]>;
 }
@@ -421,7 +431,7 @@ export interface PipelineConfig {
 export interface PipelineRunRequest {
   market: string;
   factors: PipelineFactorSpec[];
-  signal_weighting?: "ic" | "equal";
+  signal_weighting?: PipelineSignalWeighting;
   scheme?: string;
   top_n?: number;
   rebalance?: number;
@@ -429,6 +439,10 @@ export interface PipelineRunRequest {
   cost_bps?: number;
   target_vol_pct?: number | null;
   vol_lookback?: number;
+  /** A held name stays while ranked within top_n + buffer; 0 = plain Top-N. */
+  hold_buffer?: number;
+  /** Fraction of the distance to target traded per rebalance (0.1–1.0); 1 = full. */
+  trade_rate?: number;
   compare?: boolean;
 }
 
@@ -439,12 +453,15 @@ export interface PipelineSplitStats {
   sharpe: number;
   max_drawdown_pct: number;
   excess_pct: number;
+  /** Probabilistic Sharpe of this split alone (holdout only in practice). */
+  psr?: number | null;
 }
 
 export interface PipelineAlternative {
   scheme: string;
   total_return_pct: number;
   sharpe: number;
+  psr?: number | null;
   max_drawdown_pct: number;
   ann_vol_pct: number;
   avg_turnover_pct: number;
@@ -463,9 +480,21 @@ export interface PipelineResult {
   signal: {
     weighting: string;
     components: Array<
-      PipelineFactorSpec & { is_ic: number; oos_ic: number; weight: number; standalone_sharpe: number }
+      PipelineFactorSpec & {
+        is_ic: number;
+        oos_ic: number;
+        /** Latest weight (what the target book uses). */
+        weight: number;
+        /** Mean weight over the backtest — differs from `weight` under `ic_expanding`. */
+        avg_weight?: number;
+        standalone_sharpe: number;
+      }
     >;
     max_pair_corr: number;
+    /** Information-horizon (alpha decay) curve of the composite signal. */
+    ic_by_horizon?: Array<{ horizon: number; ic: number | null }>;
+    composite_is_ic?: number;
+    composite_oos_ic?: number | null;
   };
   portfolio: {
     scheme: string;
@@ -479,6 +508,11 @@ export interface PipelineResult {
     avg_exposure_pct: number;
     avg_turnover_pct: number;
     rebalances: number;
+    annual_turnover_x?: number;
+    /** One-way cost per unit turnover at which excess over the benchmark is zero. */
+    breakeven_cost_bps?: number | null;
+    hold_buffer?: number;
+    trade_rate?: number;
   };
   backtest: {
     span: { from: string; to: string };
@@ -505,6 +539,14 @@ export interface PipelineResult {
     };
     in_sample: PipelineSplitStats;
     holdout: PipelineSplitStats;
+    /** Bailey & López de Prado: PSR = P(true Sharpe > 0); DSR deflates against
+     * the best of `trials` unskilled configurations tried in this run. */
+    overfitting?: {
+      psr: number | null;
+      dsr: number | null;
+      trials: number;
+      expected_max_sharpe_ann: number | null;
+    };
     equity_curve: Point[];
     benchmark_curve: Point[];
     drawdown_curve: Point[];
@@ -518,6 +560,13 @@ export interface PipelineResult {
     detractors: PipelineContributor[];
     concentration: { avg_effective_n: number; cap_binding_pct: number };
     correlation_to_benchmark: number;
+    /** Compounded return in benchmark-up (down) months ÷ the benchmark's. */
+    capture?: { up: number | null; down: number | null; up_periods: number; down_periods: number };
+    /** Expected shortfall: mean of the worst 5% daily returns. */
+    cvar_95_pct?: number | null;
+    bench_cvar_95_pct?: number | null;
+    /** 60-day rolling beta to the equal-weight benchmark. */
+    rolling_beta?: Point[];
   };
   alternatives: PipelineAlternative[];
   target_weights: {

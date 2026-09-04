@@ -7,6 +7,7 @@ import {
   type PipelineFactorSpec,
   type PipelineResult,
   type PipelineRunRequest,
+  type PipelineSignalWeighting,
   type Point,
 } from "../api";
 import { useT, type MsgKey } from "../i18n";
@@ -28,7 +29,7 @@ interface FormState {
   selected: string[];
   inverts: Record<string, boolean>;
   custom: Record<string, string[]>;
-  signalWeighting: "ic" | "equal";
+  signalWeighting: PipelineSignalWeighting;
   scheme: string;
   topN: number;
   rebalance: number;
@@ -36,8 +37,14 @@ interface FormState {
   costBps: number;
   targetVolPct: number | null;
   volLookback: number;
+  holdBuffer: number;
+  tradeRate: number;
   compare: boolean;
 }
+
+/** V2 select options; used when the server predates `config.signal_weightings`. */
+const SIGNAL_WEIGHTINGS: PipelineSignalWeighting[] = ["ic_expanding", "ic", "equal"];
+const IC_HORIZONS = [1, 2, 3, 5, 10, 15, 20];
 
 /** Pre-config placeholder: the page must be usable before (or without) the
  * config request, so the contract's scheme ids and defaults live here too.
@@ -51,11 +58,14 @@ const FALLBACK_CONFIG: PipelineConfig = {
     { id: "inverse_vol", zh: "波动率倒数", en: "Inverse volatility", desc_zh: "波动越低权重越高，拉平各标的风险贡献", desc_en: "Lower-volatility names get more weight, levelling risk contributions" },
     { id: "min_variance", zh: "最小方差", en: "Minimum variance", desc_zh: "用协方差矩阵求组合波动最低的权重", desc_en: "Solves the covariance matrix for the lowest portfolio variance" },
     { id: "risk_parity", zh: "风险平价", en: "Risk parity", desc_zh: "每个标的贡献相同份额的组合风险", desc_en: "Every name contributes the same share of portfolio risk" },
+    { id: "hrp", zh: "层次风险平价 HRP", en: "Hierarchical Risk Parity", desc_zh: "按相关性聚类后自上而下分配风险，无需求逆协方差矩阵", desc_en: "Clusters names by correlation and splits risk top-down — no covariance inversion" },
+    { id: "mean_variance", zh: "均值-方差（Grinold α）", en: "Mean-variance (Grinold alpha)", desc_zh: "把信号换算成 α，与协方差一起求最优权重；最激进，也最依赖信号质量", desc_en: "Turns the signal into alpha and optimises it against covariance — the most aggressive, and the most signal-dependent" },
   ],
+  signal_weightings: SIGNAL_WEIGHTINGS,
   starter_factors: { us: [], crypto: [] },
   defaults: {
     scheme: "inverse_vol",
-    signal_weighting: "ic",
+    signal_weighting: "ic_expanding",
     top_n: 8,
     rebalance: 10,
     max_weight: 0.25,
@@ -63,6 +73,8 @@ const FALLBACK_CONFIG: PipelineConfig = {
     target_vol_pct: null,
     vol_lookback: 60,
     horizon: 10,
+    hold_buffer: 4,
+    trade_rate: 1,
   },
   limits: {
     factors: [1, 8],
@@ -72,6 +84,8 @@ const FALLBACK_CONFIG: PipelineConfig = {
     cost_bps: [0, 50],
     target_vol_pct: [5, 40],
     vol_lookback: [20, 120],
+    hold_buffer: [0, 20],
+    trade_rate: [0.1, 1],
   },
 };
 
@@ -81,6 +95,7 @@ const WARNING_KEYS: Record<string, MsgKey> = {
   few_rebalances: "pl.warn.few_rebalances",
   concentrated: "pl.warn.concentrated",
   low_coverage: "pl.warn.low_coverage",
+  low_psr: "pl.warn.low_psr",
 };
 
 function formFromDefaults(d: PipelineConfig["defaults"], base?: Partial<FormState>): FormState {
@@ -99,6 +114,8 @@ function formFromDefaults(d: PipelineConfig["defaults"], base?: Partial<FormStat
     costBps: d.cost_bps,
     targetVolPct: d.target_vol_pct,
     volLookback: d.vol_lookback,
+    holdBuffer: d.hold_buffer ?? FALLBACK_CONFIG.defaults.hold_buffer ?? 4,
+    tradeRate: d.trade_rate ?? FALLBACK_CONFIG.defaults.trade_rate ?? 1,
   };
 }
 
@@ -171,6 +188,9 @@ export function PipelinePage({ hidden }: Props) {
         setForm((f) => {
           const next = storedRef.current ? { ...f } : formFromDefaults(cfg.defaults, f);
           if (!cfg.schemes.some((s) => s.id === next.scheme)) next.scheme = cfg.defaults.scheme;
+          if (!(cfg.signal_weightings ?? SIGNAL_WEIGHTINGS).includes(next.signalWeighting)) {
+            next.signalWeighting = cfg.defaults.signal_weighting;
+          }
           if (!cfg.markets.includes(next.market)) next.market = cfg.markets[0] ?? "us";
           return next;
         });
@@ -198,14 +218,17 @@ export function PipelinePage({ hidden }: Props) {
 
   const patch = useCallback((p: Partial<FormState>) => setForm((f) => ({ ...f, ...p })), []);
 
-  const limits = config.limits;
+  const limits = { ...FALLBACK_CONFIG.limits, ...config.limits };
   const maxFactors = limits.factors[1];
   const universe = config.universes[form.market] ?? [];
   const schemes = config.schemes;
+  const weightings = config.signal_weightings ?? SIGNAL_WEIGHTINGS;
   const schemeName = (id: string) => {
     const s = schemes.find((x) => x.id === id);
     return s ? (lang === "zh" ? s.zh : s.en) : id;
   };
+  const weightingLabel = (id: string) =>
+    (SIGNAL_WEIGHTINGS as string[]).includes(id) ? t(`pl.sig.w.${id}` as MsgKey) : id;
 
   const options = useMemo<FactorOption[]>(() => {
     const seen = new Set<string>();
@@ -302,6 +325,8 @@ export function PipelinePage({ hidden }: Props) {
     cost_bps: clamp(form.costBps, limits.cost_bps),
     target_vol_pct: form.targetVolPct === null ? null : clamp(form.targetVolPct, limits.target_vol_pct),
     vol_lookback: clamp(Math.round(form.volLookback), limits.vol_lookback),
+    hold_buffer: clamp(Math.round(form.holdBuffer), limits.hold_buffer),
+    trade_rate: clamp(Math.round(form.tradeRate * 10) / 10, limits.trade_rate),
     compare: form.compare,
   });
 
@@ -388,7 +413,12 @@ export function PipelinePage({ hidden }: Props) {
 
   const sortedAlts = useMemo(() => {
     if (!result) return [];
-    return [...result.alternatives].sort((a, b) => (a[altSort.key] - b[altSort.key]) * altSort.dir);
+    const v = (a: PipelineAlternative) => a[altSort.key] ?? Number.NEGATIVE_INFINITY;
+    return [...result.alternatives].sort((a, b) => {
+      const x = v(a);
+      const y = v(b);
+      return x === y ? 0 : (x - y) * altSort.dir;
+    });
   }, [result, altSort]);
 
   const toggleAltSort = (key: AltKey) =>
@@ -558,26 +588,43 @@ export function PipelinePage({ hidden }: Props) {
                 <select
                   className="select"
                   value={form.signalWeighting}
-                  onChange={(e) => patch({ signalWeighting: e.target.value as "ic" | "equal" })}
+                  onChange={(e) => patch({ signalWeighting: e.target.value as PipelineSignalWeighting })}
                 >
-                  <option value="ic">{t("fl.cp.ic")}</option>
-                  <option value="equal">{t("fl.cp.equal")}</option>
+                  {weightings.map((w) => (
+                    <option key={w} value={w}>
+                      {weightingLabel(w)}
+                    </option>
+                  ))}
                 </select>
               </label>
               {result && (
                 <div className="pl-result-block">
                   <div className="dim pl-hint">
                     {t("pl.sig.head", {
-                      w: result.signal.weighting === "ic" ? t("fl.cp.ic") : t("fl.cp.equal"),
+                      w: weightingLabel(result.signal.weighting),
                       c: result.signal.max_pair_corr.toFixed(2),
                     })}
                   </div>
+                  {result.signal.ic_by_horizon && result.signal.ic_by_horizon.length > 0 && (
+                    <>
+                      <div className="pl-subhead">
+                        {t("pl.sig.decay")}
+                        <span className="chip" data-testid="pl-comp-is">
+                          {t("pl.sig.compIs", { v: signed3Opt(result.signal.composite_is_ic) })}
+                        </span>
+                        <span className="chip">{t("pl.sig.compOos", { v: signed3Opt(result.signal.composite_oos_ic) })}</span>
+                      </div>
+                      <IcDecayBars rows={result.signal.ic_by_horizon} />
+                      <p className="dim pl-hint">{t("pl.sig.decayNote")}</p>
+                    </>
+                  )}
                   <div className="table-scroll">
                     <table className="lab-stats">
                       <thead>
                         <tr>
                           <th>{t("fl.z.expr")}</th>
                           <th className="pl-num">{t("pl.sig.weight")}</th>
+                          <th className="pl-num">{t("pl.sig.avgWeight")}</th>
                           <th className="pl-num">{t("fl.m.isic")}</th>
                           <th className="pl-num">{t("fl.m.oosic")}</th>
                           <th className="pl-num">{t("pl.sig.standalone")}</th>
@@ -591,6 +638,7 @@ export function PipelinePage({ hidden }: Props) {
                               {c.invert && <span className="dim"> · {t("fl.bt.inverted")}</span>}
                             </td>
                             <td className="pl-num">{(c.weight * 100).toFixed(0)}%</td>
+                            <td className="pl-num dim">{c.avg_weight === undefined ? "—" : `${(c.avg_weight * 100).toFixed(0)}%`}</td>
                             <td className={`pl-num ${tone(c.is_ic)}`}>{signed3(c.is_ic)}</td>
                             <td className={`pl-num ${tone(c.oos_ic)}`}>{signed3(c.oos_ic)}</td>
                             <td className="pl-num">{c.standalone_sharpe.toFixed(2)}</td>
@@ -682,6 +730,21 @@ export function PipelinePage({ hidden }: Props) {
                 range={limits.vol_lookback}
                 onChange={(v) => patch({ volLookback: v })}
               />
+              <NumField
+                label={t("pl.pf.holdBuffer")}
+                value={form.holdBuffer}
+                range={limits.hold_buffer}
+                hint={t("pl.pf.holdBufferHint")}
+                onChange={(v) => patch({ holdBuffer: v })}
+              />
+              <NumField
+                label={t("pl.pf.tradeRate")}
+                value={form.tradeRate}
+                range={limits.trade_rate}
+                step={0.1}
+                hint={t("pl.pf.tradeRateHint")}
+                onChange={(v) => patch({ tradeRate: v })}
+              />
               <label className="field">
                 <span className="field__label">{t("pl.pf.compare")}</span>
                 <div className="pl-inline">
@@ -703,6 +766,18 @@ export function PipelinePage({ hidden }: Props) {
                 <span className="chip">{t("pl.pf.effN", { n: result.portfolio.avg_effective_n.toFixed(1) })}</span>
                 <span className="chip">{t("pl.pf.exposure", { v: result.portfolio.avg_exposure_pct.toFixed(0) })}</span>
                 <span className="chip">{t("pl.pf.turnover", { v: result.portfolio.avg_turnover_pct.toFixed(1) })}</span>
+                {result.portfolio.annual_turnover_x !== undefined && (
+                  <span className="chip" title={t("pl.pf.annualTurnoverTitle")}>
+                    {t("pl.pf.annualTurnover", { v: result.portfolio.annual_turnover_x.toFixed(1) })}
+                  </span>
+                )}
+                {result.portfolio.breakeven_cost_bps !== undefined && (
+                  <span className="chip" title={t("pl.pf.breakevenTitle")}>
+                    {t("pl.pf.breakeven", {
+                      v: result.portfolio.breakeven_cost_bps === null ? "—" : result.portfolio.breakeven_cost_bps.toFixed(1),
+                    })}
+                  </span>
+                )}
                 <span className="chip">{t("pl.pf.rebalances", { n: String(result.portfolio.rebalances) })}</span>
               </div>
             )}
@@ -794,6 +869,37 @@ export function PipelinePage({ hidden }: Props) {
                   <Stat label={t("bt.winrate")} value={`${bt.stats.win_rate_pct.toFixed(1)}%`} />
                 </div>
 
+                {bt.overfitting && (
+                  <div className="pl-ofit" data-testid="pl-ofit">
+                    <div className="pl-subhead">{t("pl.bt.ofit")}</div>
+                    <div className="stat-grid pl-stats">
+                      <Stat
+                        label={t("pl.bt.ofit.psr")}
+                        value={prob(bt.overfitting.psr)}
+                        toneClass={probTone(bt.overfitting.psr)}
+                        testId="pl-psr"
+                      />
+                      <Stat
+                        label={t("pl.bt.ofit.dsr")}
+                        value={prob(bt.overfitting.dsr)}
+                        toneClass={probTone(bt.overfitting.dsr)}
+                      />
+                      <Stat label={t("pl.bt.ofit.trials")} value={String(bt.overfitting.trials)} />
+                      <Stat
+                        label={t("pl.bt.ofit.expMax")}
+                        value={bt.overfitting.expected_max_sharpe_ann === null ? "—" : bt.overfitting.expected_max_sharpe_ann.toFixed(2)}
+                        sub={t("pl.bt.ofit.expMaxTitle")}
+                      />
+                      <Stat
+                        label={t("pl.bt.ofit.holdoutPsr")}
+                        value={prob(bt.holdout.psr)}
+                        toneClass={probTone(bt.holdout.psr)}
+                      />
+                    </div>
+                    <p className="dim pl-hint">{t("pl.bt.ofit.note")}</p>
+                  </div>
+                )}
+
                 <EquityChart equity={bt.equity_curve} benchmark={bt.benchmark_curve} drawdown={bt.drawdown_curve} />
 
                 <div className="pl-two">
@@ -873,6 +979,7 @@ export function PipelinePage({ hidden }: Props) {
                               [
                                 ["total_return_pct", t("bt.totalReturn")],
                                 ["sharpe", t("bt.sharpe")],
+                                ["psr", t("pl.bt.psr")],
                                 ["max_drawdown_pct", t("bt.maxdd")],
                                 ["ann_vol_pct", t("pl.bt.vol")],
                                 ["avg_turnover_pct", t("pl.bt.turnover")],
@@ -902,6 +1009,7 @@ export function PipelinePage({ hidden }: Props) {
                                 </td>
                                 <td className={`pl-num ${tone(a.total_return_pct)}`}>{pct(a.total_return_pct)}</td>
                                 <td className="pl-num">{a.sharpe.toFixed(2)}</td>
+                                <td className={`pl-num ${probTone(a.psr)}`}>{prob(a.psr)}</td>
                                 <td className="pl-num dn">{pct(a.max_drawdown_pct)}</td>
                                 <td className="pl-num">{a.ann_vol_pct.toFixed(1)}%</td>
                                 <td className="pl-num">{a.avg_turnover_pct.toFixed(1)}%</td>
@@ -949,13 +1057,52 @@ export function PipelinePage({ hidden }: Props) {
                     <span className="chip">{t("pl.risk.corr")} {result.risk.correlation_to_benchmark.toFixed(2)}</span>
                   </div>
 
+                  {(result.risk.capture || result.risk.cvar_95_pct !== undefined) && (
+                    <div className="chip-row pl-chip-row" data-testid="pl-capture">
+                      {result.risk.capture && (
+                        <>
+                          <span className={`chip ${captureTone(result.risk.capture.up, true)}`} title={t("pl.risk.captureTitle")}>
+                            ↗ {t("pl.risk.captureUp", { v: ratio(result.risk.capture.up), n: String(result.risk.capture.up_periods) })}
+                          </span>
+                          <span className={`chip ${captureTone(result.risk.capture.down, false)}`} title={t("pl.risk.captureTitle")}>
+                            ↘ {t("pl.risk.captureDown", { v: ratio(result.risk.capture.down), n: String(result.risk.capture.down_periods) })}
+                          </span>
+                        </>
+                      )}
+                      {result.risk.cvar_95_pct !== undefined && (
+                        <span className="chip" title={t("pl.risk.cvarTitle")}>
+                          {t("pl.risk.cvar", { v: numOpt(result.risk.cvar_95_pct) })}
+                          {result.risk.bench_cvar_95_pct !== undefined && (
+                            <span className="dim"> · {t("pl.risk.cvarBench", { v: numOpt(result.risk.bench_cvar_95_pct) })}</span>
+                          )}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   <div className="pl-subhead">
                     {t("pl.risk.exposure")}
                     <span className="dim pl-subhead__note">
                       {t("pl.pf.exposure", { v: result.portfolio.avg_exposure_pct.toFixed(0) })}
                     </span>
                   </div>
-                  <ExposureSparkline data={bt.exposure_curve} />
+                  <Sparkline data={bt.exposure_curve} refValue={100} floor={0} />
+
+                  {result.risk.rolling_beta && result.risk.rolling_beta.length >= 2 && (
+                    <>
+                      <div className="pl-subhead pl-subhead--case">
+                        {t("pl.risk.rollingBeta")}
+                        <span className="dim pl-subhead__note">
+                          {t("pl.risk.rollingBetaNote", {
+                            v: result.risk.rolling_beta[result.risk.rolling_beta.length - 1].value.toFixed(2),
+                            lo: Math.min(...result.risk.rolling_beta.map((p) => p.value)).toFixed(2),
+                            hi: Math.max(...result.risk.rolling_beta.map((p) => p.value)).toFixed(2),
+                          })}
+                        </span>
+                      </div>
+                      <Sparkline data={result.risk.rolling_beta} refValue={1} className="pl-spark--beta" testId="pl-rolling-beta" />
+                    </>
+                  )}
 
                   <div className="pl-subhead">{t("pl.risk.drawdowns")}</div>
                   <div className="table-scroll">
@@ -1083,10 +1230,17 @@ export function PipelinePage({ hidden }: Props) {
 // ------------------------------------------------------------ sub-components
 
 function NumField({
-  label, value, range, onChange,
-}: { label: string; value: number; range: [number, number]; onChange: (v: number) => void }) {
+  label, value, range, step, hint, onChange,
+}: {
+  label: string;
+  value: number;
+  range: [number, number];
+  step?: number;
+  hint?: string;
+  onChange: (v: number) => void;
+}) {
   return (
-    <label className="field">
+    <label className="field" title={hint}>
       <span className="field__label">
         {label} <span className="pl-range">{range[0]}–{range[1]}</span>
       </span>
@@ -1096,16 +1250,18 @@ function NumField({
         value={Number.isFinite(value) ? value : ""}
         min={range[0]}
         max={range[1]}
+        step={step}
         onChange={(e) => onChange(e.target.value === "" ? range[0] : Number(e.target.value))}
       />
+      {hint && <span className="pl-field-hint">{hint}</span>}
     </label>
   );
 }
 
 function Stat({
-  label, value, tone: v, sub, small, testId,
-}: { label: string; value: string; tone?: number; sub?: string; small?: boolean; testId?: string }) {
-  const cls = v === undefined ? "" : v > 0 ? "up" : v < 0 ? "dn" : "";
+  label, value, tone: v, toneClass, sub, small, testId,
+}: { label: string; value: string; tone?: number; toneClass?: string; sub?: string; small?: boolean; testId?: string }) {
+  const cls = toneClass ?? (v === undefined ? "" : v > 0 ? "up" : v < 0 ? "dn" : "");
   return (
     <div className="stat" data-testid={testId}>
       <div className="stat__label">{label}</div>
@@ -1206,18 +1362,82 @@ function ContribList({
   );
 }
 
-/** Gross exposure over time as a tiny polyline; the dashed line is 100%. */
-function ExposureSparkline({ data }: { data: Point[] }) {
+/** A series as a tiny polyline with one dashed reference line (100% for
+ * gross exposure, 1.0 for rolling beta). The y-range always contains the
+ * reference and, when given, `floor`, so the line never hides the context. */
+function Sparkline({
+  data, refValue, floor, className, testId,
+}: { data: Point[]; refValue: number; floor?: number; className?: string; testId?: string }) {
   if (data.length < 2) return <div className="empty">—</div>;
   const w = 100;
   const h = 26;
-  const maxV = Math.max(100, ...data.map((p) => p.value));
-  const y = (v: number) => h - 1 - (v / maxV) * (h - 2);
+  const vals = data.map((p) => p.value);
+  const lo = Math.min(refValue, floor ?? Infinity, ...vals);
+  const hi = Math.max(refValue, ...vals);
+  const pad = Math.max((hi - lo) * 0.08, 1e-6);
+  const y = (v: number) => h - 1 - ((v - lo + pad) / (hi - lo + 2 * pad)) * (h - 2);
   const pts = data.map((p, i) => `${((i / (data.length - 1)) * w).toFixed(2)},${y(p.value).toFixed(2)}`).join(" ");
   return (
-    <svg className="pl-spark" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden="true">
-      <line x1="0" y1={y(100)} x2={w} y2={y(100)} className="pl-spark__ref" />
+    <svg
+      className={`pl-spark${className ? ` ${className}` : ""}`}
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+      data-testid={testId}
+    >
+      <line x1="0" y1={y(refValue)} x2={w} y2={y(refValue)} className="pl-spark__ref" />
       <polyline points={pts} className="pl-spark__line" />
+    </svg>
+  );
+}
+
+/** Information-horizon curve: one bar per forward horizon, positive IC up
+ * from the axis and negative down, value printed at the bar tip. A null IC
+ * (too few samples) is a dashed empty slot so the gap stays visible. */
+function IcDecayBars({ rows }: { rows: Array<{ horizon: number; ic: number | null }> }) {
+  const { t } = useT();
+  const byH = new Map(rows.map((r) => [r.horizon, r.ic]));
+  const horizons = IC_HORIZONS.every((h) => byH.has(h)) ? IC_HORIZONS : rows.map((r) => r.horizon);
+  const w = 280;
+  const h = 96;
+  const top = 14;
+  const bottom = 16;
+  const plotH = h - top - bottom;
+  const maxAbs = Math.max(0.005, ...rows.map((r) => Math.abs(r.ic ?? 0)));
+  const axisY = top + plotH / 2;
+  const scale = (plotH / 2 - 2) / maxAbs;
+  const slot = w / horizons.length;
+  const barW = Math.min(26, slot * 0.6);
+  return (
+    <svg className="pl-decay" viewBox={`0 0 ${w} ${h}`} role="img" aria-label={t("pl.sig.decay")} data-testid="pl-ic-decay">
+      <line x1="0" y1={axisY} x2={w} y2={axisY} className="pl-decay__axis" />
+      {horizons.map((hz, i) => {
+        const ic = byH.get(hz) ?? null;
+        const cx = slot * i + slot / 2;
+        const x = cx - barW / 2;
+        if (ic === null) {
+          return (
+            <g key={hz}>
+              <title>{t("pl.sig.decayNone", { h: String(hz) })}</title>
+              <rect x={x} y={axisY - 6} width={barW} height={12} className="pl-decay__none" />
+              <text x={cx} y={axisY - 9} className="pl-decay__val">—</text>
+              <text x={cx} y={h - 4} className="pl-decay__h">{hz}</text>
+            </g>
+          );
+        }
+        const len = Math.abs(ic) * scale;
+        const up = ic >= 0;
+        const y = up ? axisY - len : axisY;
+        const labelY = up ? Math.max(9, axisY - len - 3) : Math.min(h - bottom - 1, axisY + len + 9);
+        return (
+          <g key={hz}>
+            <title>{t("pl.sig.decayBar", { h: String(hz), v: signed3(ic) })}</title>
+            <rect x={x} y={y} width={barW} height={Math.max(0.5, len)} className={up ? "pl-decay__bar--up" : "pl-decay__bar--dn"} />
+            <text x={cx} y={labelY} className="pl-decay__val">{signed3(ic)}</text>
+            <text x={cx} y={h - 4} className="pl-decay__h">{hz}</text>
+          </g>
+        );
+      })}
     </svg>
   );
 }
@@ -1229,4 +1449,14 @@ const tone = (v: number) => (v > 0 ? "up" : v < 0 ? "dn" : "");
 const pct = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(2)}%`;
 const pctOpt = (v: number | null) => (v === null ? "—" : pct(v));
 const num = (v: number) => v.toFixed(2);
+const numOpt = (v: number | null | undefined) => (v === null || v === undefined ? "—" : v.toFixed(2));
 const signed3 = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(3)}`;
+const signed3Opt = (v: number | null | undefined) => (v === null || v === undefined ? "—" : signed3(v));
+/** Probabilities (PSR / DSR) print as 0.xx; a null means too short a track. */
+const prob = (v: number | null | undefined) => (v === null || v === undefined ? "—" : v.toFixed(2));
+/** ≥ 0.95 is the usual bar for PSR/DSR; 0.8–0.95 is borderline; below is luck territory. */
+const probTone = (v: number | null | undefined) =>
+  v === null || v === undefined ? "" : v >= 0.95 ? "pl-tone--ok" : v >= 0.8 ? "pl-tone--warn" : "pl-tone--bad";
+const ratio = (v: number | null) => (v === null ? "—" : v.toFixed(2));
+/** Up-capture above 1 and down-capture below 1 are the good directions. */
+const captureTone = (v: number | null, up: boolean) => (v === null ? "" : (up ? v >= 1 : v <= 1) ? "up" : "dn");

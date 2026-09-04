@@ -3555,6 +3555,11 @@ tbody tr:hover td {
   letter-spacing: 0;
 }
 
+/* a subhead whose label carries a Greek letter (β) must not be upper-cased */
+.pl-subhead--case {
+  text-transform: none;
+}
+
 .pl-th-sub {
   display: block;
   font-size: 9px;
@@ -3759,6 +3764,89 @@ tbody tr:hover td {
   stroke: var(--cyan);
   stroke-width: 1.4;
   vector-effect: non-scaling-stroke;
+}
+
+/* V2: IC decay bars (stage ②) */
+.pl-decay {
+  width: 100%;
+  max-width: 480px;
+  height: auto;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.pl-decay__axis {
+  stroke: var(--border-bright);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.pl-decay__bar--up {
+  fill: rgba(61, 220, 132, 0.65);
+}
+
+.pl-decay__bar--dn {
+  fill: rgba(255, 92, 108, 0.65);
+}
+
+.pl-decay__none {
+  fill: none;
+  stroke: var(--border-bright);
+  stroke-dasharray: 2 2;
+}
+
+.pl-decay__val {
+  font-size: 8.5px;
+  fill: var(--text-dim);
+  font-family: var(--mono);
+  text-anchor: middle;
+}
+
+.pl-decay__h {
+  font-size: 8.5px;
+  fill: var(--text-faint);
+  text-anchor: middle;
+}
+
+/* V2: parameter hints under a field */
+.pl-field-hint {
+  display: block;
+  font-size: 10px;
+  line-height: 1.5;
+  margin-top: 3px;
+  color: var(--text-faint);
+}
+
+/* V2: overfitting strip (stage ④) */
+.pl-ofit {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pl-ofit .stat-grid {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.pl-tone--ok {
+  color: var(--green);
+}
+
+.pl-tone--warn {
+  color: var(--amber);
+}
+
+.pl-tone--bad {
+  color: var(--red, #ff5c6c);
+}
+
+.pl-spark--beta {
+  height: 48px;
 }
 
 /* paper: deployment kind badge */
