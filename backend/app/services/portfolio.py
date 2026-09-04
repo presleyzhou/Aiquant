@@ -14,33 +14,68 @@ Weighting schemes (`SCHEMES`):
   inverse_vol  — proportional to 1 / trailing volatility
   min_variance — argmin w'Σw  s.t. sum(w)=1, 0 <= w <= cap
   risk_parity  — every name contributes the same share of portfolio variance
+  hrp          — Hierarchical Risk Parity (López de Prado 2016): cluster the
+                 correlation matrix, then split risk top-down between clusters
+  mean_variance— Grinold-Kahn: alpha_i = IC · sigma_i · z_i, maximise
+                 alpha'w − lambda·w'Σw over the capped simplex
 """
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
-SCHEMES: tuple[str, ...] = ("equal", "score", "inverse_vol", "min_variance", "risk_parity")
+SCHEMES: tuple[str, ...] = ("equal", "score", "inverse_vol", "min_variance", "risk_parity", "hrp", "mean_variance")
 
-COV_SHRINKAGE = 0.3        # blend toward the diagonal: stabilises 60-day covariances
+COV_SHRINKAGE = 0.3        # fallback intensity when the analytic estimate is unusable
 _EPS = 1e-12
+
+
+def shrinkage_intensity(returns: np.ndarray) -> float:
+    """Analytic optimal intensity for shrinking the sample covariance toward
+    its diagonal (Ledoit & Wolf 2003/2004; the closed form is the
+    Schäfer-Strimmer 2005 estimator):
+
+        lambda* = sum_{i!=j} Var(s_ij) / sum_{i!=j} s_ij^2,  clipped to [0, 1]
+
+    where Var(s_ij) is the sampling variance of each off-diagonal covariance.
+    Short windows and many names push lambda toward 1 (trust the diagonal);
+    long, stable windows let the sample correlations through."""
+    r = np.nan_to_num(np.asarray(returns, dtype=float))
+    t, n = r.shape
+    if t < 4 or n < 2:
+        return 1.0
+    x = r - r.mean(axis=0)
+    s = x.T @ x / (t - 1)
+    # Var(s_ij) ≈ (t / (t-1)^3) * sum_k (x_ki x_kj - mean)^2  (Schäfer & Strimmer eq. 12)
+    w = np.einsum("ki,kj->kij", x, x)
+    var_s = w.var(axis=0, ddof=0) * t / (t - 1) ** 2
+    off = ~np.eye(n, dtype=bool)
+    denom = float((s[off] ** 2).sum())
+    if denom <= _EPS:
+        return 1.0
+    lam = float(var_s[off].sum() / denom)
+    return min(1.0, max(0.0, lam)) if np.isfinite(lam) else COV_SHRINKAGE
 
 
 # ----------------------------------------------------------------- helpers
 
 
 def shrink_cov(returns: np.ndarray) -> np.ndarray:
-    """Sample covariance shrunk toward its own diagonal (Ledoit-Wolf spirit,
-    fixed intensity). `returns` is (window, n); NaNs are treated as zero
-    returns, which only ever *under*states risk for illiquid names."""
+    """Sample covariance shrunk toward its own diagonal with the analytic
+    Ledoit-Wolf intensity (see `shrinkage_intensity`). `returns` is
+    (window, n); NaNs are treated as zero returns, which only ever
+    *under*states risk for illiquid names."""
     r = np.nan_to_num(np.asarray(returns, dtype=float))
     if r.shape[0] < 2:
         return np.eye(r.shape[1]) * 1e-4
     sample = np.cov(r, rowvar=False, ddof=1)
     sample = np.atleast_2d(sample)
     diag = np.diag(np.diag(sample))
-    cov = (1 - COV_SHRINKAGE) * sample + COV_SHRINKAGE * diag
+    lam = shrinkage_intensity(r)
+    cov = (1 - lam) * sample + lam * diag
     # a floor keeps zero-variance columns from producing singular matrices
     return cov + np.eye(cov.shape[0]) * 1e-8
 
@@ -144,13 +179,117 @@ def risk_parity_weights(cov: np.ndarray, cap: float, iters: int = 500) -> np.nda
     return apply_cap(w, cap)
 
 
+def _single_linkage_order(corr: np.ndarray) -> list[int]:
+    """Quasi-diagonalisation order from single-linkage clustering on the
+    correlation-distance matrix d_ij = sqrt((1 - rho_ij) / 2). Pure numpy —
+    n is tiny, so the O(n^3) agglomeration is instant."""
+    n = corr.shape[0]
+    if n <= 2:
+        return list(range(n))
+    dist = np.sqrt(np.clip((1 - corr) / 2, 0, 1))
+    clusters: dict[int, list[int]] = {i: [i] for i in range(n)}
+    d = dist.copy()
+    np.fill_diagonal(d, np.inf)
+    ids = list(range(n))
+    while len(ids) > 1:
+        sub = d[np.ix_(ids, ids)]
+        k = int(np.argmin(sub))
+        a, b = ids[k // len(ids)], ids[k % len(ids)]
+        if a == b:
+            break
+        merged = clusters[a] + clusters[b]
+        new_id = max(clusters) + 1
+        clusters[new_id] = merged
+        # single linkage: distance to the merged cluster = min of the parts
+        row = np.minimum(d[a], d[b])
+        d = np.pad(d, ((0, 1), (0, 1)), constant_values=np.inf)
+        d[new_id, :-1] = row
+        d[:-1, new_id] = row
+        d[new_id, new_id] = np.inf
+        ids = [i for i in ids if i not in (a, b)] + [new_id]
+    return clusters[ids[0]]
+
+
+def hrp_weights(cov: np.ndarray, cap: float) -> np.ndarray:
+    """Hierarchical Risk Parity (López de Prado 2016, J. Portfolio Mgmt):
+    order names by hierarchical clustering, then recursively bisect the
+    ordered list, splitting each parent's weight between its two halves
+    inversely to the halves' inverse-variance-portfolio variances. Needs no
+    matrix inversion, so it stays stable when the covariance is ill-conditioned."""
+    n = cov.shape[0]
+    if n == 1:
+        return np.array([min(1.0, cap)])
+    std = np.sqrt(np.clip(np.diag(cov), 1e-12, None))
+    corr = cov / np.outer(std, std)
+    corr = np.clip(np.nan_to_num(corr), -1, 1)
+    order = _single_linkage_order(corr)
+
+    def cluster_var(items: list[int]) -> float:
+        sub = cov[np.ix_(items, items)]
+        ivp = 1.0 / np.clip(np.diag(sub), 1e-12, None)
+        ivp = ivp / ivp.sum()
+        return float(ivp @ sub @ ivp)
+
+    w = np.ones(n)
+    stack = [order]
+    while stack:
+        items = stack.pop()
+        if len(items) < 2:
+            continue
+        half = len(items) // 2
+        left, right = items[:half], items[half:]
+        v_l, v_r = cluster_var(left), cluster_var(right)
+        alpha = 1 - v_l / (v_l + v_r) if (v_l + v_r) > _EPS else 0.5
+        w[left] *= alpha
+        w[right] *= 1 - alpha
+        stack.extend([left, right])
+    return apply_cap(w, cap)
+
+
+def grinold_alpha(scores: np.ndarray, vols: np.ndarray, ic: float) -> np.ndarray:
+    """Grinold's rule (Grinold 1994; Grinold & Kahn 2000): the expected
+    active return implied by a raw signal is  alpha = IC · sigma · z, where
+    z is the cross-sectional z-score of the signal and sigma each name's
+    volatility. It turns a ranking into return forecasts calibrated to how
+    much the signal has actually predicted — no IC, no alpha."""
+    z = np.asarray(scores, dtype=float)
+    sd = z.std(ddof=0)
+    z = (z - z.mean()) / sd if sd > _EPS else np.zeros_like(z)
+    return float(ic) * np.asarray(vols, dtype=float) * z
+
+
+def mean_variance_weights(alpha: np.ndarray, cov: np.ndarray, cap: float, risk_aversion: float = 1.0,
+                          iters: int = 400) -> np.ndarray:
+    """max alpha'w − lambda·w'Σw  s.t. sum(w)=1, 0 <= w <= cap, by projected
+    gradient. lambda is set relative to the problem's own scale — the ratio of
+    typical |alpha| to typical variance times `risk_aversion` — so the trade-off
+    is meaningful for daily crypto and daily equities alike."""
+    n = cov.shape[0]
+    scale = float(np.mean(np.abs(alpha))) / max(float(np.mean(np.diag(cov))), 1e-12)
+    lam = max(risk_aversion * scale, 1e-9)
+    w = project_capped_simplex(np.full(n, 1.0 / n), cap)
+    lipschitz = 2 * lam * max(float(np.linalg.eigvalsh(cov).max()), 1e-10)
+    step = 1.0 / lipschitz
+    for _ in range(iters):
+        grad = -alpha + 2 * lam * cov @ w
+        nxt = project_capped_simplex(w - step * grad, cap)
+        if np.abs(nxt - w).max() < 1e-9:
+            w = nxt
+            break
+        w = nxt
+    return w
+
+
 def construct(
     scheme: str,
     scores: np.ndarray,
     trailing_returns: np.ndarray,
     cap: float,
+    ic: float | None = None,
 ) -> np.ndarray:
-    """Weights for the already-selected names (columns of trailing_returns)."""
+    """Weights for the already-selected names (columns of trailing_returns).
+    `ic` (the signal's realised in-sample rank IC) only matters to the
+    mean-variance scheme, which needs it to turn scores into alphas."""
     n = len(scores)
     if n == 0:
         return np.zeros(0)
@@ -165,6 +304,12 @@ def construct(
         return min_variance_weights(cov, cap)
     if scheme == "risk_parity":
         return risk_parity_weights(cov, cap)
+    if scheme == "hrp":
+        return hrp_weights(cov, cap)
+    if scheme == "mean_variance":
+        vols = np.sqrt(np.clip(np.diag(cov), 1e-12, None))
+        alpha = grinold_alpha(scores, vols, ic if ic is not None else 0.02)
+        return mean_variance_weights(alpha, cov, cap)
     raise ValueError(f"unknown weighting scheme: {scheme}")
 
 
@@ -301,3 +446,107 @@ def effective_n(weights: np.ndarray) -> float:
         return 0.0
     w = w / total
     return float(1.0 / np.sum(w * w))
+
+
+# ------------------------------------------------- overfitting statistics
+
+
+def norm_cdf(x: float) -> float:
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def norm_ppf(p: float) -> float:
+    """Inverse normal CDF (Acklam's rational approximation, |error| < 1.2e-9)."""
+    p = min(max(p, 1e-12), 1 - 1e-12)
+    a = (-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00)
+    b = (-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+         6.680131188771972e+01, -1.328068155288572e+01)
+    c = (-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00)
+    d = (7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00, 3.754408661907416e+00)
+    if p < 0.02425:
+        q = math.sqrt(-2 * math.log(p))
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
+               ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
+    if p > 1 - 0.02425:
+        q = math.sqrt(-2 * math.log(1 - p))
+        return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
+               ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
+    q = p - 0.5
+    r = q * q
+    return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / \
+           (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
+
+
+def probabilistic_sharpe(returns: pd.Series, benchmark_sr: float = 0.0) -> float | None:
+    """PSR (Bailey & López de Prado 2012): probability that the TRUE Sharpe
+    exceeds `benchmark_sr`, given the observed per-period Sharpe, the track
+    length and the return distribution's skew (γ3) and kurtosis (γ4):
+
+        PSR = Φ( (SR − SR*) · sqrt(T − 1) / sqrt(1 − γ3·SR + (γ4 − 1)/4 · SR²) )
+
+    All Sharpe ratios here are per period (daily), not annualised."""
+    r = returns.dropna()
+    t = len(r)
+    if t < 30:
+        return None
+    sd = float(r.std(ddof=1))
+    if sd <= _EPS:
+        return None
+    sr = float(r.mean() / sd)
+    skew = float(((r - r.mean()) ** 3).mean() / sd**3)
+    kurt = float(((r - r.mean()) ** 4).mean() / sd**4)
+    denom = 1 - skew * sr + (kurt - 1) / 4 * sr * sr
+    if denom <= _EPS:
+        return None
+    return norm_cdf((sr - benchmark_sr) * math.sqrt(t - 1) / math.sqrt(denom))
+
+
+def deflated_sharpe(returns: pd.Series, trial_sharpes: list[float]) -> dict:
+    """DSR (Bailey & López de Prado 2014): PSR against the Sharpe one would
+    expect from the BEST of N unskilled trials,
+
+        SR* = sqrt(V[SR_n]) · ((1 − γ) Φ⁻¹(1 − 1/N) + γ Φ⁻¹(1 − 1/(N·e))),  γ = Euler-Mascheroni,
+
+    where V[SR_n] is the variance of the trial Sharpes (per period). N is the
+    number of configurations actually evaluated in this run — the scheme
+    comparison and each factor's standalone test all count as trials."""
+    trials = [float(x) for x in trial_sharpes if x is not None and np.isfinite(x)]
+    n = len(trials)
+    if n < 2:
+        return {"trials": n, "expected_max_sharpe": None, "dsr": probabilistic_sharpe(returns)}
+    var = float(np.var(trials, ddof=1))
+    gamma = 0.5772156649015329
+    sr_star = math.sqrt(max(var, 0.0)) * ((1 - gamma) * norm_ppf(1 - 1 / n) + gamma * norm_ppf(1 - 1 / (n * math.e)))
+    return {"trials": n, "expected_max_sharpe": round(sr_star, 4), "dsr": probabilistic_sharpe(returns, sr_star)}
+
+
+def capture_ratios(net: pd.Series, bench: pd.Series) -> dict:
+    """Up / down capture: the portfolio's compounded return in benchmark-up
+    months divided by the benchmark's, and likewise for down months. A ratio
+    above 1 on the upside and below 1 on the downside is the asymmetric
+    profile every allocator asks for."""
+    frame = pd.DataFrame({"p": net, "b": bench}).dropna()
+    if len(frame) < 40:
+        return {"up": None, "down": None, "up_periods": 0, "down_periods": 0}
+    monthly = (1 + frame).groupby([frame.index.year, frame.index.month]).prod() - 1
+    up, down = monthly[monthly["b"] > 0], monthly[monthly["b"] < 0]
+
+    def ratio(part: pd.DataFrame) -> float | None:
+        if len(part) < 2:
+            return None
+        pb = float((1 + part["b"]).prod() - 1)
+        pp = float((1 + part["p"]).prod() - 1)
+        return round(pp / pb, 2) if abs(pb) > 1e-9 else None
+
+    return {"up": ratio(up), "down": ratio(down), "up_periods": int(len(up)), "down_periods": int(len(down))}
+
+
+def cvar(returns: pd.Series, level: float = 0.95) -> float | None:
+    """Expected shortfall: mean of the worst (1 − level) daily returns, in %."""
+    r = returns.dropna().sort_values()
+    k = int(math.ceil(len(r) * (1 - level)))
+    if k < 3:
+        return None
+    return round(float(r.iloc[:k].mean()) * 100, 2)

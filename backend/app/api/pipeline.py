@@ -27,14 +27,16 @@ class PipelineFactor(BaseModel):
 class PipelineRequest(BaseModel):
     market: str = Field("us", pattern="^(us|crypto)$")
     factors: list[PipelineFactor] = Field(min_length=1, max_length=8)
-    signal_weighting: str = Field("ic", pattern="^(ic|equal)$")
-    scheme: str = Field("inverse_vol", pattern="^(equal|score|inverse_vol|min_variance|risk_parity)$")
+    signal_weighting: str = Field("ic_expanding", pattern="^(ic_expanding|ic|equal)$")
+    scheme: str = Field("inverse_vol", pattern="^(equal|score|inverse_vol|min_variance|risk_parity|hrp|mean_variance)$")
     top_n: int = Field(8, ge=2, le=20)
     rebalance: int = Field(10, ge=1, le=30)
     max_weight: float = Field(0.25, ge=0.05, le=1.0)
     cost_bps: float = Field(7.0, ge=0, le=50)
     target_vol_pct: float | None = Field(None, ge=0, le=40, description="annualised %; null or 0 = off")
     vol_lookback: int = Field(60, ge=20, le=120)
+    hold_buffer: int = Field(4, ge=0, le=20, description="a held name stays while ranked within top_n + buffer")
+    trade_rate: float = Field(1.0, ge=0.1, le=1.0, description="fraction of the distance to the target traded per rebalance")
     compare: bool = True
 
 

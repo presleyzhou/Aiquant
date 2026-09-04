@@ -208,3 +208,134 @@ def test_paper_tracks_pipeline_kind(monkeypatch):
     assert body["position"]["state"] == "holdings"
     assert len(body["position"]["symbols"]) == len(body["position"]["weights_pct"]) == 6
     assert body["equity_curve"][0]["value"] == 100_000
+
+
+# --------------------------------------------------- V2: construction schemes
+
+
+def test_shrinkage_intensity_is_bounded_and_falls_with_more_data():
+    rng = np.random.default_rng(2)
+    corr_short = rng.normal(0, 0.01, (40, 10))
+    corr_long = rng.normal(0, 0.01, (2000, 10))
+    lam_short = portfolio.shrinkage_intensity(corr_short)
+    lam_long = portfolio.shrinkage_intensity(corr_long)
+    assert 0 <= lam_long <= lam_short <= 1
+
+
+def test_hrp_weights_sum_to_one_and_favour_diversifiers():
+    cov, _ = _cov()
+    w = portfolio.hrp_weights(cov, cap=1.0)
+    assert abs(w.sum() - 1) < 1e-9 and (w > 0).all()
+    assert np.argmax(w) == 0  # lowest-vol name gets the most, as in inverse variance
+    capped = portfolio.hrp_weights(cov, cap=0.3)
+    assert capped.max() <= 0.3 + 1e-9
+
+
+def test_single_linkage_groups_correlated_names():
+    rng = np.random.default_rng(4)
+    base = rng.normal(0, 0.01, 300)
+    r = np.column_stack([base + rng.normal(0, 0.002, 300), rng.normal(0, 0.01, 300),
+                         base + rng.normal(0, 0.002, 300), rng.normal(0, 0.01, 300)])
+    corr = np.corrcoef(r, rowvar=False)
+    order = portfolio._single_linkage_order(corr)
+    assert sorted(order) == [0, 1, 2, 3]
+    assert abs(order.index(0) - order.index(2)) == 1  # the twins sit next to each other
+
+
+def test_grinold_alpha_and_mean_variance_tilt_toward_signal():
+    cov, _ = _cov()
+    scores = np.array([2.0, 1.0, -1.0, -2.0])
+    alpha = portfolio.grinold_alpha(scores, np.sqrt(np.diag(cov)), ic=0.05)
+    assert alpha[0] > 0 and alpha[1] > 0 > alpha[2] > alpha[3]  # sign follows the z-score, size the vol
+    w = portfolio.mean_variance_weights(alpha, cov, cap=0.6)
+    assert abs(w.sum() - 1) < 1e-6
+    assert w[0] + w[1] > w[2] + w[3]  # positive-alpha names dominate
+    assert w.max() <= 0.6 + 1e-9
+
+
+# ------------------------------------------------- V2: overfitting statistics
+
+
+def test_psr_is_high_for_a_strong_track_record_and_low_for_noise():
+    rng = np.random.default_rng(0)
+    strong = pd.Series(0.002 + rng.normal(0, 0.005, 400))
+    noise = pd.Series(rng.normal(0, 0.01, 400))
+    assert portfolio.probabilistic_sharpe(strong) > 0.99
+    assert 0.05 < portfolio.probabilistic_sharpe(noise) < 0.95
+    assert portfolio.probabilistic_sharpe(pd.Series([0.01] * 10)) is None  # too short
+
+
+def test_deflated_sharpe_is_never_above_psr():
+    rng = np.random.default_rng(1)
+    r = pd.Series(0.0005 + rng.normal(0, 0.01, 500))
+    psr = portfolio.probabilistic_sharpe(r)
+    d = portfolio.deflated_sharpe(r, [0.01, 0.03, -0.02, 0.05, 0.02, 0.04])
+    assert d["trials"] == 6 and d["expected_max_sharpe"] > 0
+    assert d["dsr"] <= psr
+
+
+def test_norm_ppf_matches_known_quantiles():
+    assert portfolio.norm_ppf(0.975) == pytest.approx(1.959964, abs=1e-6)
+    assert portfolio.norm_ppf(0.5) == pytest.approx(0.0, abs=1e-9)
+    assert portfolio.norm_cdf(portfolio.norm_ppf(0.123)) == pytest.approx(0.123, abs=1e-7)
+
+
+def test_capture_and_cvar():
+    idx = pd.date_range("2023-01-01", periods=600, freq="D")
+    rng = np.random.default_rng(3)
+    bench = pd.Series(rng.normal(0.0004, 0.01, 600), index=idx)
+    port = bench * 1.5  # levered clone: captures 150% up AND down
+    cap = portfolio.capture_ratios(port, bench)
+    assert cap["up"] > 1.2 and cap["down"] > 1.2
+    assert portfolio.cvar(bench) < 0
+    assert portfolio.cvar(port) < portfolio.cvar(bench)
+
+
+# ------------------------------------------------- V2: simulation behaviour
+
+
+def test_hold_buffer_and_trade_rate_reduce_turnover():
+    panel = _panel(600, 30, seed=5)
+    base = {**SPEC, "factors": ["rank(delta(close, 5))"], "scheme": "equal"}
+    plain = pipeline.run_pipeline_blocking({**base, "hold_buffer": 0}, panel=panel)
+    banded = pipeline.run_pipeline_blocking({**base, "hold_buffer": 8}, panel=panel)
+    partial = pipeline.run_pipeline_blocking({**base, "hold_buffer": 0, "trade_rate": 0.5}, panel=panel)
+    assert banded["portfolio"]["avg_turnover_pct"] < plain["portfolio"]["avg_turnover_pct"]
+    assert partial["portfolio"]["avg_turnover_pct"] < plain["portfolio"]["avg_turnover_pct"]
+    assert plain["portfolio"]["breakeven_cost_bps"] is not None
+
+
+def test_select_keeps_held_names_within_band():
+    scores = pd.Series({"A": 9, "B": 8, "C": 7, "D": 6, "E": 5, "F": 4})
+    picked = pipeline._select(scores, top_n=2, buffer=2, held={"D", "F"})
+    assert list(picked.index) == ["D", "A"]  # D (rank 4 ≤ 2+2) survives, F (rank 6) is dropped
+    assert list(pipeline._select(scores, top_n=2, buffer=0, held={"D"}).index) == ["A", "B"]
+
+
+def test_expanding_ic_weights_use_only_the_past():
+    """Truncating the panel must not change the composite score on the shared
+    prefix (minus the last horizon of days whose IC needs future returns)."""
+    panel = _panel(600, 20, seed=9)
+    spec = pipeline.normalize_spec({**SPEC, "signal_weighting": "ic_expanding"})
+    full, _, _ = pipeline.build_signal(spec, panel)
+    cut = {k: v.iloc[:450] for k, v in panel.items()}
+    part, _, _ = pipeline.build_signal(spec, cut)
+    overlap = part.index[:-40]
+    pd.testing.assert_frame_equal(full.loc[overlap], part.loc[overlap], check_exact=False, atol=1e-9)
+
+
+def test_v2_report_fields_and_all_schemes():
+    panel = _panel(600, 30, seed=5)
+    res = pipeline.run_pipeline_blocking({**SPEC, "scheme": "hrp", "compare": True}, panel=panel)
+    json.dumps(res)
+    assert {a["scheme"] for a in res["alternatives"]} == set(portfolio.SCHEMES)
+    assert len(res["signal"]["ic_by_horizon"]) == len(pipeline.IC_HORIZONS)
+    over = res["backtest"]["overfitting"]
+    assert 0 <= over["psr"] <= 1 and over["trials"] >= len(portfolio.SCHEMES)
+    assert over["dsr"] <= over["psr"] + 1e-9
+    assert set(res["risk"]["capture"]) == {"up", "down", "up_periods", "down_periods"}
+    assert res["risk"]["rolling_beta"] and res["risk"]["cvar_95_pct"] is not None
+    for c in res["signal"]["components"]:
+        assert "avg_weight" in c
+    mv = pipeline.run_pipeline_blocking({**SPEC, "scheme": "mean_variance"}, panel=panel)
+    assert sum(w["weight_pct"] for w in mv["target_weights"]["weights"]) == pytest.approx(100, abs=0.5)

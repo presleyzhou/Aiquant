@@ -50,6 +50,12 @@ SCHEME_INFO: list[dict[str, str]] = [
     {"id": "risk_parity", "zh": "风险平价", "en": "Risk parity",
      "desc_zh": "每个标的对组合方差的贡献相等。低相关、低波动的标的得到更多权重。",
      "desc_en": "Every name contributes the same share of portfolio variance; low-vol, low-correlation names get more."},
+    {"id": "hrp", "zh": "层次风险平价 HRP", "en": "Hierarchical Risk Parity",
+     "desc_zh": "López de Prado (2016)：按相关性聚类后自上而下分配风险，不求逆矩阵，协方差病态时也稳定。",
+     "desc_en": "López de Prado (2016): cluster the correlation matrix and split risk top-down. No matrix inversion — stable when covariances are ill-conditioned."},
+    {"id": "mean_variance", "zh": "均值-方差（Grinold α）", "en": "Mean-variance (Grinold alpha)",
+     "desc_zh": "Grinold-Kahn：α = IC × σ × z 把排名换算成收益预测，再在多头、上限约束下做均值-方差优化。",
+     "desc_en": "Grinold-Kahn: alpha = IC × sigma × z turns the ranking into return forecasts, then mean-variance optimise under long-only and cap constraints."},
 ]
 
 STARTER_FACTORS: dict[str, list[dict[str, Any]]] = {
@@ -67,13 +73,18 @@ STARTER_FACTORS: dict[str, list[dict[str, Any]]] = {
 }
 
 DEFAULTS: dict[str, Any] = {
-    "scheme": "inverse_vol", "signal_weighting": "ic", "top_n": 8, "rebalance": 10,
+    "scheme": "inverse_vol", "signal_weighting": "ic_expanding", "top_n": 8, "rebalance": 10,
     "max_weight": 0.25, "cost_bps": 7.0, "target_vol_pct": None, "vol_lookback": 60, "horizon": 10,
+    "hold_buffer": 4, "trade_rate": 1.0,
 }
 LIMITS: dict[str, list] = {
     "factors": [1, 8], "top_n": [2, 20], "rebalance": [1, 30], "max_weight": [0.05, 1.0],
     "cost_bps": [0, 50], "target_vol_pct": [5, 40], "vol_lookback": [20, 120],
+    "hold_buffer": [0, 20], "trade_rate": [0.1, 1.0],
 }
+SIGNAL_WEIGHTINGS: tuple[str, ...] = ("ic_expanding", "ic", "equal")
+IC_HORIZONS: tuple[int, ...] = (1, 2, 3, 5, 10, 15, 20)
+_IC_WARMUP = 60             # IC observations before expanding weights leave equal-weight
 
 _MIN_BARS = 60
 
@@ -83,6 +94,7 @@ def config() -> dict:
         "markets": list(UNIVERSES),
         "universes": {k: list(v) for k, v in UNIVERSES.items()},
         "schemes": SCHEME_INFO,
+        "signal_weightings": list(SIGNAL_WEIGHTINGS),
         "starter_factors": STARTER_FACTORS,
         "defaults": DEFAULTS,
         "limits": LIMITS,
@@ -124,7 +136,7 @@ def normalize_spec(raw: dict) -> dict:
     if scheme not in portfolio.SCHEMES:
         raise factor_dsl.FactorError(f"unknown weighting scheme: {scheme}")
     weighting = str(raw.get("signal_weighting", DEFAULTS["signal_weighting"]))
-    weighting = weighting if weighting in ("ic", "equal") else "ic"
+    weighting = weighting if weighting in SIGNAL_WEIGHTINGS else DEFAULTS["signal_weighting"]
     tv = raw.get("target_vol_pct")
     target_vol = None if tv in (None, "", 0, "0", False) else _clamp(tv, *LIMITS["target_vol_pct"])
     return {
@@ -138,6 +150,8 @@ def normalize_spec(raw: dict) -> dict:
         "cost_bps": round(_clamp(raw.get("cost_bps", DEFAULTS["cost_bps"]), *LIMITS["cost_bps"]), 2),
         "target_vol_pct": round(target_vol, 2) if target_vol is not None else None,
         "vol_lookback": int(_clamp(raw.get("vol_lookback", DEFAULTS["vol_lookback"]), *LIMITS["vol_lookback"], cast=int)),
+        "hold_buffer": int(_clamp(raw.get("hold_buffer", DEFAULTS["hold_buffer"]), *LIMITS["hold_buffer"], cast=int)),
+        "trade_rate": round(_clamp(raw.get("trade_rate", DEFAULTS["trade_rate"]), *LIMITS["trade_rate"]), 3),
         "compare": bool(raw.get("compare", True)),
     }
 
@@ -146,10 +160,21 @@ def normalize_spec(raw: dict) -> dict:
 
 
 def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, dict, list[pd.DataFrame]]:
-    """Composite cross-sectional score in [0, 1]-ish rank space, plus the
-    component diagnostics. Returns (scores, signal_info, per_factor_ranks)."""
+    """Composite cross-sectional score in rank space, plus component
+    diagnostics. Returns (scores, signal_info, per_factor_ranks).
+
+    Three blends:
+      ic_expanding — weights at day t use only IC observations whose forward
+                     window closed before t (expanding mean, lagged by the
+                     horizon). Every day of the backtest is out-of-sample
+                     with respect to the blend; equal-weight during warm-up.
+      ic           — one static weight per factor from the first 80% window
+                     (the legacy composite; the holdout is still clean).
+      equal        — 1/n with the sign fixed by the in-sample IC.
+    """
     close = panel["close"]
     ranked_list: list[pd.DataFrame] = []
+    ic_series: list[pd.Series] = []
     components: list[dict] = []
     for f in spec["factors"]:
         values, _ = factor_dsl.compute(f["expression"], panel)
@@ -165,6 +190,7 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
         is_ic = float(ic.iloc[:split].mean()) if split > 0 else 0.0
         oos_ic = float(ic.iloc[split:].mean()) if split < len(ic) else 0.0
         ranked_list.append(values.rank(axis=1, pct=True))
+        ic_series.append(ic)
         components.append({
             "expression": f["expression"], "invert": f["invert"], "horizon": f["horizon"],
             "is_ic": round(is_ic if np.isfinite(is_ic) else 0.0, 4),
@@ -181,25 +207,78 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
                 if np.isfinite(c):
                     max_pair_corr = max(max_pair_corr, c)
 
-    # Sign-align on the IN-SAMPLE IC (a factor whose in-sample IC is negative
-    # is flipped); magnitude by |IC| or equal. The holdout never enters here.
-    signs = [1.0 if c["is_ic"] >= 0 else -1.0 for c in components]
-    if spec["signal_weighting"] == "ic":
-        mags = [abs(c["is_ic"]) for c in components]
-        total = sum(mags)
-        mags = [m / total if total > 1e-9 else 1.0 / n for m in mags]
+    weighting = spec["signal_weighting"]
+    if weighting == "ic_expanding":
+        # weight_t(f) = expanding mean of IC_f over observations known at t
+        cols = []
+        for f, ic in zip(spec["factors"], ic_series):
+            known = ic.reindex(close.index).expanding(min_periods=_IC_WARMUP).mean().shift(f["horizon"] + 1)
+            cols.append(known)
+        w_t = pd.concat(cols, axis=1)
+        w_t.columns = range(n)
+        mags = w_t.abs()
+        total = mags.sum(axis=1)
+        # normalised signed IC weights; equal-weight (positive) while warming up
+        w_t = w_t.div(total.where(total > 1e-9), axis=0)
+        w_t = w_t.where(total.notna() & (total > 1e-9), 1.0 / n)
+        scores = sum(ranked_list[k].mul(w_t[k], axis=0) for k in range(n))
+        for k, c in enumerate(components):
+            c["weight"] = round(float(w_t[k].iloc[-1]), 3)
+            c["avg_weight"] = round(float(w_t[k].mean()), 3)
     else:
-        mags = [1.0 / n] * n
-    weights = [s * m for s, m in zip(signs, mags)]
-    for c, w in zip(components, weights):
-        c["weight"] = round(w, 3)
+        signs = [1.0 if c["is_ic"] >= 0 else -1.0 for c in components]
+        if weighting == "ic":
+            mags = [abs(c["is_ic"]) for c in components]
+            total = sum(mags)
+            mags = [m / total if total > 1e-9 else 1.0 / n for m in mags]
+        else:
+            mags = [1.0 / n] * n
+        weights = [sg * m for sg, m in zip(signs, mags)]
+        for c, w in zip(components, weights):
+            c["weight"] = round(w, 3)
+            c["avg_weight"] = round(w, 3)
+        scores = sum(r * w for r, w in zip(ranked_list, weights))
 
-    scores = sum(r * w for r, w in zip(ranked_list, weights))
-    info = {"weighting": spec["signal_weighting"], "components": components, "max_pair_corr": round(max_pair_corr, 3)}
+    # composite diagnostics: IC at several horizons (the information-horizon
+    # curve of Grinold & Kahn) — tells the user how fast the blend decays and
+    # therefore how often it is worth rebalancing
+    ic_by_horizon = []
+    for h in IC_HORIZONS:
+        fwd = close.pct_change(h).shift(-h)
+        ic_h = _daily_rank_ic(scores, fwd)
+        ic_by_horizon.append({"horizon": h, "ic": round(float(ic_h.mean()), 4) if len(ic_h) >= 30 else None})
+    main_h = max(1, int(round(float(np.mean([f["horizon"] for f in spec["factors"]])))))
+    ic_main = _daily_rank_ic(scores, close.pct_change(main_h).shift(-main_h))
+    split = int(len(ic_main) * (1 - HOLDOUT_FRACTION))
+    composite_is_ic = float(ic_main.iloc[:split].mean()) if split > 0 else 0.0
+
+    info = {
+        "weighting": weighting, "components": components, "max_pair_corr": round(max_pair_corr, 3),
+        "ic_by_horizon": ic_by_horizon,
+        "composite_is_ic": round(composite_is_ic if np.isfinite(composite_is_ic) else 0.0, 4),
+        "composite_oos_ic": round(float(ic_main.iloc[split:].mean()), 4) if split < len(ic_main) else None,
+    }
     return scores, info, ranked_list
 
 
 # ------------------------------------------------------------- simulate
+
+
+def _select(candidates: pd.Series, top_n: int, buffer: int, held: set) -> pd.Series:
+    """Top-N selection with a hold buffer (banding): a name already held stays
+    as long as it ranks within top_n + buffer, and new names enter only into
+    the slots that frees up. Zero buffer = plain top-N. This is the classic
+    turnover reducer (cf. Qlib's TopkDropout, index-rebalancing bands)."""
+    ranked = candidates.sort_values(ascending=False)
+    if buffer <= 0 or not held:
+        return ranked.iloc[:top_n]
+    keep = [s for s in ranked.index[: top_n + buffer] if s in held][:top_n]
+    for s in ranked.index:
+        if len(keep) >= top_n:
+            break
+        if s not in keep:
+            keep.append(s)
+    return ranked.loc[keep]
 
 
 def _decide_weights(
@@ -208,6 +287,8 @@ def _decide_weights(
     trailing: pd.DataFrame,
     spec: dict,
     ann: int,
+    held: set | None = None,
+    ic: float | None = None,
 ) -> tuple[pd.Series, float]:
     """Target weights (indexed by symbol) on one rebalance date and the
     exposure multiplier applied by vol targeting."""
@@ -219,16 +300,17 @@ def _decide_weights(
     if len(candidates) < 2:
         return pd.Series(dtype=float), 1.0
     top_n = min(spec["top_n"], len(candidates))
-    selected = candidates.sort_values(ascending=False).iloc[:top_n]
+    selected = _select(candidates, top_n, spec["hold_buffer"], held or set())
     sub = trailing[selected.index]
-    w = portfolio.construct(scheme, selected.values, sub.values, spec["max_weight"])
+    w = portfolio.construct(scheme, selected.values, sub.values, spec["max_weight"], ic=ic)
     scale = 1.0
     if spec["target_vol_pct"]:
         scale = portfolio.vol_scale(w, sub.values, spec["target_vol_pct"] / 100.0, ann)
     return pd.Series(w * scale, index=selected.index), scale
 
 
-def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, scheme: str | None = None) -> dict:
+def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, scheme: str | None = None,
+             ic: float | None = None) -> dict:
     """Run the portfolio through history. Returns raw series for reporting."""
     scheme = scheme or spec["scheme"]
     market = spec["market"]
@@ -274,6 +356,9 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
             target = np.zeros(N)
             idx = [symbols.index(s) for s in pending.index]
             target[idx] = pending.values
+            # partial adjustment toward the aim portfolio (Gârleanu & Pedersen
+            # 2013): trade only a fraction of the distance when costs matter
+            target = held + spec["trade_rate"] * (target - held)
             turnover[i] = float(np.abs(target - held).sum()) / 2
             held = target
             pending = None
@@ -291,7 +376,8 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
         # decide the next weights on today's close
         if i in rebalance_days and i + 1 < T:
             trailing = ret.iloc[i - lookback + 1: i + 1]
-            w, scale = _decide_weights(scheme, scores.iloc[i], trailing, spec, ann)
+            current = {symbols[k] for k in np.flatnonzero(held > 1e-6)}
+            w, scale = _decide_weights(scheme, scores.iloc[i], trailing, spec, ann, held=current, ic=ic)
             if len(w):
                 pending = w
                 n_rebal += 1
@@ -301,9 +387,10 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
                     cap_hits += 1
 
     # latest decision (for target weights): newest complete row with a full cross-section
+    current = {symbols[k] for k in np.flatnonzero(held > 1e-6)}
     for i in range(T - 1, max(first, T - 8) - 1, -1):
         trailing = ret.iloc[i - lookback + 1: i + 1]
-        w, scale = _decide_weights(scheme, scores.iloc[i], trailing, spec, ann)
+        w, scale = _decide_weights(scheme, scores.iloc[i], trailing, spec, ann, held=current, ic=ic)
         if len(w) >= min(spec["top_n"], 2):
             last_target = (close.index[i], w, scale)
             break
@@ -318,6 +405,7 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
         "scheme": scheme,
         "ann": ann,
         "net": net_s,
+        "gross": pd.Series(gross[first:], index=index),
         "bench": bench_s,
         "turnover": pd.Series(turnover[first:], index=index),
         "exposure": pd.Series(exposure[first:], index=index),
@@ -342,12 +430,22 @@ def _curve(series: pd.Series, digits: int = 2) -> list[dict]:
     return [{"time": _epoch(ts), "value": round(float(v), digits)} for ts, v in series.items()]
 
 
+def _r(x, digits: int = 2):
+    return None if x is None or not np.isfinite(x) else round(float(x), digits)
+
+
+def _daily_sharpe(sim: dict) -> float | None:
+    sd = float(sim["net"].std(ddof=1))
+    return float(sim["net"].mean() / sd) if sd > 1e-12 else None
+
+
 def _summary(sim: dict) -> dict:
     stats = portfolio.period_stats(sim["net"], sim["bench"], sim["ann"])
     return {
         "scheme": sim["scheme"],
         "total_return_pct": stats["total_return_pct"],
         "sharpe": stats["sharpe"],
+        "psr": _r(portfolio.probabilistic_sharpe(sim["net"]), 3),
         "max_drawdown_pct": stats["max_drawdown_pct"],
         "ann_vol_pct": stats["ann_vol_pct"],
         "avg_turnover_pct": round(float(sim["turnover"].mean() * 100), 2),
@@ -355,7 +453,7 @@ def _summary(sim: dict) -> dict:
 
 
 def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
-           alternatives: list[dict], universe: dict) -> dict:
+           alternatives: list[dict], universe: dict, trial_sharpes: list[float] | None = None) -> dict:
     net, bench, ann = sim["net"], sim["bench"], sim["ann"]
     equity = (1 + net).cumprod() * 100_000
     bench_eq = (1 + bench).cumprod() * 100_000
@@ -406,7 +504,22 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
         }
 
     avg_turnover = float(sim["turnover"].mean())
+    total_turnover = float(sim["turnover"].sum())
+    gross_total = float((1 + sim["gross"]).prod() - 1)
+    bench_total = float((1 + bench).prod() - 1)
+    breakeven = (gross_total - bench_total) / total_turnover * 10_000 if total_turnover > 1e-9 else None
+
+    psr = portfolio.probabilistic_sharpe(net)
+    holdout_psr = portfolio.probabilistic_sharpe(net.iloc[split:])
+    dsr = portfolio.deflated_sharpe(net, trial_sharpes or [])
+    capture = portfolio.capture_ratios(net, bench)
+    rolling = pd.concat([net, bench], axis=1).dropna()
+    rb = rolling.iloc[:, 0].rolling(60).cov(rolling.iloc[:, 1]) / rolling.iloc[:, 1].rolling(60).var()
+    rolling_beta = rb.dropna()
+
     warnings: list[str] = []
+    if psr is not None and psr < 0.9:
+        warnings.append("low_psr")
     if (is_stats["sharpe"] is not None and oos_stats["sharpe"] is not None
             and oos_stats["sharpe"] < is_stats["sharpe"] - 0.5 and oos_stats["excess_pct"] < 0):
         warnings.append("holdout_sharpe_collapsed")
@@ -430,6 +543,9 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
             "avg_effective_n": round(sim["effective_n"], 2),
             "avg_exposure_pct": round(float(sim["exposure"].mean()) * 100, 1),
             "avg_turnover_pct": round(avg_turnover * 100, 2),
+            "annual_turnover_x": round(avg_turnover * ann, 2),
+            "breakeven_cost_bps": _r(breakeven, 1),
+            "hold_buffer": spec["hold_buffer"], "trade_rate": spec["trade_rate"],
             "rebalances": int(sim["rebalances"]),
         },
         "backtest": {
@@ -441,7 +557,13 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
                 "benchmark": {k: bench_stats[k] for k in ("total_return_pct", "cagr_pct", "ann_vol_pct", "sharpe", "max_drawdown_pct")},
             },
             "in_sample": window(is_stats, net.iloc[:split]),
-            "holdout": window(oos_stats, net.iloc[split:]),
+            "holdout": {**window(oos_stats, net.iloc[split:]), "psr": _r(holdout_psr, 3)},
+            "overfitting": {
+                "psr": _r(psr, 3),
+                "dsr": _r(dsr["dsr"], 3),
+                "trials": dsr["trials"],
+                "expected_max_sharpe_ann": _r(dsr["expected_max_sharpe"] * np.sqrt(ann) if dsr["expected_max_sharpe"] is not None else None, 2),
+            },
             "equity_curve": _curve(equity),
             "benchmark_curve": _curve(bench_eq),
             "drawdown_curve": _curve(dd, 3),
@@ -455,6 +577,10 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
             "detractors": detractors,
             "concentration": {"avg_effective_n": round(sim["effective_n"], 2), "cap_binding_pct": sim["cap_binding_pct"]},
             "correlation_to_benchmark": rel["correlation"],
+            "capture": capture,
+            "cvar_95_pct": portfolio.cvar(net, 0.95),
+            "bench_cvar_95_pct": portfolio.cvar(bench, 0.95),
+            "rolling_beta": _curve(rolling_beta, 3),
         },
         "alternatives": alternatives,
         "target_weights": target,
@@ -477,13 +603,16 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
     }
 
     scores, signal, ranked_list = build_signal(spec, panel)
-    sim = simulate(scores, panel, spec)
+    ic = signal["composite_is_ic"]
+    sim = simulate(scores, panel, spec, ic=ic)
+    trials: list[float] = []  # every configuration evaluated → the DSR's N
 
     # each factor alone through the same portfolio machinery
     for comp, ranks in zip(signal["components"], ranked_list):
         try:
-            solo = simulate(ranks if comp["weight"] >= 0 else -ranks, panel, spec)
+            solo = simulate(ranks if comp["is_ic"] >= 0 else -ranks, panel, spec, ic=abs(comp["is_ic"]))
             comp["standalone_sharpe"] = portfolio.period_stats(solo["net"], solo["bench"], sim["ann"])["sharpe"]
+            trials.append(_daily_sharpe(solo))
         except factor_dsl.FactorError:
             comp["standalone_sharpe"] = None
 
@@ -494,19 +623,22 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
                 alternatives.append(_summary(sim))
                 continue
             try:
-                alternatives.append(_summary(simulate(scores, panel, spec, scheme=scheme)))
+                alt = simulate(scores, panel, spec, scheme=scheme, ic=ic)
+                alternatives.append(_summary(alt))
+                trials.append(_daily_sharpe(alt))
             except factor_dsl.FactorError:
                 continue
+    trials.append(_daily_sharpe(sim))
 
-    return report(spec, panel, signal, sim, alternatives, universe)
+    return report(spec, panel, signal, sim, alternatives, universe, [t for t in trials if t is not None])
 
 
 def current_holdings_blocking(raw_spec: dict) -> dict:
     """Paper-trading position: the latest target weights of a deployed spec."""
     spec = normalize_spec(raw_spec)
     panel = _load_panel_blocking(spec["market"])
-    scores, _, _ = build_signal(spec, panel)
-    sim = simulate(scores, panel, spec)
+    scores, signal, _ = build_signal(spec, panel)
+    sim = simulate(scores, panel, spec, ic=signal["composite_is_ic"])
     if sim["last_target"] is None:
         return {"state": "unknown"}
     ts, w, _ = sim["last_target"]
