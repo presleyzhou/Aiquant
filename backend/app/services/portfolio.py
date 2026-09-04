@@ -1,0 +1,303 @@
+"""Portfolio construction and risk analytics — the layer between a
+cross-sectional signal and money.
+
+Everything here is deterministic numpy/pandas with no external optimizer:
+the universe is at most a few dozen names, so projected gradient descent on
+a shrunk covariance is plenty for minimum variance, and the classic
+fixed-point iteration converges for risk parity. All schemes are long-only
+with an optional per-name cap; when the cap makes full investment infeasible
+(cap * n < 1) the remainder is held as cash, never silently violated.
+
+Weighting schemes (`SCHEMES`):
+  equal        — 1/n across the selected names
+  score        — rank-linear in the signal (best name gets the most)
+  inverse_vol  — proportional to 1 / trailing volatility
+  min_variance — argmin w'Σw  s.t. sum(w)=1, 0 <= w <= cap
+  risk_parity  — every name contributes the same share of portfolio variance
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+SCHEMES: tuple[str, ...] = ("equal", "score", "inverse_vol", "min_variance", "risk_parity")
+
+COV_SHRINKAGE = 0.3        # blend toward the diagonal: stabilises 60-day covariances
+_EPS = 1e-12
+
+
+# ----------------------------------------------------------------- helpers
+
+
+def shrink_cov(returns: np.ndarray) -> np.ndarray:
+    """Sample covariance shrunk toward its own diagonal (Ledoit-Wolf spirit,
+    fixed intensity). `returns` is (window, n); NaNs are treated as zero
+    returns, which only ever *under*states risk for illiquid names."""
+    r = np.nan_to_num(np.asarray(returns, dtype=float))
+    if r.shape[0] < 2:
+        return np.eye(r.shape[1]) * 1e-4
+    sample = np.cov(r, rowvar=False, ddof=1)
+    sample = np.atleast_2d(sample)
+    diag = np.diag(np.diag(sample))
+    cov = (1 - COV_SHRINKAGE) * sample + COV_SHRINKAGE * diag
+    # a floor keeps zero-variance columns from producing singular matrices
+    return cov + np.eye(cov.shape[0]) * 1e-8
+
+
+def apply_cap(weights: np.ndarray, cap: float) -> np.ndarray:
+    """Water-fill: clip at `cap`, push the excess onto uncapped names
+    proportionally, repeat. If every name hits the cap the sum falls short
+    of 1 — the shortfall is cash."""
+    w = np.clip(np.asarray(weights, dtype=float), 0, None)
+    total = w.sum()
+    if total <= _EPS:
+        return np.zeros_like(w)
+    w = w / total
+    n = len(w)
+    if cap * n < 1 - 1e-9:
+        return np.full(n, cap)
+    for _ in range(n + 1):
+        over = w > cap + 1e-12
+        if not over.any():
+            break
+        excess = (w[over] - cap).sum()
+        w[over] = cap
+        free = ~over
+        free_total = w[free].sum()
+        if free_total <= _EPS:
+            break
+        w[free] += excess * w[free] / free_total
+    return np.minimum(w, cap)
+
+
+def project_capped_simplex(v: np.ndarray, cap: float) -> np.ndarray:
+    """Euclidean projection onto {w : sum w = 1, 0 <= w <= cap} by bisection
+    on the shift tau (feasible iff cap * n >= 1)."""
+    v = np.asarray(v, dtype=float)
+    n = len(v)
+    if cap * n < 1 - 1e-9:
+        return np.full(n, cap)
+    lo, hi = v.min() - 1.0, v.max()
+    for _ in range(100):
+        tau = (lo + hi) / 2
+        s = np.clip(v - tau, 0, cap).sum()
+        if s > 1:
+            lo = tau
+        else:
+            hi = tau
+    return np.clip(v - (lo + hi) / 2, 0, cap)
+
+
+# ----------------------------------------------------------------- schemes
+
+
+def equal_weights(n: int, cap: float) -> np.ndarray:
+    return apply_cap(np.ones(n), cap)
+
+
+def score_weights(scores: np.ndarray, cap: float) -> np.ndarray:
+    """Rank-linear: the best name gets weight ∝ n, the worst ∝ 1."""
+    order = np.argsort(np.argsort(np.asarray(scores, dtype=float)))  # 0 = worst
+    return apply_cap(order + 1.0, cap)
+
+
+def inverse_vol_weights(returns: np.ndarray, cap: float) -> np.ndarray:
+    r = np.asarray(returns, dtype=float)
+    vol = np.nanstd(r, axis=0, ddof=1)
+    vol = np.where(np.isfinite(vol) & (vol > 1e-6), vol, np.nanmedian(vol) if np.isfinite(np.nanmedian(vol)) else 1.0)
+    return apply_cap(1.0 / vol, cap)
+
+
+def min_variance_weights(cov: np.ndarray, cap: float, iters: int = 400) -> np.ndarray:
+    """Projected gradient descent on w'Σw over the capped simplex."""
+    n = cov.shape[0]
+    w = project_capped_simplex(np.full(n, 1.0 / n), cap)
+    lipschitz = 2 * max(float(np.linalg.eigvalsh(cov).max()), 1e-10)
+    step = 1.0 / lipschitz
+    for _ in range(iters):
+        grad = 2 * cov @ w
+        nxt = project_capped_simplex(w - step * grad, cap)
+        if np.abs(nxt - w).max() < 1e-9:
+            w = nxt
+            break
+        w = nxt
+    return w
+
+
+def risk_parity_weights(cov: np.ndarray, cap: float, iters: int = 500) -> np.ndarray:
+    """Equal risk contribution via the fixed point w_i ∝ 1 / (Σw)_i, then
+    the cap is enforced by water-filling (an exact ERC under caps is a
+    constrained problem; the capped names simply contribute a bit more)."""
+    n = cov.shape[0]
+    w = np.full(n, 1.0 / n)
+    for _ in range(iters):
+        marginal = cov @ w
+        marginal = np.where(marginal > 1e-12, marginal, 1e-12)
+        nxt = 1.0 / marginal
+        nxt = nxt / nxt.sum()
+        nxt = 0.5 * w + 0.5 * nxt  # damping
+        if np.abs(nxt - w).max() < 1e-10:
+            w = nxt
+            break
+        w = nxt
+    return apply_cap(w, cap)
+
+
+def construct(
+    scheme: str,
+    scores: np.ndarray,
+    trailing_returns: np.ndarray,
+    cap: float,
+) -> np.ndarray:
+    """Weights for the already-selected names (columns of trailing_returns)."""
+    n = len(scores)
+    if n == 0:
+        return np.zeros(0)
+    if scheme == "equal":
+        return equal_weights(n, cap)
+    if scheme == "score":
+        return score_weights(scores, cap)
+    if scheme == "inverse_vol":
+        return inverse_vol_weights(trailing_returns, cap)
+    cov = shrink_cov(trailing_returns)
+    if scheme == "min_variance":
+        return min_variance_weights(cov, cap)
+    if scheme == "risk_parity":
+        return risk_parity_weights(cov, cap)
+    raise ValueError(f"unknown weighting scheme: {scheme}")
+
+
+def vol_scale(weights: np.ndarray, trailing_returns: np.ndarray, target_vol: float, ann: int) -> float:
+    """Exposure multiplier in (0, 1] that brings trailing realised portfolio
+    vol down to `target_vol` (annualised, decimal). Never levers up."""
+    if target_vol is None or target_vol <= 0 or weights.sum() <= _EPS:
+        return 1.0
+    port = np.nan_to_num(trailing_returns) @ weights
+    realised = float(np.std(port, ddof=1)) * np.sqrt(ann) if len(port) > 2 else 0.0
+    if realised <= 1e-9:
+        return 1.0
+    return float(min(1.0, target_vol / realised))
+
+
+# -------------------------------------------------------------- analytics
+
+
+def drawdown_episodes(equity: pd.Series, top: int = 5) -> list[dict]:
+    """Peak → trough → recovery episodes, worst first."""
+    eq = equity.astype(float)
+    peak = eq.cummax()
+    dd = eq / peak - 1
+    episodes: list[dict] = []
+    in_dd = False
+    start = trough = None
+    trough_val = 0.0
+    last_peak = eq.index[0]
+    for ts, val in dd.items():
+        if not in_dd and val >= 0:
+            last_peak = ts  # the most recent high before a fall begins
+        if val < 0 and not in_dd:
+            in_dd, start, trough, trough_val = True, last_peak, ts, val
+        elif in_dd:
+            if val < trough_val:
+                trough, trough_val = ts, val
+            if val >= 0:
+                episodes.append({"peak": start, "trough": trough, "recovery": ts, "depth": trough_val})
+                in_dd = False
+    if in_dd:
+        episodes.append({"peak": start, "trough": trough, "recovery": None, "depth": trough_val})
+    # ignore sub-0.5% wobbles — they are noise, not episodes
+    episodes = [e for e in episodes if e["depth"] <= -0.005]
+    episodes.sort(key=lambda e: e["depth"])
+    out = []
+    for e in episodes[:top]:
+        end = e["recovery"] if e["recovery"] is not None else eq.index[-1]
+        out.append({
+            "peak": str(pd.Timestamp(e["peak"]).date()),
+            "trough": str(pd.Timestamp(e["trough"]).date()),
+            "recovery": str(pd.Timestamp(e["recovery"]).date()) if e["recovery"] is not None else None,
+            "depth_pct": round(float(e["depth"]) * 100, 2),
+            "days": int((pd.Timestamp(end) - pd.Timestamp(e["peak"])).days),
+        })
+    return out
+
+
+def period_stats(net: pd.Series, bench: pd.Series, ann: int) -> dict:
+    """Return / risk figures for one window. Empty-safe."""
+    if len(net) < 2:
+        return {
+            "total_return_pct": 0.0, "cagr_pct": None, "ann_vol_pct": None, "sharpe": None,
+            "sortino": None, "calmar": None, "max_drawdown_pct": 0.0, "win_rate_pct": None,
+            "excess_pct": 0.0,
+        }
+    eq = (1 + net).cumprod()
+    beq = (1 + bench).cumprod()
+    total = float(eq.iloc[-1] - 1)
+    years = len(net) / ann
+    vol = float(net.std(ddof=1))
+    downside = float(net[net < 0].std(ddof=1)) if (net < 0).sum() > 1 else 0.0
+    dd = float((eq / eq.cummax() - 1).min())
+    cagr = float(eq.iloc[-1] ** (1 / years) - 1) if years > 0.25 else None
+    sharpe = float(net.mean() / vol * np.sqrt(ann)) if vol > 1e-12 else None
+    sortino = float(net.mean() / downside * np.sqrt(ann)) if downside > 1e-12 else None
+    calmar = float(cagr / abs(dd)) if cagr is not None and dd < -1e-9 else None
+    return {
+        "total_return_pct": round(total * 100, 2),
+        "cagr_pct": round(cagr * 100, 2) if cagr is not None else None,
+        "ann_vol_pct": round(float(vol * np.sqrt(ann) * 100), 2),
+        "sharpe": round(sharpe, 2) if sharpe is not None else None,
+        "sortino": round(sortino, 2) if sortino is not None else None,
+        "calmar": round(calmar, 2) if calmar is not None else None,
+        "max_drawdown_pct": round(dd * 100, 2),
+        "win_rate_pct": round(float((net > 0).mean() * 100), 1),
+        "excess_pct": round((total - float(beq.iloc[-1] - 1)) * 100, 2),
+    }
+
+
+def relative_stats(net: pd.Series, bench: pd.Series, ann: int) -> dict:
+    """Beta, tracking error, information ratio and correlation vs benchmark."""
+    both = pd.concat([net, bench], axis=1).dropna()
+    if len(both) < 20:
+        return {"beta": None, "tracking_error_pct": None, "information_ratio": None, "correlation": None}
+    p, b = both.iloc[:, 0], both.iloc[:, 1]
+    bvar = float(b.var(ddof=1))
+    beta = float(p.cov(b) / bvar) if bvar > 1e-12 else None
+    active = p - b
+    te = float(active.std(ddof=1)) * np.sqrt(ann)
+    ir = float(active.mean() * ann / te) if te > 1e-12 else None
+    corr = float(p.corr(b))
+    return {
+        "beta": round(beta, 2) if beta is not None else None,
+        "tracking_error_pct": round(float(te * 100), 2),
+        "information_ratio": round(ir, 2) if ir is not None else None,
+        "correlation": round(corr, 2) if np.isfinite(corr) else None,
+    }
+
+
+def calendar_returns(net: pd.Series, bench: pd.Series) -> tuple[list[dict], list[dict]]:
+    """Monthly and yearly compounded returns, portfolio vs benchmark."""
+    frame = pd.DataFrame({"p": net, "b": bench}).dropna(how="all").fillna(0.0)
+    if frame.empty:
+        return [], []
+    monthly = (1 + frame).groupby([frame.index.year, frame.index.month]).prod() - 1
+    yearly = (1 + frame).groupby(frame.index.year).prod() - 1
+    months = [
+        {"year": int(y), "month": int(m), "ret_pct": round(float(row["p"]) * 100, 2),
+         "bench_pct": round(float(row["b"]) * 100, 2)}
+        for (y, m), row in monthly.iterrows()
+    ]
+    years = [
+        {"year": int(y), "ret_pct": round(float(row["p"]) * 100, 2), "bench_pct": round(float(row["b"]) * 100, 2)}
+        for y, row in yearly.iterrows()
+    ]
+    return months, years
+
+
+def effective_n(weights: np.ndarray) -> float:
+    """1 / Herfindahl of the invested part — how many names you *really* hold."""
+    w = np.asarray(weights, dtype=float)
+    total = w.sum()
+    if total <= _EPS:
+        return 0.0
+    w = w / total
+    return float(1.0 / np.sum(w * w))

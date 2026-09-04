@@ -16,6 +16,7 @@ mining — every number recomputed from real data, ugly results shown as-is.
 | **Backtesting** | Next-bar-open fills, commission + slippage both sides, buy-and-hold benchmark always shown; SMA/EMA cross, RSI reversion, Kronos-signal strategies; walk-forward validation |
 | **Kronos forecasting** | Open-source K-line foundation model ([Kronos](https://github.com/shiyu-coder/Kronos), MIT) with per-market presets (business-day vs 24×7 calendars), hourly crypto mode, and a rolling **honest accuracy panel** that scores past forecasts against the always-bullish baseline |
 | **AI Factor Mining** | Chain-of-Alpha-style loop: Claude proposes factor expressions in a safe DSL (hand-rolled parser, never `eval`), a deterministic evaluator scores daily rank IC with an untouched holdout, and directive feedback steers each next round; cross-session memory, decay monitoring, cross-market transfer tests, multi-factor composites |
+| **End-to-End Pipeline** | Universe → multi-factor signal (in-sample-only IC weighting) → portfolio construction (equal / score / inverse-vol / minimum-variance / risk-parity, long-only with per-name caps and optional vol targeting) → cost-aware backtest with price drift between rebalances, in-sample vs holdout split, monthly heatmap, scheme comparison → risk & attribution (worst drawdowns, contributors, effective N, beta/TE/IR, warnings) → target weights and one-click deploy to paper trading. Pure numpy/pandas, no external optimizer |
 | **Paper trading** | Deploy any strategy/factor at a real date; NAV replays the rule from that day — everything after is out-of-sample by construction. Each card shows current position, a backtest-vs-live comparison with an edge-decay verdict, drawdown alerts, notes and CSV export; an equal-weight overview combines all deployments |
 | **AI Analyst & Strategy Lab** | Claude with real tool access (quotes, indicators, backtests) and honesty rules: every cited number must come from a tool result |
 | **Marketplace** | Two-sided: anyone can list strategies / factors (free or paid) with crypto-wallet or Stripe Connect payouts; buyers pay by card / Apple Pay (Stripe Checkout) or crypto (Coinbase Commerce). Prepaid site wallet: top up by card or crypto, buy from balance, sellers are credited net of fee and can request withdrawals. Server-signed entitlements gate paid payloads; Upstash/Vercel KV stores listings and the order ledger; clearly-labeled demo mode without keys |
@@ -26,6 +27,7 @@ mining — every number recomputed from real data, ugly results shown as-is.
 - Factor acceptance requires same-sign holdout confirmation; the holdout never enters LLM feedback; an empty factor zoo is a valid outcome.
 - Kronos gets its own report card: rolling historical forecasts scored against what actually happened.
 - Paper deployments freeze configs at real dates — forward honesty, not curve-fit hindsight.
+- Pipeline weights decided on day t earn returns from day t+1; covariances use trailing windows only; vol targeting only ever de-levers; the trailing 20% is reported as a separate holdout.
 
 ## Quick start
 
@@ -44,7 +46,7 @@ Everything runs without keys (AI panels show a clear disabled notice). Optional 
 ## Tests
 
 ```bash
-cd backend && python -m pytest -q     # 98 tests, no network
+cd backend && python -m pytest -q     # 140 tests, no network
 cd frontend && npx tsc -b && npm run e2e  # hermetic Playwright smoke
 ```
 
