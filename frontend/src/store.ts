@@ -287,6 +287,7 @@ export interface PaperDeployment {
   name: string;
   config: Record<string, unknown>;
   startedAt: string; // YYYY-MM-DD
+  note?: string;
 }
 
 export function savedPaper(): PaperDeployment[] {
@@ -352,4 +353,10 @@ export function importAllData(text: string): number {
   } catch {
     return -1;
   }
+}
+
+export function updatePaperNote(id: string, note: string): PaperDeployment[] {
+  const next = savedPaper().map((p) => (p.id === id ? { ...p, note: note.slice(0, 120) } : p));
+  localStorage.setItem(PAPER_KEY, JSON.stringify(next));
+  return next;
 }

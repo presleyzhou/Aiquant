@@ -3,15 +3,19 @@
 A deployment freezes a config at a real calendar date. Tracking replays the
 rule over history, then slices and renormalizes the equity curve from the
 deployment date — everything after that date is out-of-sample by
-construction, because the date is in the actual past. Backtests answer
-"was it good?"; this answers "has it been good SINCE you clicked deploy?".
+construction. The response also carries the SAME rule's pre-deployment
+(backtest-period) stats, so the page can show the one number every backtest
+tool hides: how much the edge decayed once the future started.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timezone
+import math
+from datetime import UTC, date, datetime
+from itertools import pairwise
 
+import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -21,7 +25,11 @@ from app.api.kronos import signal_points
 from app.services import backtest as bt
 from app.services import factor_dsl
 from app.services.datasource import market_data
-from app.services.factor_mine import portfolio_backtest_blocking
+from app.services.factor_mine import (
+    UNIVERSES,
+    _load_panel_blocking,
+    portfolio_backtest_blocking,
+)
 
 router = APIRouter(prefix="/api/paper", tags=["paper"])
 
@@ -32,45 +40,108 @@ class TrackRequest(BaseModel):
     config: dict = Field(default_factory=dict)
 
 
-def _slice_and_rebase(
-    equity: list[dict], benchmark: list[dict], start_epoch: int
-) -> tuple[list[dict], list[dict]]:
-    """Keep only bars from the deployment date on, rebased to 100k at start."""
-
-    def rebase(curve: list[dict]) -> list[dict]:
-        tail = [p for p in curve if p["time"] >= start_epoch]
-        if not tail:
-            return []
-        base = tail[0]["value"] or 1.0
-        return [{"time": p["time"], "value": round(p["value"] / base * 100_000, 2)} for p in tail]
-
-    return rebase(equity), rebase(benchmark)
+# ------------------------------------------------------------- helpers
 
 
-def _stats(equity: list[dict], benchmark: list[dict]) -> dict:
-    ret = (equity[-1]["value"] / equity[0]["value"] - 1) * 100 if len(equity) > 1 else 0.0
+def _rebase(curve: list[dict], lo: int | None, hi: int | None) -> list[dict]:
+    """Slice [lo, hi) by epoch and rebase to 100k at the first kept bar."""
+    part = [p for p in curve if (lo is None or p["time"] >= lo) and (hi is None or p["time"] < hi)]
+    if not part:
+        return []
+    base = part[0]["value"] or 1.0
+    return [{"time": p["time"], "value": round(p["value"] / base * 100_000, 2)} for p in part]
+
+
+def _stats(equity: list[dict], benchmark: list[dict], ann: int) -> dict:
+    """Return/risk figures for a rebased window. Empty-safe."""
+    if len(equity) < 2:
+        return {
+            "return_pct": 0.0, "bench_return_pct": 0.0, "excess_pct": 0.0,
+            "max_drawdown_pct": 0.0, "current_drawdown_pct": 0.0, "sharpe": None,
+            "ann_vol_pct": None, "win_rate_pct": None, "bars": len(equity),
+            "last_7d_pct": None, "last_30d_pct": None,
+        }
+    values = np.array([p["value"] for p in equity], dtype=float)
+    rets = np.diff(values) / values[:-1]
+    ret = (values[-1] / values[0] - 1) * 100
     bench = (benchmark[-1]["value"] / benchmark[0]["value"] - 1) * 100 if len(benchmark) > 1 else 0.0
-    peak, max_dd = 0.0, 0.0
-    for p in equity:
-        peak = max(peak, p["value"])
-        if peak:
-            max_dd = min(max_dd, (p["value"] / peak - 1) * 100)
+    peak = np.maximum.accumulate(values)
+    dd = values / peak - 1
+    vol = float(rets.std(ddof=1)) if len(rets) > 1 else 0.0
+    sharpe = float(rets.mean() / vol * math.sqrt(ann)) if vol > 1e-12 else None
+
+    def window(n: int) -> float | None:
+        if len(values) <= n:
+            return None
+        return round((values[-1] / values[-1 - n] - 1) * 100, 2)
+
     return {
-        "return_pct": round(ret, 2),
-        "bench_return_pct": round(bench, 2),
-        "excess_pct": round(ret - bench, 2),
-        "max_drawdown_pct": round(max_dd, 2),
+        "return_pct": round(float(ret), 2),
+        "bench_return_pct": round(float(bench), 2),
+        "excess_pct": round(float(ret - bench), 2),
+        "max_drawdown_pct": round(float(dd.min() * 100), 2),
+        "current_drawdown_pct": round(float(dd[-1] * 100), 2),
+        "sharpe": round(sharpe, 2) if sharpe is not None else None,
+        "ann_vol_pct": round(vol * math.sqrt(ann) * 100, 2) if vol else None,
+        "win_rate_pct": round(float((rets > 0).mean() * 100), 1) if len(rets) else None,
         "bars": len(equity),
+        "last_7d_pct": window(7),
+        "last_30d_pct": window(30),
     }
+
+
+def _decay(pre: dict, post: dict) -> dict:
+    """Did the edge survive contact with the future? Compared on Sharpe and
+    excess return, with an explicit 'not enough data yet' state."""
+    if pre["bars"] < 60 or post["bars"] < 20 or pre["sharpe"] is None or post["sharpe"] is None:
+        return {"verdict": "insufficient", "sharpe_delta": None, "excess_delta": None}
+    sd = round(post["sharpe"] - pre["sharpe"], 2)
+    ed = round(post["excess_pct"] - pre["excess_pct"], 2)
+    if post["sharpe"] < pre["sharpe"] - 0.5 and post["excess_pct"] < 0:
+        verdict = "degraded"
+    elif post["sharpe"] > pre["sharpe"] + 0.3:
+        verdict = "improved"
+    else:
+        verdict = "holding"
+    return {"verdict": verdict, "sharpe_delta": sd, "excess_delta": ed}
+
+
+def _daily_returns(equity: list[dict], n: int = 60) -> list[dict]:
+    out = []
+    for prev, cur in pairwise(equity):
+        if prev["value"]:
+            out.append({"time": cur["time"], "ret_pct": round((cur["value"] / prev["value"] - 1) * 100, 3)})
+    return out[-n:]
+
+
+def _factor_holdings(expression: str, market: str, top_n: int, invert: bool) -> dict:
+    panel = _load_panel_blocking(market if market in UNIVERSES else "us")
+    values, _ = factor_dsl.compute(expression, panel)
+    if invert:
+        values = -values
+    for i in range(1, min(6, len(values)) + 1):
+        row = values.iloc[-i].dropna().sort_values(ascending=False)
+        if len(row) >= top_n:
+            return {
+                "state": "holdings",
+                "symbols": [str(sym) for sym in row.index[:top_n]],
+                "since": str(values.index[-i].date()),
+            }
+    return {"state": "unknown"}
+
+
+# ------------------------------------------------------------ endpoint
 
 
 @router.post("/track")
 async def track(req: TrackRequest) -> dict:
     start_epoch = int(datetime(
-        req.started_at.year, req.started_at.month, req.started_at.day, tzinfo=timezone.utc
+        req.started_at.year, req.started_at.month, req.started_at.day, tzinfo=UTC
     ).timestamp())
-    if req.started_at > date.today():
+    if req.started_at > date.today():  # noqa: DTZ011
         raise HTTPException(status_code=400, detail="deployment date is in the future")
+
+    position: dict = {"state": "unknown"}
 
     if req.kind == "strategy":
         symbol = str(req.config.get("symbol", "")).upper().strip()
@@ -98,41 +169,71 @@ async def track(req: TrackRequest) -> dict:
             result = bt.run(df, cfg, want_long=want_long)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        equity, benchmark = _slice_and_rebase(
-            result.equity_curve, result.benchmark_curve, start_epoch
-        )
+        full_eq, full_bench = result.equity_curve, result.benchmark_curve
+        ann = 252
+        # current stance = last signal (the engine acts on it next bar)
+        try:
+            signals = want_long if want_long is not None else bt._signals(df, cfg)
+            state = "long" if bool(signals.iloc[-1]) else "flat"
+            # find how long the current stance has held
+            flipped = signals != signals.iloc[-1]
+            since_idx = flipped[::-1].idxmax() if flipped.any() else signals.index[0]
+            position = {"state": state, "since": str(pd.Timestamp(since_idx).date()), "symbols": [symbol]}
+        except Exception:  # noqa: BLE001 - position is decorative; never fail tracking
+            position = {"state": "unknown"}
+        trades_live = sum(1 for t in result.trades if (t.get("entry_time") or 0) >= start_epoch)
 
     else:  # factor
         expression = str(req.config.get("expression", ""))
+        market = str(req.config.get("market", "us"))
+        top_n = int(req.config.get("top_n", 5))
+        invert = bool(req.config.get("invert", False))
         try:
             result = await asyncio.to_thread(
                 portfolio_backtest_blocking,
-                expression,
-                str(req.config.get("market", "us")),
-                int(req.config.get("top_n", 5)),
-                int(req.config.get("rebalance", 10)),
-                bool(req.config.get("invert", False)),
+                expression, market, top_n, int(req.config.get("rebalance", 10)), invert,
             )
         except factor_dsl.FactorError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        equity, benchmark = _slice_and_rebase(
-            result["equity_curve"], result["benchmark_curve"], start_epoch
-        )
+        full_eq, full_bench = result["equity_curve"], result["benchmark_curve"]
+        ann = 252 if market == "us" else 365
+        trades_live = None
+        # current holdings: top-N of the factor on the latest COMPLETE bar
+        # (the newest row is often partial — a few symbols not yet printed).
+        try:
+            position = await asyncio.to_thread(_factor_holdings, expression, market, top_n, invert)
+        except Exception:  # noqa: BLE001 - position is decorative; never fail tracking
+            position = {"state": "unknown"}
 
-    if len(equity) < 1:
+    post_eq = _rebase(full_eq, start_epoch, None)
+    post_bench = _rebase(full_bench, start_epoch, None)
+    pre_eq = _rebase(full_eq, None, start_epoch)
+    pre_bench = _rebase(full_bench, None, start_epoch)
+    if len(post_eq) < 1:
         raise HTTPException(
             status_code=400, detail="no bars since the deployment date yet — check back tomorrow"
         )
 
-    as_of = pd.Timestamp(equity[-1]["time"], unit="s").date()
+    post = _stats(post_eq, post_bench, ann)
+    pre = _stats(pre_eq, pre_bench, ann)
+    if pre_eq:
+        pre["from"] = str(pd.Timestamp(pre_eq[0]["time"], unit="s").date())
+        pre["to"] = str(pd.Timestamp(pre_eq[-1]["time"], unit="s").date())
+
+    as_of = pd.Timestamp(post_eq[-1]["time"], unit="s").date()
     return {
         "kind": req.kind,
         "started_at": str(req.started_at),
         "as_of": str(as_of),
-        "days_live": (date.today() - req.started_at).days,
-        "equity_curve": equity,
-        "benchmark_curve": benchmark,
-        "stats": _stats(equity, benchmark),
+        "days_live": (date.today() - req.started_at).days,  # noqa: DTZ011
+        "equity_curve": post_eq,
+        "benchmark_curve": post_bench,
+        "stats": post,
+        "pre": pre,
+        "decay": _decay(pre, post),
+        "position": position,
+        "trades_live": trades_live,
+        "daily_returns": _daily_returns(post_eq),
     }

@@ -503,3 +503,50 @@ def test_gp_objective_scoring_prefers_stable():
     stable = {"is_ic": 0.05, "is_icir": 0.6, "stability": 0.95, "complexity": 5}
     assert score(stable, "multi") > score(noisy, "multi")
     assert score(stable, "ic") == score(noisy, "ic")  # pure-IC objective ignores stability
+
+
+# ---------------------------------------------------------- paper tracking
+
+
+def test_paper_stats_and_decay_helpers():
+    from app.api.paper import _daily_returns, _decay, _rebase, _stats
+
+    curve = [{"time": 1000 + i * 86400, "value": 100.0 * (1.001 ** i)} for i in range(120)]
+    bench = [{"time": 1000 + i * 86400, "value": 100.0} for i in range(120)]
+    cut = 1000 + 80 * 86400
+    pre_eq, post_eq = _rebase(curve, None, cut), _rebase(curve, cut, None)
+    assert pre_eq[0]["value"] == 100_000 and post_eq[0]["value"] == 100_000
+    assert len(pre_eq) == 80 and len(post_eq) == 40
+    pre = _stats(pre_eq, _rebase(bench, None, cut), 252)
+    post = _stats(post_eq, _rebase(bench, cut, None), 252)
+    assert pre["return_pct"] > 0 and post["sharpe"] is not None
+    assert post["win_rate_pct"] == 100.0  # monotone curve
+    d = _decay(pre, post)
+    assert d["verdict"] in {"holding", "improved", "degraded"}
+    assert len(_daily_returns(post_eq)) == 39
+    # too little live data → explicit insufficient, never a verdict
+    assert _decay(pre, _stats(post_eq[:5], [], 252))["verdict"] == "insufficient"
+
+
+def test_paper_track_endpoint_returns_pre_post(monkeypatch):
+    import pandas as pd
+
+    from app.services import datasource
+
+    idx = pd.date_range("2024-01-01", periods=500, freq="B", tz="UTC")
+    close = pd.Series([100 * (1.0004 ** i) for i in range(500)], index=idx)
+    frame = pd.DataFrame({"Open": close, "High": close * 1.01, "Low": close * 0.99, "Close": close, "Volume": 1e6})
+
+    async def fake_history(symbol, period, interval="1d"):
+        return frame
+
+    monkeypatch.setattr(datasource.market_data, "history_frame", fake_history)
+    client = TestClient(app)
+    start = str(idx[400].date())
+    r = client.post("/api/paper/track", json={"kind": "strategy", "started_at": start,
+                                              "config": {"symbol": "TEST", "strategy": "buy_and_hold"}})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert {"stats", "pre", "decay", "position", "daily_returns"} <= set(body)
+    assert body["pre"]["bars"] > 300 and body["stats"]["bars"] == 100
+    assert body["position"]["state"] == "long"

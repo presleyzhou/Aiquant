@@ -74,6 +74,22 @@ export interface NewsSummary {
   cached: boolean;
 }
 
+export interface PaperStats {
+  return_pct: number;
+  bench_return_pct: number;
+  excess_pct: number;
+  max_drawdown_pct: number;
+  current_drawdown_pct: number;
+  sharpe: number | null;
+  ann_vol_pct: number | null;
+  win_rate_pct: number | null;
+  bars: number;
+  last_7d_pct: number | null;
+  last_30d_pct: number | null;
+  from?: string;
+  to?: string;
+}
+
 export interface PaperTrack {
   kind: string;
   started_at: string;
@@ -81,13 +97,12 @@ export interface PaperTrack {
   days_live: number;
   equity_curve: Point[];
   benchmark_curve: Point[];
-  stats: {
-    return_pct: number;
-    bench_return_pct: number;
-    excess_pct: number;
-    max_drawdown_pct: number;
-    bars: number;
-  };
+  stats: PaperStats;
+  pre: PaperStats;
+  decay: { verdict: "holding" | "degraded" | "improved" | "insufficient"; sharpe_delta: number | null; excess_delta: number | null };
+  position: { state: "long" | "flat" | "holdings" | "unknown"; symbols?: string[]; since?: string };
+  trades_live: number | null;
+  daily_returns: Array<{ time: number; ret_pct: number }>;
 }
 
 export interface FactorExplanation {

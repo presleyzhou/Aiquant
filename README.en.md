@@ -16,7 +16,7 @@ mining — every number recomputed from real data, ugly results shown as-is.
 | **Backtesting** | Next-bar-open fills, commission + slippage both sides, buy-and-hold benchmark always shown; SMA/EMA cross, RSI reversion, Kronos-signal strategies; walk-forward validation |
 | **Kronos forecasting** | Open-source K-line foundation model ([Kronos](https://github.com/shiyu-coder/Kronos), MIT) with per-market presets (business-day vs 24×7 calendars), hourly crypto mode, and a rolling **honest accuracy panel** that scores past forecasts against the always-bullish baseline |
 | **AI Factor Mining** | Chain-of-Alpha-style loop: Claude proposes factor expressions in a safe DSL (hand-rolled parser, never `eval`), a deterministic evaluator scores daily rank IC with an untouched holdout, and directive feedback steers each next round; cross-session memory, decay monitoring, cross-market transfer tests, multi-factor composites |
-| **Paper trading** | Deploy any strategy/factor at a real date; NAV replays the rule from that day — everything after is out-of-sample by construction |
+| **Paper trading** | Deploy any strategy/factor at a real date; NAV replays the rule from that day — everything after is out-of-sample by construction. Each card shows current position, a backtest-vs-live comparison with an edge-decay verdict, drawdown alerts, notes and CSV export; an equal-weight overview combines all deployments |
 | **AI Analyst & Strategy Lab** | Claude with real tool access (quotes, indicators, backtests) and honesty rules: every cited number must come from a tool result |
 | **Marketplace** | Strategies / AI skills / data connectors wired to the real engines; crypto checkout via Coinbase Commerce (clearly-labeled demo mode without keys) |
 

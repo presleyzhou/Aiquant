@@ -115,6 +115,19 @@ async function mockApi(page: Page) {
             discovered: [{ expression: "rank(delta(close, 5))", gen: 2, is_ic: 0.051, is_icir: 0.3, oos_ic: 0.04, complexity: 3, accepted: true, reasons: [], invert: false, total_return_pct: 33.3, cagr_pct: 12.1, sharpe: 1.23, max_drawdown_pct: -9.9, bench_return_pct: 20 }] },
         ].map((e) => JSON.stringify(e)).join("\n") + "\n",
       });
+    if (path === "/api/paper/track")
+      return json({
+        kind: "strategy", started_at: "2024-01-15", as_of: "2024-06-01", days_live: 138,
+        equity_curve: curve(), benchmark_curve: curve(120, 30),
+        stats: { return_pct: 8.2, bench_return_pct: 6.1, excess_pct: 2.1, max_drawdown_pct: -4.4, current_drawdown_pct: -1.2,
+          sharpe: 1.31, ann_vol_pct: 12.0, win_rate_pct: 54.0, bars: 96, last_7d_pct: 0.9, last_30d_pct: 2.4 },
+        pre: { return_pct: 40.0, bench_return_pct: 30.0, excess_pct: 10.0, max_drawdown_pct: -9.0, current_drawdown_pct: 0,
+          sharpe: 1.1, ann_vol_pct: 14.0, win_rate_pct: 53.0, bars: 500, last_7d_pct: null, last_30d_pct: null },
+        decay: { verdict: "holding", sharpe_delta: 0.21, excess_delta: -7.9 },
+        position: { state: "long", since: "2024-05-02", symbols: ["AAPL"] },
+        trades_live: 3,
+        daily_returns: Array.from({ length: 30 }, (_, i) => ({ time: 1_700_000_000 + i * 86_400, ret_pct: (i % 3) - 1 })),
+      });
     // anything unmocked answers empty-but-valid, never hangs
     return json({});
   });
@@ -215,4 +228,31 @@ test("genetic evolution engine streams a champion", async ({ page }) => {
   await expect(page.getByText("rank(delta(close, 5))").first()).toBeVisible();
   await expect(page.getByText("+33.30%").first()).toBeVisible(); // cumulative return
   await expect(page.getByText("✓ 入选").first()).toBeVisible();
+});
+
+test("paper page shows position, decay verdict and backtest-vs-live table", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      "aiquant.paper",
+      JSON.stringify([
+        { id: "p1", kind: "strategy", name: "AAPL · SMA", config: { symbol: "AAPL", strategy: "sma_cross" }, startedAt: "2024-01-15" },
+        { id: "p2", kind: "strategy", name: "MSFT · RSI", config: { symbol: "MSFT", strategy: "rsi_reversion" }, startedAt: "2024-02-01", note: "对照组" },
+      ]),
+    );
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "模拟持仓" }).click();
+  await expect(page.getByText("组合总览")).toBeVisible();
+  await expect(page.getByText("2 个部署", { exact: false })).toBeVisible();
+  await expect(page.getByText("多头 · 自 2024-05-02").first()).toBeVisible();
+  await expect(page.getByText("边际保持", { exact: false }).first()).toBeVisible();
+  await expect(page.getByText("回测期（上线前）").first()).toBeVisible();
+  await expect(page.getByText("对照组")).toBeVisible();
+  // remove needs a confirm click; a single click must NOT delete
+  const cards = page.locator(".pp-card");
+  await expect(cards).toHaveCount(2);
+  await cards.first().getByTitle("移除").click();
+  await expect(cards).toHaveCount(2);
+  await cards.first().getByTitle("移除").click();
+  await expect(cards).toHaveCount(1);
 });
