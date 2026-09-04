@@ -2,15 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type PipelineAlternative,
+  type PipelineAttribution,
   type PipelineConfig,
   type PipelineContributor,
   type PipelineFactorSpec,
+  type PipelineMemo,
+  type PipelineMemoRequest,
+  type PipelineQuantiles,
+  type PipelineRegime,
   type PipelineResult,
   type PipelineRunRequest,
   type PipelineSignalWeighting,
   type Point,
 } from "../api";
-import { useT, type MsgKey } from "../i18n";
+import { useT, type Lang, type MsgKey } from "../i18n";
 import { deployPaper, savedFactors, type SavedFactor } from "../store";
 import { EquityChart } from "./EquityChart";
 
@@ -19,6 +24,9 @@ interface Props {
 }
 
 const FORM_KEY = "aiquant.pipeline.form";
+/** V3: how many runs this browser has made, sent as `prior_trials` so the
+ * Deflated Sharpe penalises repeated tinkering honestly. */
+const TRIALS_KEY = "aiquant.pipeline.trials";
 const STAGE_COUNT = 6;
 
 /** Everything the user can set. Persisted as-is so a reload lands on the same
@@ -39,6 +47,8 @@ interface FormState {
   volLookback: number;
   holdBuffer: number;
   tradeRate: number;
+  /** V3: blend toward 1/N, 0–1. */
+  shrinkToEqual: number;
   compare: boolean;
 }
 
@@ -75,6 +85,7 @@ const FALLBACK_CONFIG: PipelineConfig = {
     horizon: 10,
     hold_buffer: 4,
     trade_rate: 1,
+    shrink_to_equal: 0,
   },
   limits: {
     factors: [1, 8],
@@ -86,8 +97,29 @@ const FALLBACK_CONFIG: PipelineConfig = {
     vol_lookback: [20, 120],
     hold_buffer: [0, 20],
     trade_rate: [0.1, 1],
+    shrink_to_equal: [0, 1],
+    prior_trials: [0, 10000],
   },
 };
+
+/** V3 group ids with a translation; anything else prints as its raw id. */
+const SECTOR_IDS = new Set([
+  "tech", "communication", "consumer", "staples", "financials", "health", "industrials", "energy",
+  "utilities_realestate", "layer1", "layer2", "payments", "defi_infra", "meme", "other",
+]);
+const REGIME_IDS = new Set(["low_vol", "mid_vol", "high_vol", "uptrend", "downtrend"]);
+/** Segment colours for the sector stack, cycled when a book spans more groups. */
+const STACK_COLORS = [
+  "rgba(59, 224, 255, 0.7)",
+  "rgba(167, 139, 250, 0.7)",
+  "rgba(255, 176, 0, 0.7)",
+  "rgba(61, 220, 132, 0.7)",
+  "rgba(255, 92, 108, 0.7)",
+  "rgba(59, 224, 255, 0.4)",
+  "rgba(167, 139, 250, 0.4)",
+  "rgba(255, 176, 0, 0.4)",
+  "rgba(61, 220, 132, 0.4)",
+];
 
 const WARNING_KEYS: Record<string, MsgKey> = {
   holdout_sharpe_collapsed: "pl.warn.holdout_sharpe_collapsed",
@@ -96,6 +128,7 @@ const WARNING_KEYS: Record<string, MsgKey> = {
   concentrated: "pl.warn.concentrated",
   low_coverage: "pl.warn.low_coverage",
   low_psr: "pl.warn.low_psr",
+  not_significant: "pl.warn.not_significant",
 };
 
 function formFromDefaults(d: PipelineConfig["defaults"], base?: Partial<FormState>): FormState {
@@ -116,7 +149,25 @@ function formFromDefaults(d: PipelineConfig["defaults"], base?: Partial<FormStat
     volLookback: d.vol_lookback,
     holdBuffer: d.hold_buffer ?? FALLBACK_CONFIG.defaults.hold_buffer ?? 4,
     tradeRate: d.trade_rate ?? FALLBACK_CONFIG.defaults.trade_rate ?? 1,
+    shrinkToEqual: d.shrink_to_equal ?? 0,
   };
+}
+
+function loadTrials(): number {
+  try {
+    const n = Number.parseInt(localStorage.getItem(TRIALS_KEY) ?? "0", 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveTrials(n: number) {
+  try {
+    localStorage.setItem(TRIALS_KEY, String(n));
+  } catch {
+    /* storage unavailable — the count still lives in state for this session */
+  }
 }
 
 function loadForm(): FormState | null {
@@ -173,7 +224,26 @@ export function PipelinePage({ hidden }: Props) {
   const [deployed, setDeployed] = useState(false);
   const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
   const [stage, setStage] = useState(1);
+  const [trials, setTrials] = useState<number>(loadTrials);
+  const [aiEnabled, setAiEnabled] = useState(false);
   const stageRefs = useRef<Array<HTMLElement | null>>([]);
+
+  // AI availability decides whether the committee-memo button is live; read
+  // once, the same way the analyst panel does.
+  useEffect(() => {
+    let alive = true;
+    api
+      .aiStatus()
+      .then((st) => {
+        if (alive) setAiEnabled(Boolean(st.enabled));
+      })
+      .catch(() => {
+        if (alive) setAiEnabled(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Config: real values replace the placeholder; a fresh browser also picks
   // up the server defaults, while a stored form keeps the user's choices.
@@ -327,6 +397,8 @@ export function PipelinePage({ hidden }: Props) {
     vol_lookback: clamp(Math.round(form.volLookback), limits.vol_lookback),
     hold_buffer: clamp(Math.round(form.holdBuffer), limits.hold_buffer),
     trade_rate: clamp(Math.round(form.tradeRate * 10) / 10, limits.trade_rate),
+    shrink_to_equal: clamp(Math.round(form.shrinkToEqual * 10) / 10, limits.shrink_to_equal),
+    prior_trials: clamp(Math.round(trials), limits.prior_trials),
     compare: form.compare,
   });
 
@@ -339,6 +411,11 @@ export function PipelinePage({ hidden }: Props) {
     try {
       const res = await api.pipelineRun(buildRequest());
       setResult(res);
+      setTrials((n) => {
+        const next = n + 1;
+        saveTrials(next);
+        return next;
+      });
       setStage(4);
       window.setTimeout(() => stageRefs.current[3]?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
     } catch (err) {
@@ -424,7 +501,13 @@ export function PipelinePage({ hidden }: Props) {
   const toggleAltSort = (key: AltKey) =>
     setAltSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: -1 }));
 
+  const sectorLabel = (id: string) => (SECTOR_IDS.has(id) ? t(`pl.sector.${id}` as MsgKey) : id);
+  /** V3 group of a held name: the run's own label first, else the config's sector map. */
+  const groupOf = (symbol: string, group?: string) => group ?? config.sectors?.[symbol];
+
   const bt = result?.backtest;
+  const hasSectors =
+    result !== null && result.target_weights.weights.some((w) => groupOf(w.symbol, w.group) !== undefined);
   const holdoutWarn =
     bt !== undefined && (bt.holdout.sharpe < bt.in_sample.sharpe - 0.5 || bt.holdout.excess_pct < 0);
 
@@ -618,6 +701,30 @@ export function PipelinePage({ hidden }: Props) {
                       <p className="dim pl-hint">{t("pl.sig.decayNote")}</p>
                     </>
                   )}
+                  {result.signal.quantiles && result.signal.quantiles.buckets.length > 0 && (
+                    <>
+                      <div className="pl-subhead">
+                        {t("pl.sig.quantiles")}
+                        <span className="chip" title={t("pl.sig.spreadTitle")} data-testid="pl-spread">
+                          {t("pl.sig.spread", {
+                            v: signed1Opt(result.signal.quantiles.spread_ann_pct),
+                            s: numOpt(result.signal.quantiles.spread_sharpe),
+                          })}
+                        </span>
+                        {result.signal.quantiles.monotonic !== null && (
+                          <span
+                            className={`pl-badge ${result.signal.quantiles.monotonic ? "pl-badge--ok" : "pl-badge--warn"}`}
+                            title={t("pl.sig.monoTitle")}
+                            data-testid="pl-monotonic"
+                          >
+                            {result.signal.quantiles.monotonic ? t("pl.sig.mono") : t("pl.sig.notMono")}
+                          </span>
+                        )}
+                      </div>
+                      <QuantileBars q={result.signal.quantiles} />
+                      <p className="dim pl-hint">{t("pl.sig.quantilesNote")}</p>
+                    </>
+                  )}
                   <div className="table-scroll">
                     <table className="lab-stats">
                       <thead>
@@ -745,6 +852,15 @@ export function PipelinePage({ hidden }: Props) {
                 hint={t("pl.pf.tradeRateHint")}
                 onChange={(v) => patch({ tradeRate: v })}
               />
+              <NumField
+                label={t("pl.pf.shrink")}
+                value={form.shrinkToEqual}
+                range={limits.shrink_to_equal}
+                step={0.1}
+                hint={t("pl.pf.shrinkHint")}
+                onChange={(v) => patch({ shrinkToEqual: v })}
+                testId="pl-shrink"
+              />
               <label className="field">
                 <span className="field__label">{t("pl.pf.compare")}</span>
                 <div className="pl-inline">
@@ -812,6 +928,7 @@ export function PipelinePage({ hidden }: Props) {
                     })}
               </span>
             </div>
+            <p className="pl-trials" data-testid="pl-trials">{t("pl.bt.trials", { n: String(trials) })}</p>
             {error && <div className="err">{error}</div>}
 
             {!bt ? (
@@ -895,6 +1012,33 @@ export function PipelinePage({ hidden }: Props) {
                         value={prob(bt.holdout.psr)}
                         toneClass={probTone(bt.holdout.psr)}
                       />
+                      {bt.overfitting.t_stat !== undefined && (
+                        <Stat
+                          label={t("pl.bt.ofit.tstat")}
+                          value={numOpt(bt.overfitting.t_stat)}
+                          toneClass={tstatTone(bt.overfitting.t_stat)}
+                          sub={t("pl.bt.ofit.tstatSub", { h: (bt.overfitting.hlz_hurdle ?? 3).toFixed(1) })}
+                          title={t("pl.bt.ofit.tstatTitle")}
+                          testId="pl-tstat"
+                        />
+                      )}
+                      {bt.overfitting.min_track_record_days !== undefined && (
+                        <Stat
+                          label={t("pl.bt.ofit.mintrl")}
+                          value={
+                            bt.overfitting.min_track_record_days === null
+                              ? t("pl.bt.ofit.mintrlNone")
+                              : t("pl.bt.ofit.mintrlVal", {
+                                  need: String(bt.overfitting.min_track_record_days),
+                                  have: String(bt.overfitting.track_days ?? "—"),
+                                })
+                          }
+                          toneClass={mintrlTone(bt.overfitting.min_track_record_days, bt.overfitting.track_days)}
+                          title={t("pl.bt.ofit.mintrlTitle")}
+                          small
+                          testId="pl-mintrl"
+                        />
+                      )}
                     </div>
                     <p className="dim pl-hint">{t("pl.bt.ofit.note")}</p>
                   </div>
@@ -979,6 +1123,8 @@ export function PipelinePage({ hidden }: Props) {
                               [
                                 ["total_return_pct", t("bt.totalReturn")],
                                 ["sharpe", t("bt.sharpe")],
+                                ["delta_sharpe_vs_equal_ann", t("pl.bt.deltaEq")],
+                                ["p_value_vs_equal", t("pl.bt.pEq")],
                                 ["psr", t("pl.bt.psr")],
                                 ["max_drawdown_pct", t("bt.maxdd")],
                                 ["ann_vol_pct", t("pl.bt.vol")],
@@ -1009,6 +1155,12 @@ export function PipelinePage({ hidden }: Props) {
                                 </td>
                                 <td className={`pl-num ${tone(a.total_return_pct)}`}>{pct(a.total_return_pct)}</td>
                                 <td className="pl-num">{a.sharpe.toFixed(2)}</td>
+                                <td className={`pl-num ${tone(a.delta_sharpe_vs_equal_ann ?? 0)}`}>
+                                  {signed2Opt(a.delta_sharpe_vs_equal_ann)}
+                                </td>
+                                <td className={`pl-num ${pTone(a.p_value_vs_equal, a.delta_sharpe_vs_equal_ann)}`} title={t("pl.bt.pEqTitle")}>
+                                  {pOpt(a.p_value_vs_equal)}
+                                </td>
                                 <td className={`pl-num ${probTone(a.psr)}`}>{prob(a.psr)}</td>
                                 <td className="pl-num dn">{pct(a.max_drawdown_pct)}</td>
                                 <td className="pl-num">{a.ann_vol_pct.toFixed(1)}%</td>
@@ -1026,6 +1178,7 @@ export function PipelinePage({ hidden }: Props) {
                         </tbody>
                       </table>
                     </div>
+                    <p className="dim pl-hint" data-testid="pl-alts-note">{t("pl.bt.altsEqNote")}</p>
                   </>
                 )}
               </>
@@ -1140,6 +1293,26 @@ export function PipelinePage({ hidden }: Props) {
                     <ContribList title={t("pl.risk.detractors")} rows={result.risk.detractors} />
                   </div>
                   <p className="dim pl-hint">{t("pl.risk.note")}</p>
+
+                  {result.risk.regimes && (
+                    <>
+                      <div className="pl-subhead">{t("pl.risk.regimes")}</div>
+                      {result.risk.regimes.length === 0 ? (
+                        <p className="dim pl-hint">{t("pl.risk.tooShort")}</p>
+                      ) : (
+                        <RegimeTable rows={result.risk.regimes} />
+                      )}
+                      <p className="dim pl-hint">{t("pl.risk.regimesNote")}</p>
+                    </>
+                  )}
+
+                  {result.risk.attribution && (
+                    <>
+                      <div className="pl-subhead">{t("pl.risk.attr")}</div>
+                      <AttributionBlock a={result.risk.attribution} sectorLabel={sectorLabel} />
+                      <p className="dim pl-hint">{t("pl.risk.attrNote")}</p>
+                    </>
+                  )}
                 </>
               )}
             </div>
@@ -1165,6 +1338,7 @@ export function PipelinePage({ hidden }: Props) {
                         <tr>
                           <th>#</th>
                           <th>{t("pl.deploy.symbol")}</th>
+                          {hasSectors && <th>{t("pl.deploy.sector")}</th>}
                           <th>{t("pl.deploy.weight")}</th>
                         </tr>
                       </thead>
@@ -1173,6 +1347,7 @@ export function PipelinePage({ hidden }: Props) {
                           <tr key={w.symbol}>
                             <td className="dim">{w.score_rank}</td>
                             <td><b>{w.symbol}</b></td>
+                            {hasSectors && <td className="dim">{sectorLabel(groupOf(w.symbol, w.group) ?? "—")}</td>}
                             <td>
                               <div className="pl-bar">
                                 <div
@@ -1187,6 +1362,13 @@ export function PipelinePage({ hidden }: Props) {
                       </tbody>
                     </table>
                   </div>
+
+                  {result.target_weights.groups && result.target_weights.groups.length > 0 && (
+                    <>
+                      <div className="pl-subhead">{t("pl.deploy.groups")}</div>
+                      <SectorStack groups={result.target_weights.groups} sectorLabel={sectorLabel} />
+                    </>
+                  )}
 
                   <label className="field">
                     <span className="field__label">{t("pl.deploy.name")}</span>
@@ -1215,6 +1397,8 @@ export function PipelinePage({ hidden }: Props) {
                     {copied === "fail" && <span className="pl-badge pl-badge--warn">{t("pl.deploy.copyFailed")}</span>}
                   </div>
                   <p className="dim pl-hint">{t("pl.deploy.note")}</p>
+
+                  <MemoCard result={result} enabled={aiEnabled} lang={lang} />
                 </>
               )}
             </div>
@@ -1230,7 +1414,7 @@ export function PipelinePage({ hidden }: Props) {
 // ------------------------------------------------------------ sub-components
 
 function NumField({
-  label, value, range, step, hint, onChange,
+  label, value, range, step, hint, onChange, testId,
 }: {
   label: string;
   value: number;
@@ -1238,6 +1422,7 @@ function NumField({
   step?: number;
   hint?: string;
   onChange: (v: number) => void;
+  testId?: string;
 }) {
   return (
     <label className="field" title={hint}>
@@ -1252,6 +1437,7 @@ function NumField({
         max={range[1]}
         step={step}
         onChange={(e) => onChange(e.target.value === "" ? range[0] : Number(e.target.value))}
+        data-testid={testId}
       />
       {hint && <span className="pl-field-hint">{hint}</span>}
     </label>
@@ -1259,11 +1445,13 @@ function NumField({
 }
 
 function Stat({
-  label, value, tone: v, toneClass, sub, small, testId,
-}: { label: string; value: string; tone?: number; toneClass?: string; sub?: string; small?: boolean; testId?: string }) {
+  label, value, tone: v, toneClass, sub, small, testId, title,
+}: {
+  label: string; value: string; tone?: number; toneClass?: string; sub?: string; small?: boolean; testId?: string; title?: string;
+}) {
   const cls = toneClass ?? (v === undefined ? "" : v > 0 ? "up" : v < 0 ? "dn" : "");
   return (
-    <div className="stat" data-testid={testId}>
+    <div className="stat" data-testid={testId} title={title}>
       <div className="stat__label">{label}</div>
       <div className={`stat__value ${cls}${small ? " pl-stat--small" : ""}`}>{value}</div>
       {sub && <div className="dim pl-stat__sub">{sub}</div>}
@@ -1442,6 +1630,325 @@ function IcDecayBars({ rows }: { rows: Array<{ horizon: number; ic: number | nul
   );
 }
 
+/** V3 quintile check: five bars, bucket 1 (lowest score) → 5 (highest) left to
+ * right, annualised return up from the axis when positive and down when
+ * negative. A null bucket is a dashed empty slot, as in the decay chart. */
+function QuantileBars({ q }: { q: PipelineQuantiles }) {
+  const { t } = useT();
+  const buckets = [...q.buckets].sort((a, b) => a.bucket - b.bucket);
+  const w = 280;
+  const h = 96;
+  const top = 14;
+  const bottom = 16;
+  const plotH = h - top - bottom;
+  const maxAbs = Math.max(0.5, ...buckets.map((b) => Math.abs(b.ann_return_pct ?? 0)));
+  const axisY = top + plotH / 2;
+  const scale = (plotH / 2 - 2) / maxAbs;
+  const slot = w / buckets.length;
+  const barW = Math.min(34, slot * 0.6);
+  return (
+    <svg
+      className="pl-decay pl-quant"
+      viewBox={`0 0 ${w} ${h}`}
+      role="img"
+      aria-label={t("pl.sig.quantiles")}
+      data-testid="pl-quantiles"
+    >
+      <line x1="0" y1={axisY} x2={w} y2={axisY} className="pl-decay__axis" />
+      {buckets.map((b, i) => {
+        const cx = slot * i + slot / 2;
+        const x = cx - barW / 2;
+        if (b.ann_return_pct === null) {
+          return (
+            <g key={b.bucket}>
+              <title>{t("pl.sig.bucketNone", { n: String(b.bucket) })}</title>
+              <rect x={x} y={axisY - 6} width={barW} height={12} className="pl-decay__none" data-bucket={b.bucket} />
+              <text x={cx} y={axisY - 9} className="pl-decay__val">—</text>
+              <text x={cx} y={h - 4} className="pl-decay__h">{b.bucket}</text>
+            </g>
+          );
+        }
+        const v = b.ann_return_pct;
+        const len = Math.abs(v) * scale;
+        const up = v >= 0;
+        const y = up ? axisY - len : axisY;
+        const labelY = up ? Math.max(9, axisY - len - 3) : Math.min(h - bottom - 1, axisY + len + 9);
+        return (
+          <g key={b.bucket}>
+            <title>{t("pl.sig.bucket", { n: String(b.bucket), v: signed1(v) })}</title>
+            <rect
+              x={x}
+              y={y}
+              width={barW}
+              height={Math.max(0.5, len)}
+              className={up ? "pl-decay__bar--up" : "pl-decay__bar--dn"}
+              data-bucket={b.bucket}
+            />
+            <text x={cx} y={labelY} className="pl-decay__val">{signed1(v)}%</text>
+            <text x={cx} y={h - 4} className="pl-decay__h">{b.bucket}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/** V3 regime table: portfolio vs benchmark in each vol tercile and trend state. */
+function RegimeTable({ rows }: { rows: PipelineRegime[] }) {
+  const { t } = useT();
+  const label = (id: string) => (REGIME_IDS.has(id) ? t(`pl.regime.${id}` as MsgKey) : id);
+  return (
+    <div className="table-scroll">
+      <table className="lab-stats" data-testid="pl-regimes">
+        <thead>
+          <tr>
+            <th>{t("pl.risk.regime")}</th>
+            <th className="pl-num">{t("pl.risk.days")}</th>
+            <th className="pl-num">{t("pl.risk.ann")}</th>
+            <th className="pl-num">{t("pl.risk.benchAnn")}</th>
+            <th className="pl-num">{t("bt.sharpe")}</th>
+            <th className="pl-num">{t("pl.risk.hit")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.regime}>
+              <td>{label(r.regime)}</td>
+              <td className="pl-num">{r.days}</td>
+              <td className={`pl-num ${tone(r.ann_return_pct ?? 0)}`}>{pctOpt(r.ann_return_pct)}</td>
+              <td className="pl-num dim">{pctOpt(r.bench_ann_return_pct)}</td>
+              <td className="pl-num">{numOpt(r.sharpe)}</td>
+              <td className={`pl-num ${r.hit_rate_pct === null ? "" : tone(r.hit_rate_pct - 50)}`}>
+                {r.hit_rate_pct === null ? "—" : `${r.hit_rate_pct.toFixed(1)}%`}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** V3 Brinson-Fachler attribution: three headline effects plus a per-sector
+ * table whose active weight is a signed bar around zero. */
+function AttributionBlock({ a, sectorLabel }: { a: PipelineAttribution; sectorLabel: (id: string) => string }) {
+  const { t } = useT();
+  const maxActive = Math.max(0.5, ...a.groups.map((g) => Math.abs(g.avg_weight_pct - g.bench_weight_pct)));
+  return (
+    <>
+      <div className="chip-row pl-chip-row" data-testid="pl-attr-chips">
+        <span className={`chip ${tone(a.allocation_pct)}`}>{t("pl.risk.attr.alloc", { v: signed1(a.allocation_pct) })}</span>
+        <span className={`chip ${tone(a.selection_pct)}`}>{t("pl.risk.attr.sel", { v: signed1(a.selection_pct) })}</span>
+        <span className={`chip ${tone(a.interaction_pct)}`}>{t("pl.risk.attr.inter", { v: signed1(a.interaction_pct) })}</span>
+      </div>
+      {a.groups.length === 0 ? (
+        <p className="dim pl-hint">{t("pl.risk.tooShort")}</p>
+      ) : (
+        <div className="table-scroll">
+          <table className="lab-stats" data-testid="pl-attribution">
+            <thead>
+              <tr>
+                <th>{t("pl.risk.sector")}</th>
+                <th className="pl-num">{t("pl.risk.avgW")}</th>
+                <th className="pl-num">{t("pl.risk.benchW")}</th>
+                <th className="pl-num">{t("pl.risk.activeW")}</th>
+                <th className="pl-num">{t("pl.risk.allocCol")}</th>
+                <th className="pl-num">{t("pl.risk.selCol")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {a.groups.map((g) => {
+                const active = g.avg_weight_pct - g.bench_weight_pct;
+                const half = (Math.abs(active) / maxActive) * 50;
+                return (
+                  <tr key={g.group}>
+                    <td>{sectorLabel(g.group)}</td>
+                    <td className="pl-num">{g.avg_weight_pct.toFixed(1)}%</td>
+                    <td className="pl-num dim">{g.bench_weight_pct.toFixed(1)}%</td>
+                    <td className="pl-num">
+                      <div className="pl-active">
+                        <span className="pl-abar" aria-hidden="true">
+                          <span className="pl-abar__zero" />
+                          <span
+                            className={`pl-abar__fill ${active >= 0 ? "pl-abar__fill--up" : "pl-abar__fill--dn"}`}
+                            style={active >= 0 ? { left: "50%", width: `${half}%` } : { left: `${50 - half}%`, width: `${half}%` }}
+                          />
+                        </span>
+                        <span className={`pl-active__val ${tone(active)}`}>{signed1(active)}%</span>
+                      </div>
+                    </td>
+                    <td className={`pl-num ${tone(g.allocation_pct)}`}>{signed1(g.allocation_pct)}%</td>
+                    <td className={`pl-num ${tone(g.selection_pct)}`}>{signed1(g.selection_pct)}%</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** V3 sector mix of the target book: one horizontal stacked bar and a legend. */
+function SectorStack({
+  groups, sectorLabel,
+}: { groups: Array<{ group: string; weight_pct: number }>; sectorLabel: (id: string) => string }) {
+  const total = Math.max(0.01, groups.reduce((acc, g) => acc + Math.max(0, g.weight_pct), 0));
+  return (
+    <div data-testid="pl-sector-stack">
+      <div className="pl-stack" role="img" aria-label={groups.map((g) => `${sectorLabel(g.group)} ${g.weight_pct.toFixed(1)}%`).join(", ")}>
+        {groups.map((g, i) => (
+          <span
+            key={g.group}
+            className="pl-stack__seg"
+            style={{ width: `${(Math.max(0, g.weight_pct) / total) * 100}%`, background: STACK_COLORS[i % STACK_COLORS.length] }}
+            title={`${sectorLabel(g.group)} · ${g.weight_pct.toFixed(1)}%`}
+          />
+        ))}
+      </div>
+      <ul className="pl-legend">
+        {groups.map((g, i) => (
+          <li key={g.group} className="pl-legend__item">
+            <span className="pl-legend__dot" style={{ background: STACK_COLORS[i % STACK_COLORS.length] }} />
+            {sectorLabel(g.group)}
+            <span className="pl-legend__val">{g.weight_pct.toFixed(1)}%</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Exactly the summary the page displays — never the curves — so the memo
+ * cannot cite a number the user has not seen. Truncations per the contract. */
+function memoRequest(r: PipelineResult, lang: Lang): PipelineMemoRequest {
+  return {
+    spec: r.spec,
+    universe: r.universe,
+    signal: {
+      weighting: r.signal.weighting,
+      components: r.signal.components.map((c) => ({
+        expression: c.expression,
+        is_ic: c.is_ic,
+        oos_ic: c.oos_ic,
+        weight: c.weight,
+        standalone_sharpe: c.standalone_sharpe,
+      })),
+      max_pair_corr: r.signal.max_pair_corr,
+      ic_by_horizon: r.signal.ic_by_horizon,
+      composite_is_ic: r.signal.composite_is_ic,
+      composite_oos_ic: r.signal.composite_oos_ic,
+      quantiles: r.signal.quantiles,
+    },
+    portfolio: r.portfolio,
+    stats: r.backtest.stats,
+    in_sample: r.backtest.in_sample,
+    holdout: r.backtest.holdout,
+    overfitting: r.backtest.overfitting,
+    risk: {
+      drawdowns: r.risk.drawdowns.slice(0, 3),
+      contributors: r.risk.contributors.slice(0, 3),
+      detractors: r.risk.detractors.slice(0, 3),
+      concentration: r.risk.concentration,
+      correlation_to_benchmark: r.risk.correlation_to_benchmark,
+      capture: r.risk.capture,
+      cvar_95_pct: r.risk.cvar_95_pct,
+      bench_cvar_95_pct: r.risk.bench_cvar_95_pct,
+      regimes: r.risk.regimes,
+      attribution: r.risk.attribution
+        ? {
+            allocation_pct: r.risk.attribution.allocation_pct,
+            selection_pct: r.risk.attribution.selection_pct,
+            interaction_pct: r.risk.attribution.interaction_pct,
+            groups: r.risk.attribution.groups.slice(0, 5),
+          }
+        : undefined,
+    },
+    warnings: r.warnings,
+    lang,
+  };
+}
+
+/** AI investment-committee memo (stage ⑥). The button is live only when the
+ * server reports an AI key; a new run clears the previous memo so the verdict
+ * always refers to the numbers on screen. */
+function MemoCard({ result, enabled, lang }: { result: PipelineResult; enabled: boolean; lang: Lang }) {
+  const { t } = useT();
+  const [memo, setMemo] = useState<PipelineMemo | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMemo(null);
+    setError(null);
+  }, [result]);
+
+  const generate = async () => {
+    if (pending || !enabled) return;
+    setPending(true);
+    setError(null);
+    try {
+      setMemo(await api.pipelineMemo(memoRequest(result, lang)));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div className="pl-memo" data-testid="pl-memo">
+      <div className="pl-memo__head">
+        <span className="pl-subhead" style={{ marginTop: 0 }}>{t("pl.memo.title")}</span>
+        <button
+          className="btn btn--mini"
+          onClick={generate}
+          disabled={!enabled || pending}
+          data-testid="pl-memo-btn"
+        >
+          {pending ? t("pl.memo.loading") : t("pl.memo.button")}
+        </button>
+        {pending && <span className="spinner" aria-hidden="true" />}
+        {!enabled && <span className="dim pl-hint" data-testid="pl-memo-disabled">{t("pl.memo.disabled")}</span>}
+      </div>
+      {!memo && !error && <p className="dim pl-hint">{t("pl.memo.hint")}</p>}
+      {error && <div className="err">{error}</div>}
+      {memo && (
+        <>
+          <div className="pl-memo__head">
+            <span className={`pl-verdict pl-verdict--${memo.verdict}`} data-testid="pl-memo-verdict">
+              {t(`pl.memo.verdict.${memo.verdict}` as MsgKey)}
+            </span>
+            <p className="pl-memo__headline" data-testid="pl-memo-headline">{memo.headline}</p>
+          </div>
+          <div className="pl-memo__lists">
+            <MemoList title={t("pl.memo.strengths")} items={memo.strengths} />
+            <MemoList title={t("pl.memo.concerns")} items={memo.concerns} />
+            <MemoList title={t("pl.memo.next")} items={memo.next_steps} />
+          </div>
+          {memo.honesty_note && <p className="dim pl-hint">{memo.honesty_note}</p>}
+          <div className="pl-memo__footer">{t("pl.memo.footer", { model: memo.model })}</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MemoList({ title, items }: { title: string; items: string[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <div className="pl-subhead">{title}</div>
+      <ul className="pl-memo__list">
+        {items.map((s, i) => (
+          <li key={i}>{s}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ helpers
 
 const maxWeight = (r: PipelineResult) => Math.max(0.01, ...r.target_weights.weights.map((w) => w.weight_pct));
@@ -1450,6 +1957,9 @@ const pct = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(2)}%`;
 const pctOpt = (v: number | null) => (v === null ? "—" : pct(v));
 const num = (v: number) => v.toFixed(2);
 const numOpt = (v: number | null | undefined) => (v === null || v === undefined ? "—" : v.toFixed(2));
+const signed1 = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
+const signed1Opt = (v: number | null | undefined) => (v === null || v === undefined ? "—" : signed1(v));
+const signed2Opt = (v: number | null | undefined) => (v === null || v === undefined ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(2)}`);
 const signed3 = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(3)}`;
 const signed3Opt = (v: number | null | undefined) => (v === null || v === undefined ? "—" : signed3(v));
 /** Probabilities (PSR / DSR) print as 0.xx; a null means too short a track. */
@@ -1457,6 +1967,16 @@ const prob = (v: number | null | undefined) => (v === null || v === undefined ? 
 /** ≥ 0.95 is the usual bar for PSR/DSR; 0.8–0.95 is borderline; below is luck territory. */
 const probTone = (v: number | null | undefined) =>
   v === null || v === undefined ? "" : v >= 0.95 ? "pl-tone--ok" : v >= 0.8 ? "pl-tone--warn" : "pl-tone--bad";
+/** Harvey-Liu-Zhu: ≥ 3 clears the multiple-testing hurdle, 2–3 is borderline, < 2 is not a finding. */
+const tstatTone = (v: number | null | undefined) =>
+  v === null || v === undefined ? "" : v >= 3 ? "pl-tone--ok" : v >= 2 ? "pl-tone--warn" : "pl-tone--bad";
+/** MinTRL: fine once the track is at least as long as required; null means Sharpe ≤ 0 (no length suffices). */
+const mintrlTone = (need: number | null | undefined, have: number | undefined) =>
+  need === undefined ? "" : need === null ? "pl-tone--bad" : have !== undefined && have >= need ? "pl-tone--ok" : "pl-tone--warn";
+/** V3.1 p-value vs 1/N: green only when the scheme beats equal weight AND the gap is significant. */
+const pOpt = (v: number | null | undefined) => (v === null || v === undefined ? "—" : v.toFixed(3));
+const pTone = (p: number | null | undefined, delta: number | undefined) =>
+  p !== null && p !== undefined && p < 0.05 && (delta ?? 0) > 0 ? "pl-tone--ok" : "dim";
 const ratio = (v: number | null) => (v === null ? "—" : v.toFixed(2));
 /** Up-capture above 1 and down-capture below 1 are the good directions. */
 const captureTone = (v: number | null, up: boolean) => (v === null ? "" : (up ? v >= 1 : v <= 1) ? "up" : "dn");

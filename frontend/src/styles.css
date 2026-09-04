@@ -3849,6 +3849,195 @@ tbody tr:hover td {
   height: 48px;
 }
 
+/* V3: quantile-return bars share the decay chart's frame */
+.pl-quant {
+  max-width: 360px;
+}
+
+/* V3: signed (active-weight) bar — zero in the middle, green right, red left */
+.pl-abar {
+  position: relative;
+  height: 14px;
+  min-width: 72px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.pl-abar__zero {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: var(--border-bright);
+}
+
+.pl-abar__fill {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 1px;
+}
+
+.pl-abar__fill--up {
+  background: rgba(61, 220, 132, 0.6);
+}
+
+.pl-abar__fill--dn {
+  background: rgba(255, 92, 108, 0.6);
+}
+
+.pl-active {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.pl-active__val {
+  min-width: 52px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* V3: sector mix — horizontal stacked bar + legend */
+.pl-stack {
+  display: flex;
+  height: 18px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+}
+
+.pl-stack__seg {
+  height: 100%;
+  min-width: 1px;
+  transition: width 0.3s ease;
+}
+
+.pl-stack__seg + .pl-stack__seg {
+  border-left: 1px solid rgba(7, 10, 18, 0.6);
+}
+
+.pl-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 11px;
+}
+
+.pl-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+}
+
+.pl-legend__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
+.pl-legend__val {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* V3: trials counter under the run button */
+.pl-trials {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+/* V3: AI committee memo card (stage ⑥) */
+.pl-memo {
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  background: rgba(167, 139, 250, 0.05);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pl-memo__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.pl-memo__headline {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.pl-memo__lists {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.pl-memo__list {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.pl-memo__list li + li {
+  margin-top: 3px;
+}
+
+.pl-memo__footer {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.pl-verdict {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 3px;
+  padding: 2px 9px;
+  border: 1px solid var(--border-bright);
+}
+
+.pl-verdict--deploy {
+  color: var(--green);
+  border-color: rgba(61, 220, 132, 0.45);
+  background: rgba(61, 220, 132, 0.1);
+}
+
+.pl-verdict--paper_first {
+  color: var(--amber);
+  border-color: rgba(255, 176, 0, 0.45);
+  background: rgba(255, 176, 0, 0.1);
+}
+
+.pl-verdict--iterate {
+  color: var(--violet);
+  border-color: rgba(167, 139, 250, 0.5);
+  background: rgba(167, 139, 250, 0.12);
+}
+
+.pl-verdict--reject {
+  color: var(--red);
+  border-color: rgba(255, 92, 108, 0.5);
+  background: rgba(255, 92, 108, 0.1);
+}
+
 /* paper: deployment kind badge */
 .pp-kind {
   margin-left: 8px;
