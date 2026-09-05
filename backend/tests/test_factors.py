@@ -621,3 +621,33 @@ def test_composite_rolling_weights(monkeypatch):
     client = TestClient(app)
     r = client.post("/api/factors/composite", json={"factors": factors, "market": "us", "weighting": "magic"})
     assert r.status_code == 422
+
+
+def test_strict_mode_requires_robustness_and_marginal_endpoint(monkeypatch):
+    from app.services import factor_mine
+    from app.services.factor_mine import _verdict
+
+    base = {"coverage": 0.99, "complexity": 5, "is_ic": 0.03, "is_icir": 0.3, "oos_ic": 0.02,
+            "max_zoo_corr": 0.1, "spread_after_cost_pct": 0.4, "turnover": 0.3, "t_stat": 3.5,
+            "positive_folds": 2, "regime_ok": False}
+    assert _verdict(base, "standard")[0] is True        # robustness is strict-only
+    ok, reasons = _verdict(base, "strict")
+    assert ok is False and sum("strict:" in r for r in reasons) == 2
+    assert _verdict({**base, "positive_folds": 4, "regime_ok": True}, "strict")[0] is True
+
+    panel = _panel(n_days=500, n_syms=12)
+    m = factor_mine.evaluate_candidate("rank(delta(close, 5))", panel, 10, [])
+    assert 0 <= m["positive_folds"] <= 4 and isinstance(m["regime_ok"], bool)
+
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    client = TestClient(app)
+    r = client.post("/api/factors/marginal", json={
+        "candidate": {"expression": "rank(ts_std(close, 10))", "horizon": 10},
+        "others": [{"expression": "rank(delta(close, 5))", "horizon": 10}],
+        "market": "us", "top_n": 3, "rebalance": 10,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["verdict"] in {"adds", "neutral", "hurts"}
+    assert abs(body["sharpe_delta"] - (body["with"]["sharpe"] - body["without"]["sharpe"])) < 1e-6
+    assert client.post("/api/factors/marginal", json={"candidate": {"expression": "rank(close)"}, "others": [], "market": "us"}).status_code == 422

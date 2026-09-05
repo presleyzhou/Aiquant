@@ -186,6 +186,9 @@ export interface SavedFactor {
   is_icir: number;
   oos_ic: number;
   savedAt: string;
+  /** Holding period where the report card found IC peaking; used as the
+   * default rebalance for backtests and paper deployments once known. */
+  best_horizon?: number;
 }
 
 export function savedFactors(): SavedFactor[] {
@@ -401,4 +404,10 @@ export function factorTrials(): number {
 }
 export function saveFactorTrials(n: number): void {
   localStorage.setItem(TRIALS_KEY, String(Math.max(factorTrials(), Math.floor(n))));
+}
+
+export function updateFactor(market: string, expression: string, patch: Partial<SavedFactor>): SavedFactor[] {
+  const next = savedFactors().map((f) => (f.market === market && f.expression === expression ? { ...f, ...patch } : f));
+  localStorage.setItem(FACTORS_KEY, JSON.stringify(next));
+  return next;
 }

@@ -84,6 +84,16 @@ export interface FactorReport {
   suggestions: Array<{ code: string; value: number | string | null }>;
 }
 
+export interface MarginalResult {
+  candidate: string;
+  n_others: number;
+  without: { sharpe: number; cagr_pct: number; max_drawdown_pct: number; excess_pct: number };
+  with: { sharpe: number; cagr_pct: number; max_drawdown_pct: number; excess_pct: number };
+  sharpe_delta: number;
+  corr_with_blend: number | null;
+  verdict: "adds" | "neutral" | "hurts";
+}
+
 export interface CompositeResult extends Omit<FactorBacktestResult, "expression" | "inverted"> {
   weighting: string;
   components: Array<{ expression: string; is_ic: number; weight: number }>;
@@ -847,6 +857,19 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ expression, market, horizon, top_n, cost_bps }),
     }).then(json<FactorReport>),
+
+  factorMarginal: (body: {
+    candidate: { expression: string; invert?: boolean; horizon?: number };
+    others: Array<{ expression: string; invert?: boolean; horizon?: number }>;
+    market: string;
+    top_n?: number;
+    rebalance?: number;
+  }) =>
+    fetch("/api/factors/marginal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<MarginalResult>),
 
   factorCheck: (expression: string, market: string, horizon: number) =>
     fetch("/api/factors/check", {

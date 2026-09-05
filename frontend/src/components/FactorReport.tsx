@@ -7,7 +7,7 @@ const AXES = ["predictive", "stability", "robustness", "tradability", "significa
 /** "🩺 体检" — practitioner report card for one factor: quantile spread,
  * IC decay by horizon, turnover / cost-adjusted spread, walk-forward folds,
  * bull/bear split and a horizon-adjusted t-stat, each graded A/B/C. */
-export function FactorReportButton({ expression, market, horizon }: { expression: string; market: string; horizon: number }) {
+export function FactorReportButton({ expression, market, horizon, onBestHorizon }: { expression: string; market: string; horizon: number; onBestHorizon?: (h: number) => void }) {
   const { t } = useT();
   const [report, setReport] = useState<Report | null>(null);
   const [open, setOpen] = useState(false);
@@ -23,8 +23,10 @@ export function FactorReportButton({ expression, market, horizon }: { expression
     setBusy(true);
     setError(null);
     try {
-      setReport(await api.factorAnalyze(expression, market, horizon));
+      const r = await api.factorAnalyze(expression, market, horizon);
+      setReport(r);
       setOpen(true);
+      onBestHorizon?.(r.best_horizon);
     } catch (err) {
       setError((err as Error).message);
     } finally {

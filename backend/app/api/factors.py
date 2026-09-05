@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Depends
-
-from app.services.ratelimit import limiter
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-
-import asyncio
-
-from fastapi import HTTPException
 
 from app.services import factor_dsl
 from app.services.factor_gp import evolve_stream
@@ -23,9 +18,11 @@ from app.services.factor_mine import (
     analyze_factor_blocking,
     check_factor_blocking,
     composite_backtest_blocking,
+    marginal_contribution_blocking,
     mine_stream,
     portfolio_backtest_blocking,
 )
+from app.services.ratelimit import limiter
 
 log = logging.getLogger("aiquant.factors")
 
@@ -288,3 +285,25 @@ async def factor_analyze(req: AnalyzeRequest) -> dict:
     except Exception as exc:  # noqa: BLE001 - surface the reason instead of a bare 500
         log.exception("factor report failed")
         raise HTTPException(status_code=500, detail=f"report failed: {type(exc).__name__}: {exc}") from exc
+
+
+class MarginalRequest(BaseModel):
+    candidate: CompositeFactor
+    others: list[CompositeFactor] = Field(min_length=1, max_length=7)
+    market: str = Field("us", pattern="^(us|crypto)$")
+    top_n: int = Field(5, ge=2, le=10)
+    rebalance: int = Field(10, ge=1, le=30)
+
+
+@router.post("/marginal")
+async def factor_marginal(req: MarginalRequest) -> dict:
+    """Portfolio-level increment: blend Sharpe with vs without the candidate."""
+    try:
+        return await asyncio.to_thread(
+            marginal_contribution_blocking,
+            req.candidate.model_dump(), [o.model_dump() for o in req.others], req.market, req.top_n, req.rebalance,
+        )
+    except factor_dsl.FactorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
