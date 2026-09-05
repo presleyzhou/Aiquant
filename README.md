@@ -151,6 +151,7 @@ Vercel 后端会把 `/api/kronos/*` 服务器侧转发过去（无 CORS、前端
 | POST | `/api/factors/explain` | 用轻量模型把因子表达式翻译成经济含义 / 风格 / 失效场景（24h 缓存） |
 | GET | `/api/pipeline/config` | 端到端流水线配置：加权方案、起步因子、默认参数与取值范围 |
 | POST | `/api/pipeline/run` | 端到端量化投资：多因子信号 → 组合构建（等权 / 信号加权 / 波动率倒数 / 最小方差 / 风险平价 / HRP / 均值-方差）→ 含成本回测 → 过拟合体检 → 风险归因 → 目标权重 |
+| POST | `/api/pipeline/orders` | 调仓指令单：由组合规模与当前持仓生成到目标权重的买卖清单（整数股、不做空、含预估成本） |
 | POST | `/api/pipeline/memo` | 投委会备忘录：轻量模型基于本次运行的数字给出 deploy / paper_first / iterate / reject 结构化结论（需 AI key） |
 | POST | `/api/paper/track` | 模拟持仓前向跟踪（`kind` = strategy / factor / pipeline） |
 | GET | `/api/ai/status` | AI 是否可用、模型/轻量模型、当日 token 用量与限流配置 |
@@ -194,7 +195,8 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
 
 「端到端量化」标签页把研究到落地的完整链路串成一条可执行的流水线，六步走完，每一步的方法都有对应文献：
 
-1. **标的池与数据**：复用因子挖掘的 60 只美股 / 24 个币对日线面板（磁盘缓存 + 数据源回退），每只标的带行业 / 板块标签；
+1. **标的池与数据**：默认复用因子挖掘的 60 只美股 / 24 个币对日线面板（磁盘缓存 + 数据源回退），每只标的带行业 / 板块标签；
+   也可**自定义标的池**（8–40 只，可一键导入自选列表）并选 3 年或 5 年历史，自定义面板服务端缓存 6 小时；
 2. **Alpha 信号**：从因子库勾选 1–8 个因子（或内置的反转 / 动量 / 低波 / 量能起步因子，或手输 DSL），逐因子截面排名后合成。
    默认**滚动 IC 加权**：t 日的权重只用 t 日之前已经"揭晓"的 IC（扩展窗均值、滞后一个预测期），整段回测对合成权重都是样本外；
    期间 IC 与零无法区分（|IC| < 0.005）的因子会被动态关闭而非翻转（AlphaForge 式动态选择）；也可选静态 IC（前 80%）或等权。给出复合信号的 **IC 衰减曲线**（1–20 日，Grinold-Kahn 信息期限）和 **分位数收益**（Qlib 式五分组、
@@ -214,6 +216,7 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
    **Brinson-Fachler 行业归因**（配置效应 / 选股效应 / 交互）；自动告警：留出期夏普崩塌、换手过高、再平衡太少、过度集中、
    覆盖不足、PSR < 0.9、t 值 < 2；
 6. **部署**：最新一根完整 K 线上的目标权重表（含行业分布，可复制 CSV），一键部署到模拟持仓，从部署日起前向跟踪；
+   **调仓指令单**：输入组合规模与当前持仓股数，生成先卖后买、整数股、不做空的交易清单，附参考价、换手、预估成本与调仓后现金（`POST /api/pipeline/orders`）；
    配置了 AI 时可生成**投委会备忘录**（`POST /api/pipeline/memo`，轻量模型只能引用页面上的数字，强制结构化输出：
    deploy / paper_first / iterate / reject + 优点 / 疑虑 / 下一步 / 统计局限）。
 
