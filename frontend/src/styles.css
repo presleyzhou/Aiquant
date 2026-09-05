@@ -4038,6 +4038,92 @@ tbody tr:hover td {
   background: rgba(255, 92, 108, 0.1);
 }
 
+/* V4: parameter-sensitivity heatmap (stage ④) */
+.pl-sens {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pl-sens__axes {
+  font-size: 10.5px;
+}
+
+.pl-sens__grid {
+  display: grid;
+  gap: 3px;
+  align-items: center;
+  max-width: 420px;
+}
+
+.pl-sens__corner,
+.pl-sens__hdr {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pl-sens__corner {
+  text-align: right;
+  padding-right: 4px;
+  white-space: nowrap;
+}
+
+.pl-sens__cell {
+  height: 34px;
+  border-radius: 3px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid transparent;
+  cursor: default;
+}
+
+.pl-sens__cell.is-chosen {
+  outline: 2px solid var(--cyan);
+  outline-offset: -1px;
+  font-weight: 700;
+  box-shadow: 0 0 10px rgba(59, 224, 255, 0.35);
+}
+
+.pl-sens__cell--none {
+  background: rgba(255, 255, 255, 0.015);
+  border: 1px dashed var(--border);
+  color: var(--text-faint);
+}
+
+/* V4: small inline chip (factor active-days share) */
+.pl-chip--mini {
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  cursor: default;
+  vertical-align: middle;
+}
+
+/* V4: restored-last-result chip next to the run button */
+.pl-restored {
+  color: var(--text-faint);
+  border-style: dashed;
+  cursor: default;
+}
+
+/* V4: stage-④ header actions (Markdown export + its status chip) */
+.pl-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 /* paper: deployment kind badge */
 .pp-kind {
   margin-left: 8px;

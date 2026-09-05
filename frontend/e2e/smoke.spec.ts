@@ -178,7 +178,9 @@ async function mockApi(page: Page) {
           weighting: "ic_expanding",
           components: (factors as Array<{ expression: string; invert: boolean; horizon: number }>).map((f, i) => ({
             ...f, is_ic: 0.021 - i * 0.004, oos_ic: 0.012, weight: 1 / factors.length, avg_weight: 0.9 / factors.length,
-            standalone_sharpe: 0.81 })),
+            standalone_sharpe: 0.81,
+            // V4: the first factor was gated off on ~17% of days, the rest always on
+            active_pct: i === 0 ? 82.6 : 100 })),
           max_pair_corr: 0.31,
           // V2: alpha-decay curve (one null = too few samples) + composite ICs
           ic_by_horizon: [
@@ -203,6 +205,7 @@ async function mockApi(page: Page) {
           span: { from: "2023-12-01", to: "2026-09-03" },
           stats: { total_return_pct: 41.2, cagr_pct: 13.4, ann_vol_pct: 15.2, sharpe: 0.88, sortino: 1.21, calmar: 0.9,
             max_drawdown_pct: -14.9, win_rate_pct: 53.1, excess_pct: 6.3, beta: 0.82, tracking_error_pct: 6.1, information_ratio: 0.7,
+            rolling_6m_beat_pct: 44.1, // V4: below 45 → red
             benchmark: { total_return_pct: 34.9, cagr_pct: 11.5, ann_vol_pct: 16.0, sharpe: 0.74, max_drawdown_pct: -18.2 } },
           in_sample: split("2023-12-01", "2025-09-01", 30.1, 1.02),
           holdout: { ...split("2025-09-02", "2026-09-03", 8.5, 0.61), psr: 0.906 },
@@ -256,6 +259,18 @@ async function mockApi(page: Page) {
           { scheme: "hrp", total_return_pct: 37.2, sharpe: 0.84, psr: null, max_drawdown_pct: -13.1, ann_vol_pct: 14.0, avg_turnover_pct: 3.4,
             delta_sharpe_vs_equal_ann: 0.31, p_value_vs_equal: 0.021 },
         ].filter((a, i, arr) => arr.findIndex((b) => b.scheme === a.scheme) === i),
+        // V4: 3×3 neighbourhood; the centre (top_n 8, rebalance 10) equals the headline Sharpe and towers over
+        // its neighbours (spike 0.64 > 0.5 → parameter_spike); one cell could not be simulated
+        sensitivity: {
+          top_n: [5, 8, 11],
+          rebalance: [5, 10, 20],
+          cells: [
+            [{ sharpe: 0.31, excess_pct: 1.2, max_drawdown_pct: -15.1 }, { sharpe: 0.22, excess_pct: -0.4, max_drawdown_pct: -16.3 }, { sharpe: 0.18, excess_pct: -1.1, max_drawdown_pct: -17.0 }],
+            [{ sharpe: 0.29, excess_pct: 0.8, max_drawdown_pct: -15.5 }, { sharpe: 0.88, excess_pct: 6.3, max_drawdown_pct: -14.9 }, { sharpe: 0.25, excess_pct: -0.2, max_drawdown_pct: -16.8 }],
+            [null, { sharpe: 0.12, excess_pct: -2.5, max_drawdown_pct: -18.9 }, { sharpe: -0.15, excess_pct: -6.0, max_drawdown_pct: -21.2 }],
+          ],
+          median_sharpe: 0.24, min_sharpe: -0.15, spike: 0.64,
+        },
         target_weights: {
           as_of: "2026-09-03", exposure_pct: 100.0,
           weights: [
@@ -266,7 +281,7 @@ async function mockApi(page: Page) {
           ],
           groups: [{ group: "tech", weight_pct: 75.0 }, { group: "financials", weight_pct: 25.0 }],
         },
-        warnings: ["few_rebalances", "not_significant"],
+        warnings: ["few_rebalances", "not_significant", "parameter_spike"],
       });
     }
     if (path === "/api/pipeline/memo")
@@ -488,6 +503,8 @@ test("wallet: demo top-up credits the balance and pays for an item", async ({ pa
 });
 
 test("pipeline: tick a starter factor, run the six stages, deploy to paper", async ({ page }) => {
+  // six stages, a memo, a deploy and a reload-restore in one flow — give it the long budget
+  test.slow();
   // ONLY this test sees AI as enabled — later routes win, so this overrides mockApi's status
   await page.route("**/api/ai/status", (route) => route.fulfill({ json: { enabled: true, model: "claude-sonnet-5", effort: "high" } }));
   let memoBody: Record<string, unknown> | null = null;
@@ -525,9 +542,23 @@ test("pipeline: tick a starter factor, run the six stages, deploy to paper", asy
   await expect(page.getByTestId("pl-ic-decay")).toBeVisible();
   await expect(page.getByTestId("pl-capture")).toContainText("0.94");
   await expect(page.getByTestId("pl-rolling-beta")).toBeVisible();
-  // warnings are translated, not shown as raw codes (incl. the V3 `not_significant` code)
+  // warnings are translated, not shown as raw codes (incl. the V3 `not_significant` and V4 `parameter_spike` codes)
   await expect(page.getByText("调仓次数过少", { exact: false })).toBeVisible();
   await expect(page.getByText("谈不上统计显著", { exact: false })).toBeVisible();
+  await expect(page.locator(".pl-warning", { hasText: "参数尖峰" })).toBeVisible();
+  // no result was in storage before this run, so no restored chip; the run persisted itself
+  await expect(page.getByTestId("pl-restored")).toHaveCount(0);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("aiquant.pipeline.last") ?? "null")?.backtest?.stats?.sharpe)).toBe(0.88);
+  // ④ V4 rolling half-year hit rate (44.1 → red) in the stat grid
+  const rolling = page.getByTestId("pl-rolling-hit");
+  await expect(rolling).toContainText("44.1%");
+  await expect(rolling).toContainText("vs 等权基准");
+  await expect(rolling.locator(".pl-tone--bad")).toBeVisible();
+  // ② V4 active-days chip only on the gated factor (82.6 → "启用 83%")
+  const activeChips = page.getByTestId("pl-active-chip");
+  await expect(activeChips).toHaveCount(1);
+  await expect(activeChips.first()).toBeVisible();
+  await expect(activeChips.first()).toHaveText("启用 83%");
   // ③ → request: V3 shrink_to_equal and the browser's prior_trials count travel with the run
   expect(runBody).not.toBeNull();
   expect(runBody!.shrink_to_equal).toBe(0);
@@ -556,6 +587,44 @@ test("pipeline: tick a starter factor, run the six stages, deploy to paper", asy
   await expect(alts).toContainText("0.021");
   await expect(alts.locator("tr", { hasText: "HRP" }).locator(".pl-tone--ok").first()).toBeVisible();
   await expect(page.getByTestId("pl-alts-note")).toContainText("DeMiguel");
+  // ④ V4 sensitivity heatmap: 9 cells (one dashed null), the chosen centre outlined with the headline Sharpe, spike chip red
+  const sens = page.getByTestId("pl-sens");
+  await expect(sens).toBeVisible();
+  await expect(sens.locator(".pl-sens__cell")).toHaveCount(9);
+  await expect(sens.locator(".pl-sens__cell--none")).toHaveCount(1);
+  const chosenCell = sens.locator(".pl-sens__cell.is-chosen");
+  await expect(chosenCell).toHaveCount(1);
+  await expect(chosenCell).toHaveText("0.88");
+  await expect(chosenCell).toHaveAttribute("data-chosen", "true");
+  await expect(chosenCell).toHaveCSS("outline-style", "solid");
+  await expect(sens.locator(".pl-sens__cell").filter({ hasText: "-0.15" })).toBeVisible();
+  const spike = page.getByTestId("pl-spike");
+  await expect(spike).toBeVisible();
+  await expect(spike).toHaveText("尖峰 +0.64");
+  await expect(spike).toHaveClass(/pl-tone--bad/);
+  await expect(page.getByText("邻域中位夏普 0.24")).toBeVisible();
+  await expect(page.getByText("López de Prado", { exact: false })).toBeVisible();
+  // ④ V4 Markdown report: the clipboard is stubbed so the suite stays hermetic, then the content is checked
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: (s: string) => { (window as unknown as { __md: string }).__md = s; return Promise.resolve(); } },
+    });
+  });
+  await page.getByTestId("pl-copy-md").click();
+  await expect(page.getByTestId("pl-md-copied")).toBeVisible();
+  const md = await page.evaluate(() => (window as unknown as { __md: string }).__md);
+  expect(md).toContain("# 端到端量化回测报告");
+  expect(md).toContain("波动率倒数");
+  expect(md).toContain("| 夏普 | 0.88 | 0.74 |");
+  expect(md).toContain("## 样本内 vs 留出期");
+  expect(md).toContain("PSR 0.98 · DSR 0.86 · 夏普 t 值 2.10（门槛 3.0）· MinTRL 需 336 天 / 已有 540 天");
+  expect(md).toContain("## 参数敏感性（Top-N 5/8/11 × 调仓 5/10/20）");
+  expect(md).toContain("**0.88**");
+  expect(md).toContain("滚动半年胜率 | 44.1%");
+  expect(md).toContain("| 1 | AAPL | 科技 | 25.0% |");
+  expect(md).toContain("参数尖峰");
+  expect(md).not.toContain("equity_curve");
   // ⑤ V3 regime table (five rows, labels translated) and Brinson-Fachler attribution
   const regimes = page.getByTestId("pl-regimes");
   await expect(regimes.locator("tbody tr")).toHaveCount(5);
@@ -601,4 +670,24 @@ test("pipeline: tick a starter factor, run the six stages, deploy to paper", asy
     (JSON.parse(localStorage.getItem("aiquant.paper") ?? "[]") as Array<{ kind: string }>).map((d) => d.kind),
   );
   expect(kinds).toContain("pipeline");
+  // V4 last-result persistence: a reload restores the run from storage and says so; no new request is made
+  let runsAfterReload = 0;
+  await page.route("**/api/pipeline/run", (route) => {
+    runsAfterReload += 1;
+    return route.fallback();
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "端到端量化", exact: true }).click();
+  const restored = page.getByTestId("pl-restored");
+  await expect(restored).toBeVisible();
+  await expect(restored).toHaveText("已恢复上次结果 · 2026-09-03");
+  await expect(page.getByTestId("pl-sharpe")).toContainText("0.88");
+  await expect(page.getByTestId("pl-sens").locator(".pl-sens__cell")).toHaveCount(9);
+  expect(runsAfterReload).toBe(0);
+  expect(await page.evaluate(() => localStorage.getItem("aiquant.pipeline.last"))).not.toBeNull();
+  // the next run clears the chip
+  await page.getByRole("checkbox", { name: "短期反转" }).check();
+  await page.getByTestId("pl-run").click();
+  await expect(page.getByTestId("pl-trials")).toContainText("已尝试 2 次");
+  await expect(restored).toHaveCount(0);
 });

@@ -12,6 +12,7 @@ import {
   type PipelineRegime,
   type PipelineResult,
   type PipelineRunRequest,
+  type PipelineSensitivity,
   type PipelineSignalWeighting,
   type Point,
 } from "../api";
@@ -27,6 +28,9 @@ const FORM_KEY = "aiquant.pipeline.form";
 /** V3: how many runs this browser has made, sent as `prior_trials` so the
  * Deflated Sharpe penalises repeated tinkering honestly. */
 const TRIALS_KEY = "aiquant.pipeline.trials";
+/** V4: the last successful run, restored on mount so a reload does not lose
+ * the numbers (and the Markdown report) the user was looking at. */
+const LAST_KEY = "aiquant.pipeline.last";
 const STAGE_COUNT = 6;
 
 /** Everything the user can set. Persisted as-is so a reload lands on the same
@@ -129,6 +133,7 @@ const WARNING_KEYS: Record<string, MsgKey> = {
   low_coverage: "pl.warn.low_coverage",
   low_psr: "pl.warn.low_psr",
   not_significant: "pl.warn.not_significant",
+  parameter_spike: "pl.warn.parameter_spike",
 };
 
 function formFromDefaults(d: PipelineConfig["defaults"], base?: Partial<FormState>): FormState {
@@ -167,6 +172,51 @@ function saveTrials(n: number) {
     localStorage.setItem(TRIALS_KEY, String(n));
   } catch {
     /* storage unavailable — the count still lives in state for this session */
+  }
+}
+
+/** Shallow shape check only — the page renders whatever the server sent, and a
+ * stale or truncated blob must not crash the mount. */
+function loadLast(): PipelineResult | null {
+  try {
+    const raw = localStorage.getItem(LAST_KEY);
+    if (!raw) return null;
+    const r = JSON.parse(raw) as PipelineResult;
+    if (!r || typeof r !== "object" || !r.backtest?.stats || !r.target_weights?.weights || !r.signal?.components) return null;
+    return r;
+  } catch {
+    return null;
+  }
+}
+
+function saveLast(r: PipelineResult) {
+  try {
+    localStorage.setItem(LAST_KEY, JSON.stringify(r));
+  } catch {
+    /* quota exceeded or storage unavailable — the result still lives in state */
+  }
+}
+
+/** Clipboard write with the execCommand fallback for insecure contexts. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -218,11 +268,14 @@ export function PipelinePage({ hidden }: Props) {
   const [draftError, setDraftError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<PipelineResult | null>(null);
+  const [result, setResult] = useState<PipelineResult | null>(loadLast);
+  // True while the result on screen came from storage rather than this session.
+  const [restored, setRestored] = useState<boolean>(() => result !== null);
   const [altSort, setAltSort] = useState<{ key: AltKey; dir: 1 | -1 }>({ key: "sharpe", dir: -1 });
   const [deployName, setDeployName] = useState("");
   const [deployed, setDeployed] = useState(false);
   const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
+  const [mdCopied, setMdCopied] = useState<"idle" | "ok" | "fail">("idle");
   const [stage, setStage] = useState(1);
   const [trials, setTrials] = useState<number>(loadTrials);
   const [aiEnabled, setAiEnabled] = useState(false);
@@ -408,9 +461,12 @@ export function PipelinePage({ hidden }: Props) {
     setError(null);
     setDeployed(false);
     setCopied("idle");
+    setMdCopied("idle");
     try {
       const res = await api.pipelineRun(buildRequest());
       setResult(res);
+      setRestored(false);
+      saveLast(res);
       setTrials((n) => {
         const next = n + 1;
         saveTrials(next);
@@ -450,28 +506,26 @@ export function PipelinePage({ hidden }: Props) {
   const copyCsv = async () => {
     if (!result) return;
     const rows = ["symbol,weight_pct", ...result.target_weights.weights.map((w) => `${w.symbol},${w.weight_pct.toFixed(2)}`)];
-    const csv = rows.join("\n");
-    let ok = false;
-    try {
-      await navigator.clipboard.writeText(csv);
-      ok = true;
-    } catch {
-      try {
-        const ta = document.createElement("textarea");
-        ta.value = csv;
-        ta.setAttribute("readonly", "");
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        ta.select();
-        ok = document.execCommand("copy");
-        document.body.removeChild(ta);
-      } catch {
-        ok = false;
-      }
-    }
+    const ok = await copyText(rows.join("\n"));
     setCopied(ok ? "ok" : "fail");
     window.setTimeout(() => setCopied("idle"), 2500);
+  };
+
+  /** V4: the stage summaries as one Markdown document in the current language. */
+  const copyMarkdown = async () => {
+    if (!result) return;
+    const md = markdownReport(result, t, {
+      market: marketLabel(result.universe.market),
+      scheme: schemeName(result.portfolio.scheme),
+      weighting: weightingLabel(result.signal.weighting),
+      sector: (symbol: string, group?: string) => {
+        const g = groupOf(symbol, group);
+        return g === undefined ? undefined : sectorLabel(g);
+      },
+    });
+    const ok = await copyText(md);
+    setMdCopied(ok ? "ok" : "fail");
+    window.setTimeout(() => setMdCopied("idle"), 2500);
   };
 
   const goStage = (n: number) => {
@@ -743,6 +797,11 @@ export function PipelinePage({ hidden }: Props) {
                             <td>
                               <code className="pl-factor__expr">{c.expression}</code>
                               {c.invert && <span className="dim"> · {t("fl.bt.inverted")}</span>}
+                              {c.active_pct !== undefined && c.active_pct < 100 && (
+                                <span className="chip pl-chip--mini" title={t("pl.sig.activeTitle")} data-testid="pl-active-chip">
+                                  {t("pl.sig.active", { v: c.active_pct.toFixed(0) })}
+                                </span>
+                              )}
                             </td>
                             <td className="pl-num">{(c.weight * 100).toFixed(0)}%</td>
                             <td className="pl-num dim">{c.avg_weight === undefined ? "—" : `${(c.avg_weight * 100).toFixed(0)}%`}</td>
@@ -904,8 +963,19 @@ export function PipelinePage({ hidden }: Props) {
         <section className="panel pl-card" ref={setStageRef(3)} id="pl-stage-4" tabIndex={-1}>
           <div className="panel__head">
             <span className="panel__title">④ {t("pl.stage4")}</span>
-            <span className="panel__meta">
-              {bt ? `${bt.span.from} → ${bt.span.to}` : running ? t("pl.bt.running") : ""}
+            <span className="pl-head-actions">
+              {result && (
+                <>
+                  {mdCopied === "ok" && <span className="pl-badge pl-badge--ok" data-testid="pl-md-copied">✓ {t("pl.bt.mdCopied")}</span>}
+                  {mdCopied === "fail" && <span className="pl-badge pl-badge--warn">{t("pl.bt.mdCopyFailed")}</span>}
+                  <button className="btn btn--mini" onClick={copyMarkdown} data-testid="pl-copy-md">
+                    {t("pl.bt.copyMd")}
+                  </button>
+                </>
+              )}
+              <span className="panel__meta">
+                {bt ? `${bt.span.from} → ${bt.span.to}` : running ? t("pl.bt.running") : ""}
+              </span>
             </span>
           </div>
           <div className="panel__body pl-body">
@@ -918,6 +988,11 @@ export function PipelinePage({ hidden }: Props) {
               >
                 {running ? t("pl.bt.running") : t("pl.bt.run")}
               </button>
+              {restored && result && (
+                <span className="chip pl-restored" data-testid="pl-restored">
+                  {t("pl.bt.restored", { d: result.target_weights.as_of || result.backtest.span.to })}
+                </span>
+              )}
               <span className="dim pl-hint">
                 {chosen.length === 0
                   ? t("pl.bt.needFactor")
@@ -984,6 +1059,16 @@ export function PipelinePage({ hidden }: Props) {
                     sub={t("pl.bt.benchSub", { v: `${bt.stats.benchmark.ann_vol_pct.toFixed(1)}%` })}
                   />
                   <Stat label={t("bt.winrate")} value={`${bt.stats.win_rate_pct.toFixed(1)}%`} />
+                  {bt.stats.rolling_6m_beat_pct !== undefined && (
+                    <Stat
+                      label={t("pl.bt.rolling")}
+                      value={bt.stats.rolling_6m_beat_pct === null ? "—" : `${bt.stats.rolling_6m_beat_pct.toFixed(1)}%`}
+                      toneClass={hitTone(bt.stats.rolling_6m_beat_pct)}
+                      sub={t("pl.bt.rollingSub")}
+                      title={t("pl.bt.rollingTitle")}
+                      testId="pl-rolling-hit"
+                    />
+                  )}
                 </div>
 
                 {bt.overfitting && (
@@ -1179,6 +1264,29 @@ export function PipelinePage({ hidden }: Props) {
                       </table>
                     </div>
                     <p className="dim pl-hint" data-testid="pl-alts-note">{t("pl.bt.altsEqNote")}</p>
+                  </>
+                )}
+
+                {result?.sensitivity && (
+                  <>
+                    <div className="pl-subhead">
+                      {t("pl.bt.sens")}
+                      <span className="chip">{t("pl.bt.sens.median", { v: numOpt(result.sensitivity.median_sharpe) })}</span>
+                      <span className="chip">{t("pl.bt.sens.min", { v: numOpt(result.sensitivity.min_sharpe) })}</span>
+                      <span
+                        className={`chip ${spikeTone(result.sensitivity.spike)}`}
+                        title={t("pl.bt.sens.spikeTitle")}
+                        data-testid="pl-spike"
+                      >
+                        {t("pl.bt.sens.spike", { v: signed2Opt(result.sensitivity.spike) })}
+                      </span>
+                    </div>
+                    <SensitivityGrid
+                      s={result.sensitivity}
+                      chosenTopN={result.portfolio.top_n}
+                      chosenRebalance={result.portfolio.rebalance}
+                    />
+                    <p className="dim pl-hint">{t("pl.bt.sens.note")}</p>
                   </>
                 )}
               </>
@@ -1820,6 +1928,252 @@ function SectorStack({
   );
 }
 
+/** V4 parameter-sensitivity heatmap: rows follow `top_n`, columns follow
+ * `rebalance`, each cell prints its Sharpe and is shaded by it (red below zero,
+ * green above, intensity relative to the grid's extremes). The chosen
+ * configuration is outlined; a null cell is a dashed empty slot. */
+function SensitivityGrid({
+  s, chosenTopN, chosenRebalance,
+}: { s: PipelineSensitivity; chosenTopN: number; chosenRebalance: number }) {
+  const { t } = useT();
+  const sharpes = s.cells.flat().flatMap((c) => (c ? [c.sharpe] : []));
+  const maxPos = Math.max(0.5, ...sharpes);
+  const maxNeg = Math.max(0.5, ...sharpes.map((v) => -v));
+  const bg = (v: number) =>
+    v >= 0
+      ? `rgba(61, 220, 132, ${(0.1 + 0.7 * Math.min(1, v / maxPos)).toFixed(2)})`
+      : `rgba(255, 92, 108, ${(0.1 + 0.7 * Math.min(1, -v / maxNeg)).toFixed(2)})`;
+  return (
+    <div className="pl-sens" data-testid="pl-sens">
+      <div className="pl-sens__axes dim">
+        {t("pl.bt.sens.rows")} · {t("pl.bt.sens.cols")}
+      </div>
+      <div className="pl-sens__grid" role="table" aria-label={t("pl.bt.sens")} style={{ gridTemplateColumns: `72px repeat(${s.rebalance.length}, minmax(56px, 1fr))` }}>
+        <span className="pl-sens__corner" role="columnheader">{t("pl.bt.sens.corner")}</span>
+        {s.rebalance.map((r) => (
+          <span key={`c${r}`} className="pl-sens__hdr" role="columnheader">{r}</span>
+        ))}
+        {s.top_n.map((n, i) => (
+          <SensitivityRow
+            key={n}
+            topN={n}
+            rebalance={s.rebalance}
+            cells={s.cells[i] ?? []}
+            chosenRebalance={n === chosenTopN ? chosenRebalance : null}
+            bg={bg}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SensitivityRow({
+  topN, rebalance, cells, chosenRebalance, bg,
+}: {
+  topN: number;
+  rebalance: number[];
+  cells: Array<PipelineSensitivity["cells"][number][number]>;
+  chosenRebalance: number | null;
+  bg: (v: number) => string;
+}) {
+  const { t } = useT();
+  return (
+    <>
+      <span className="pl-sens__hdr" role="rowheader">{topN}</span>
+      {rebalance.map((r, j) => {
+        const c = cells[j] ?? null;
+        const chosen = r === chosenRebalance;
+        const cls = `pl-sens__cell${chosen ? " is-chosen" : ""}`;
+        if (!c) {
+          return (
+            <span key={r} className={`${cls} pl-sens__cell--none`} role="cell" title={t("pl.bt.sens.cellNone", { n: topN, r })}>
+              —
+            </span>
+          );
+        }
+        const title =
+          t("pl.bt.sens.cell", { n: topN, r, s: c.sharpe.toFixed(2), e: signed1(c.excess_pct), d: c.max_drawdown_pct.toFixed(1) }) +
+          (chosen ? t("pl.bt.sens.cellChosen") : "");
+        return (
+          <span
+            key={r}
+            className={cls}
+            role="cell"
+            style={{ background: bg(c.sharpe) }}
+            title={title}
+            aria-label={chosen ? t("pl.bt.sens.chosen") : undefined}
+            data-chosen={chosen ? "true" : undefined}
+          >
+            {c.sharpe.toFixed(2)}
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
+type Translate = (key: MsgKey, vars?: Record<string, string | number>) => string;
+
+/** V4 Markdown report: the same numbers the page shows, in the current UI
+ * language, laid out for a chat window or a notebook. No curves. */
+function markdownReport(
+  r: PipelineResult,
+  t: Translate,
+  names: { market: string; scheme: string; weighting: string; sector: (symbol: string, group?: string) => string | undefined },
+): string {
+  const bt = r.backtest;
+  const st = bt.stats;
+  const b = st.benchmark;
+  const o = bt.overfitting;
+  const dash = "—";
+  const pc = (v: number | null | undefined) => (v === null || v === undefined ? dash : pct(v));
+  const p1 = (v: number | null | undefined) => (v === null || v === undefined ? dash : `${v.toFixed(1)}%`);
+  const esc = (v: string) => v.replaceAll("|", "\\|");
+  const row = (cells: Array<string | number>) => `| ${cells.map((c) => esc(String(c))).join(" | ")} |`;
+  const table = (head: string[], rows: Array<Array<string | number>>) =>
+    [row(head), `|${head.map((_, i) => (i === 0 ? "---" : "---:")).join("|")}|`, ...rows.map(row)].join("\n");
+  const out: string[] = [];
+
+  out.push(`# ${t("pl.md.title")}`);
+  out.push("");
+  out.push(t("pl.md.meta", { m: names.market, s: names.scheme, n: r.signal.components.length, w: names.weighting }));
+  out.push(t("pl.md.span", { from: bt.span.from, to: bt.span.to, k: r.universe.symbols, d: new Date().toISOString().slice(0, 10) }));
+  out.push("");
+
+  out.push(`## ${t("pl.md.factors")}`);
+  for (const c of r.signal.components) {
+    const inv = c.invert ? ` · ${t("fl.bt.inverted")}` : "";
+    const active = c.active_pct !== undefined && c.active_pct < 100 ? ` · ${t("pl.sig.active", { v: c.active_pct.toFixed(0) })}` : "";
+    out.push(
+      `- \`${c.expression}\`${inv} — ${t("pl.md.factorRow", {
+        w: (c.weight * 100).toFixed(0), is: signed3(c.is_ic), oos: signed3(c.oos_ic), s: c.standalone_sharpe.toFixed(2),
+      })}${active}`,
+    );
+  }
+  out.push("");
+
+  out.push(`## ${t("pl.md.headline")}`);
+  const headRows: Array<Array<string | number>> = [
+    [t("bt.totalReturn"), pct(st.total_return_pct), pct(b.total_return_pct)],
+    [t("pl.bt.excess"), pct(st.excess_pct), dash],
+    [t("bt.cagr"), pc(st.cagr_pct), pc(b.cagr_pct)],
+    [t("bt.sharpe"), st.sharpe.toFixed(2), b.sharpe.toFixed(2)],
+    [t("bt.sortino"), st.sortino.toFixed(2), dash],
+    [t("pl.bt.calmar"), st.calmar.toFixed(2), dash],
+    [t("bt.maxdd"), pct(st.max_drawdown_pct), pct(b.max_drawdown_pct)],
+    [t("pl.bt.vol"), p1(st.ann_vol_pct), p1(b.ann_vol_pct)],
+    [t("bt.winrate"), p1(st.win_rate_pct), dash],
+  ];
+  if (st.rolling_6m_beat_pct !== undefined) headRows.push([t("pl.bt.rolling"), p1(st.rolling_6m_beat_pct), dash]);
+  out.push(table([t("pp.cmp.metric"), t("pl.bt.strategy"), t("fl.bt.bench")], headRows));
+  out.push("");
+
+  out.push(`## ${t("pl.md.split")}`);
+  out.push(
+    table(
+      [t("pp.cmp.metric"), `${t("lab.tbl.insample")} ${bt.in_sample.from} → ${bt.in_sample.to}`, `${t("pl.bt.holdout")} ${bt.holdout.from} → ${bt.holdout.to}`],
+      [
+        [t("bt.totalReturn"), pct(bt.in_sample.total_return_pct), pct(bt.holdout.total_return_pct)],
+        [t("bt.sharpe"), bt.in_sample.sharpe.toFixed(2), bt.holdout.sharpe.toFixed(2)],
+        [t("bt.maxdd"), pct(bt.in_sample.max_drawdown_pct), pct(bt.holdout.max_drawdown_pct)],
+        [t("pl.bt.excess"), pct(bt.in_sample.excess_pct), pct(bt.holdout.excess_pct)],
+      ],
+    ),
+  );
+  out.push("");
+
+  if (o) {
+    out.push(`## ${t("pl.md.ofit")}`);
+    const mintrl =
+      o.min_track_record_days === undefined
+        ? dash
+        : o.min_track_record_days === null
+          ? t("pl.bt.ofit.mintrlNone")
+          : t("pl.bt.ofit.mintrlVal", { need: o.min_track_record_days, have: o.track_days ?? dash });
+    out.push(
+      t("pl.md.ofitLine", {
+        psr: prob(o.psr), dsr: prob(o.dsr), t: numOpt(o.t_stat), h: (o.hlz_hurdle ?? 3).toFixed(1), mintrl, n: o.trials,
+      }),
+    );
+    out.push("");
+  }
+
+  const sens = r.sensitivity;
+  if (sens) {
+    out.push(`## ${t("pl.md.sens", { tn: sens.top_n.join("/"), rb: sens.rebalance.join("/") })}`);
+    out.push(t("pl.md.sensLine", { med: numOpt(sens.median_sharpe), min: numOpt(sens.min_sharpe), spike: signed2Opt(sens.spike) }));
+    out.push("");
+    out.push(
+      table(
+        [t("pl.bt.sens.corner"), ...sens.rebalance.map(String)],
+        sens.top_n.map((n, i) => [
+          n,
+          ...sens.rebalance.map((rb, j) => {
+            const c = sens.cells[i]?.[j];
+            if (!c) return dash;
+            const v = c.sharpe.toFixed(2);
+            return n === r.portfolio.top_n && rb === r.portfolio.rebalance ? `**${v}**` : v;
+          }),
+        ]),
+      ),
+    );
+    out.push("");
+    out.push(`> ${t("pl.bt.sens.note")}`);
+    out.push("");
+  }
+
+  out.push(`## ${t("pl.md.risk")}`);
+  const risk = r.risk;
+  const chips = [
+    `β ${st.beta.toFixed(2)}`,
+    `${t("pl.risk.te")} ${st.tracking_error_pct.toFixed(1)}%`,
+    `IR ${st.information_ratio.toFixed(2)}`,
+    `${t("pl.risk.corr")} ${risk.correlation_to_benchmark.toFixed(2)}`,
+    t("pl.pf.effN", { n: risk.concentration.avg_effective_n.toFixed(1) }),
+    t("pl.risk.cap", { v: risk.concentration.cap_binding_pct.toFixed(0) }),
+    t("pl.pf.exposure", { v: r.portfolio.avg_exposure_pct.toFixed(0) }),
+    t("pl.pf.annualTurnover", { v: (r.portfolio.annual_turnover_x ?? 0).toFixed(1) }),
+  ];
+  if (risk.capture) {
+    chips.push(t("pl.risk.captureUp", { v: ratio(risk.capture.up), n: risk.capture.up_periods }));
+    chips.push(t("pl.risk.captureDown", { v: ratio(risk.capture.down), n: risk.capture.down_periods }));
+  }
+  if (risk.cvar_95_pct !== undefined) chips.push(t("pl.risk.cvar", { v: numOpt(risk.cvar_95_pct) }));
+  if (risk.attribution) {
+    chips.push(t("pl.risk.attr.alloc", { v: signed1(risk.attribution.allocation_pct) }));
+    chips.push(t("pl.risk.attr.sel", { v: signed1(risk.attribution.selection_pct) }));
+  }
+  out.push(chips.map((c) => `- ${c}`).join("\n"));
+  out.push("");
+
+  out.push(`## ${t("pl.md.weights", { d: r.target_weights.as_of, e: r.target_weights.exposure_pct.toFixed(0) })}`);
+  const top = r.target_weights.weights.slice(0, 5);
+  const withSector = top.some((w) => names.sector(w.symbol, w.group) !== undefined);
+  out.push(
+    table(
+      ["#", t("pl.deploy.symbol"), ...(withSector ? [t("pl.deploy.sector")] : []), t("pl.deploy.weight")],
+      top.map((w) => [
+        w.score_rank,
+        w.symbol,
+        ...(withSector ? [names.sector(w.symbol, w.group) ?? dash] : []),
+        `${w.weight_pct.toFixed(1)}%`,
+      ]),
+    ),
+  );
+  out.push("");
+
+  out.push(`## ${t("pl.md.warnings")}`);
+  out.push(
+    r.warnings.length === 0
+      ? t("pl.md.none")
+      : r.warnings.map((w) => `- ⚠ ${WARNING_KEYS[w] ? t(WARNING_KEYS[w]) : t("pl.warn.generic", { code: w })}`).join("\n"),
+  );
+  out.push("");
+  out.push(`_${t("pl.disclaimer")}_`);
+  return out.join("\n");
+}
+
 /** Exactly the summary the page displays — never the curves — so the memo
  * cannot cite a number the user has not seen. Truncations per the contract. */
 function memoRequest(r: PipelineResult, lang: Lang): PipelineMemoRequest {
@@ -1978,5 +2332,9 @@ const pOpt = (v: number | null | undefined) => (v === null || v === undefined ? 
 const pTone = (p: number | null | undefined, delta: number | undefined) =>
   p !== null && p !== undefined && p < 0.05 && (delta ?? 0) > 0 ? "pl-tone--ok" : "dim";
 const ratio = (v: number | null) => (v === null ? "—" : v.toFixed(2));
+/** V4 rolling half-year hit rate vs 1/N: ≥ 60 is a real edge, 45–60 a coin toss, below that the benchmark wins. */
+const hitTone = (v: number | null) => (v === null ? "" : v >= 60 ? "pl-tone--ok" : v >= 45 ? "pl-tone--warn" : "pl-tone--bad");
+/** V4 spike = chosen Sharpe − grid median: ≤ 0.2 plateau, 0.2–0.5 borderline, > 0.5 the server flags a parameter spike. */
+const spikeTone = (v: number | null) => (v === null ? "" : v <= 0.2 ? "pl-tone--ok" : v <= 0.5 ? "pl-tone--warn" : "pl-tone--bad");
 /** Up-capture above 1 and down-capture below 1 are the good directions. */
 const captureTone = (v: number | null, up: boolean) => (v === null ? "" : (up ? v >= 1 : v <= 1) ? "up" : "dn");

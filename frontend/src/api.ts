@@ -558,6 +558,26 @@ export interface PipelineAttributionGroup {
   selection_pct: number;
 }
 
+/** V4 one configuration of the parameter-sensitivity grid. */
+export interface PipelineSensitivityCell {
+  sharpe: number;
+  excess_pct: number;
+  max_drawdown_pct: number;
+}
+
+/** V4 3×3 neighbourhood of the chosen (top_n, rebalance): rows follow
+ * `top_n`, columns follow `rebalance`; a null cell could not be simulated.
+ * `spike` = chosen Sharpe minus the grid median — above 0.5 the server also
+ * emits the `parameter_spike` warning. */
+export interface PipelineSensitivity {
+  top_n: number[];
+  rebalance: number[];
+  cells: Array<Array<PipelineSensitivityCell | null>>;
+  median_sharpe: number | null;
+  min_sharpe: number | null;
+  spike: number | null;
+}
+
 export interface PipelineTargetWeight {
   symbol: string;
   weight_pct: number;
@@ -580,6 +600,10 @@ export interface PipelineResult {
         /** Mean weight over the backtest — differs from `weight` under `ic_expanding`. */
         avg_weight?: number;
         standalone_sharpe: number;
+        /** V4: share of post-warm-up days on which the factor carried a non-zero
+         * weight; under `ic_expanding` a factor whose expanding IC sits within
+         * ±0.005 of zero is switched off. Static weightings report 100. */
+        active_pct?: number;
       }
     >;
     max_pair_corr: number;
@@ -623,6 +647,9 @@ export interface PipelineResult {
       beta: number;
       tracking_error_pct: number;
       information_ratio: number;
+      /** V4: share of rolling 126-day windows that out-compounded the
+       * equal-weight benchmark; null when the history is too short. */
+      rolling_6m_beat_pct?: number | null;
       benchmark: {
         total_return_pct: number;
         cagr_pct: number | null;
@@ -672,6 +699,8 @@ export interface PipelineResult {
     attribution?: PipelineAttribution;
   };
   alternatives: PipelineAlternative[];
+  /** V4: null when `compare` is false. */
+  sensitivity?: PipelineSensitivity | null;
   target_weights: {
     as_of: string;
     exposure_pct: number;
