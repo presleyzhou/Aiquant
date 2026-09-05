@@ -574,3 +574,50 @@ def test_factor_report_card(monkeypatch):
     assert ok.status_code == 200 and ok.json()["horizon"] == 10
     bad = client.post("/api/factors/analyze", json={"expression": "rank(close +", "market": "us", "horizon": 10})
     assert bad.status_code == 400
+
+
+def test_tradability_and_trials_gates():
+    from app.services.factor_mine import _verdict, significance_bar
+
+    good = {"coverage": 0.99, "complexity": 5, "is_ic": 0.03, "is_icir": 0.3, "oos_ic": 0.02,
+            "max_zoo_corr": 0.1, "spread_after_cost_pct": 0.4, "turnover": 0.3, "t_stat": 2.6}
+    assert _verdict(good, "standard")[0] is True
+    # pretty IC that loses money after costs is rejected with an actionable reason
+    costly = {**good, "spread_after_cost_pct": -0.2, "turnover": 0.9}
+    ok, reasons = _verdict(costly, "standard")
+    assert ok is False and any("not tradable" in r for r in reasons)
+    # the significance bar rises with trials: 2.0 → 2.5 (10) → 3.0 (100, capped)
+    assert significance_bar(1) == 2.0 and abs(significance_bar(10) - 2.5) < 1e-9
+    assert significance_bar(100) == 3.0 and significance_bar(10_000) == 3.0
+    assert _verdict(good, "standard", trials=10)[0] is True      # 2.6 ≥ 2.5
+    ok, reasons = _verdict(good, "standard", trials=200)          # 2.6 < 3.0
+    assert ok is False and any("not significant" in r for r in reasons)
+    # legacy metric dicts without the new keys still work
+    assert _verdict({k: v for k, v in good.items() if k not in ("spread_after_cost_pct", "turnover", "t_stat")})[0]
+
+
+def test_evaluate_candidate_reports_tradability(monkeypatch):
+    from app.services import factor_mine
+
+    panel = _panel(n_days=400, n_syms=12)
+    m = factor_mine.evaluate_candidate("rank(delta(close, 5))", panel, 10, [])
+    assert {"turnover", "spread_pct", "spread_after_cost_pct", "t_stat"} <= set(m)
+    assert 0 <= m["turnover"] <= 1
+    assert abs(m["spread_after_cost_pct"] - (m["spread_pct"] - m["turnover"] * 2 * factor_mine.COST_BPS / 100)) < 5e-3  # rounded fields
+
+
+def test_composite_rolling_weights(monkeypatch):
+    from app.services import factor_mine
+
+    panel = _panel(n_days=500, n_syms=12)
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    factors = [{"expression": "rank(delta(close, 5))", "horizon": 10}, {"expression": "rank(ts_std(close, 10))", "horizon": 10}]
+    out = factor_mine.composite_backtest_blocking(factors, "us", weighting="rolling", top_n=3, rebalance=10)
+    assert out["weighting"] == "rolling"
+    ws = [c["weight"] for c in out["components"]]
+    assert all(0 <= w <= 1 for w in ws) and abs(sum(ws) - 1) < 0.01
+    assert "equity_curve" in out and len(out["equity_curve"]) > 100
+    # api rejects unknown weighting
+    client = TestClient(app)
+    r = client.post("/api/factors/composite", json={"factors": factors, "market": "us", "weighting": "magic"})
+    assert r.status_code == 422

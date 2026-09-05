@@ -14,6 +14,8 @@ import {
   saveFactors,
   savedFactors,
   type SavedFactor,
+  factorTrials,
+  saveFactorTrials,
 } from "../store";
 import { buildFactorShare, takeFactorShare } from "../share";
 import { deployPaper } from "../store";
@@ -39,6 +41,9 @@ interface FactorRow {
   stability?: number;
   max_zoo_corr?: number;
   complexity?: number;
+  turnover?: number;
+  spread_after_cost_pct?: number;
+  t_stat?: number;
 }
 
 interface LoopItem {
@@ -136,6 +141,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
           .map((f) => f.expression)
           .slice(0, 20),
         lessons: factorLessons(),
+        trials: factorTrials(),
       };
       await streamNDJSON(
         "/api/factors/mine",
@@ -188,6 +194,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
               }
               const lessons = (e.lessons as string[]) ?? [];
               if (lessons.length) saveFactorLessons(lessons);
+              if (typeof e.trials === "number") saveFactorTrials(e.trials);
               break;
             }
             case "error":
@@ -493,6 +500,10 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                               <Chip label="ICIR" v={row.is_icir} signed />
                               <Chip label={t("fl.m.oosic")} v={row.oos_ic} signed />
                               <Chip label={t("fl.m.corr")} v={row.max_zoo_corr} />
+                              {row.turnover !== undefined && <Chip label={t("fl.m.turnover")} v={row.turnover} />}
+                              {row.spread_after_cost_pct !== undefined && (
+                                <Chip label={t("fl.m.cost")} v={row.spread_after_cost_pct} signed />
+                              )}
                               <span className={`fl-verdict ${row.accepted ? "up" : "dn"}`}>
                                 {row.accepted ? t("fl.accepted") : t("fl.rejected")}
                               </span>
@@ -670,6 +681,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                       >
                         <option value="ic">{t("fl.cp.ic")}</option>
                         <option value="equal">{t("fl.cp.equal")}</option>
+                        <option value="rolling">{t("fl.cp.rolling")}</option>
                       </select>
                       <button
                         className="btn btn--primary"
@@ -687,7 +699,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                       <div className="fl-bt__head dim">
                         {t("fl.cp.head", {
                           n: String(compositeResult.components.length),
-                          w: compositeResult.weighting === "ic" ? t("fl.cp.ic") : t("fl.cp.equal"),
+                          w: compositeResult.weighting === "ic" ? t("fl.cp.ic") : compositeResult.weighting === "rolling" ? t("fl.cp.rolling") : t("fl.cp.equal"),
                           c: compositeResult.max_pair_corr.toFixed(2),
                         })}
                       </div>

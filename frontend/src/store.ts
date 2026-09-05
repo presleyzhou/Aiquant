@@ -391,3 +391,14 @@ export function stripeAccount(): string | null {
 export function setStripeAccount(id: string): void {
   localStorage.setItem(STRIPE_ACCT_KEY, id);
 }
+
+/** Running count of candidates ever evaluated by this browser's mining
+ * sessions — the multiple-comparison denominator the server uses to raise
+ * the significance bar. Monotone; never reset by a new session. */
+const TRIALS_KEY = "aiquant.factors.trials";
+export function factorTrials(): number {
+  return Number(localStorage.getItem(TRIALS_KEY) ?? 0) || 0;
+}
+export function saveFactorTrials(n: number): void {
+  localStorage.setItem(TRIALS_KEY, String(Math.max(factorTrials(), Math.floor(n))));
+}

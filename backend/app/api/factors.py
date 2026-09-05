@@ -65,7 +65,7 @@ class CompositeFactor(BaseModel):
 class CompositeRequest(BaseModel):
     factors: list[CompositeFactor] = Field(min_length=2, max_length=8)
     market: str = Field("us", pattern="^(us|crypto)$")
-    weighting: str = Field("ic", description="ic | equal")
+    weighting: str = Field("ic", pattern="^(ic|equal|rolling)$", description="ic | equal | rolling")
     top_n: int = Field(5, ge=2, le=10)
     rebalance: int = Field(10, ge=1, le=30)
 
