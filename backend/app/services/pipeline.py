@@ -104,6 +104,8 @@ LIMITS: dict[str, list] = {
 SIGNAL_WEIGHTINGS: tuple[str, ...] = ("ic_expanding", "ic", "equal")
 IC_HORIZONS: tuple[int, ...] = (1, 2, 3, 5, 10, 15, 20)
 _IC_WARMUP = 60             # IC observations before expanding weights leave equal-weight
+MIN_ACTIVE_IC = 0.005       # |expanding IC| below this → factor gated out of the blend
+SENSITIVITY_STEPS = {"top_n": (-3, 0, 3), "rebalance": (0.5, 1.0, 2.0)}
 
 _MIN_BARS = 60
 
@@ -240,15 +242,22 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
             cols.append(known)
         w_t = pd.concat(cols, axis=1)
         w_t.columns = range(n)
-        mags = w_t.abs()
+        # AlphaForge-style dynamic selection (Shi et al. 2024): a factor whose
+        # realised IC is indistinguishable from zero is switched OFF rather
+        # than flipped — flipping a coin-toss signal only adds noise. If every
+        # factor is gated out the blend falls back to equal weight.
+        gated = w_t.where(w_t.abs() >= MIN_ACTIVE_IC, 0.0)
+        mags = gated.abs()
         total = mags.sum(axis=1)
-        # normalised signed IC weights; equal-weight (positive) while warming up
-        w_t = w_t.div(total.where(total > 1e-9), axis=0)
-        w_t = w_t.where(total.notna() & (total > 1e-9), 1.0 / n)
+        warm = w_t.notna().all(axis=1)
+        w_t = gated.div(total.where(total > 1e-9), axis=0)
+        w_t = w_t.where(warm & (total > 1e-9), 1.0 / n)
         scores = sum(ranked_list[k].mul(w_t[k], axis=0) for k in range(n))
         for k, c in enumerate(components):
             c["weight"] = round(float(w_t[k].iloc[-1]), 3)
             c["avg_weight"] = round(float(w_t[k].mean()), 3)
+            live = w_t[k][warm]
+            c["active_pct"] = round(float((live.abs() > 1e-12).mean() * 100), 1) if len(live) else 100.0
     else:
         signs = [1.0 if c["is_ic"] >= 0 else -1.0 for c in components]
         if weighting == "ic":
@@ -261,6 +270,7 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
         for c, w in zip(components, weights):
             c["weight"] = round(w, 3)
             c["avg_weight"] = round(w, 3)
+            c["active_pct"] = 100.0
         scores = sum(r * w for r, w in zip(ranked_list, weights))
 
     # composite diagnostics: IC at several horizons (the information-horizon
@@ -494,6 +504,7 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
     dd = (equity / equity.cummax() - 1) * 100
 
     stats = portfolio.period_stats(net, bench, ann)
+    stats["rolling_6m_beat_pct"] = portfolio.rolling_window_beat_pct(net, bench, 126)
     bench_stats = portfolio.period_stats(bench, bench, ann)
     rel = portfolio.relative_stats(net, bench, ann)
     split = int(len(net) * (1 - HOLDOUT_FRACTION))
@@ -701,7 +712,44 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
             alternatives.append(row)
     trials.append(_daily_sharpe(sim))
 
-    return report(spec, panel, signal, sim, alternatives, universe, [t for t in trials if t is not None])
+    # Parameter sensitivity (López de Prado's "plateau vs spike" test): the
+    # same signal and scheme on a 3×3 grid around the chosen top_n × rebalance.
+    # A robust result degrades gently; an overfit one collapses one step away.
+    sensitivity = None
+    if spec["compare"]:
+        top_ns = sorted({int(min(LIMITS["top_n"][1], max(LIMITS["top_n"][0], spec["top_n"] + d))) for d in SENSITIVITY_STEPS["top_n"]})
+        rebs = sorted({int(min(LIMITS["rebalance"][1], max(LIMITS["rebalance"][0], round(spec["rebalance"] * m)))) for m in SENSITIVITY_STEPS["rebalance"]})
+        grid = []
+        for tn in top_ns:
+            row = []
+            for rb in rebs:
+                if tn == spec["top_n"] and rb == spec["rebalance"]:
+                    cell_sim = sim
+                else:
+                    try:
+                        cell_sim = simulate(scores, panel, {**spec, "top_n": tn, "rebalance": rb}, ic=ic)
+                        trials.append(_daily_sharpe(cell_sim))
+                    except factor_dsl.FactorError:
+                        row.append(None)
+                        continue
+                st = portfolio.period_stats(cell_sim["net"], cell_sim["bench"], sim["ann"])
+                row.append({"sharpe": st["sharpe"], "excess_pct": st["excess_pct"], "max_drawdown_pct": st["max_drawdown_pct"]})
+            grid.append(row)
+        sharpes = [c["sharpe"] for r_ in grid for c in r_ if c and c["sharpe"] is not None]
+        centre = portfolio.period_stats(sim["net"], sim["bench"], sim["ann"])["sharpe"]
+        sensitivity = {
+            "top_n": top_ns, "rebalance": rebs, "cells": grid,
+            "median_sharpe": _r(float(np.median(sharpes)), 2) if sharpes else None,
+            "min_sharpe": _r(min(sharpes), 2) if sharpes else None,
+            # spike ratio: how far the chosen cell sits above the neighbourhood median
+            "spike": _r(centre - float(np.median(sharpes)), 2) if sharpes and centre is not None else None,
+        }
+
+    out = report(spec, panel, signal, sim, alternatives, universe, [t for t in trials if t is not None])
+    out["sensitivity"] = sensitivity
+    if sensitivity and sensitivity["spike"] is not None and sensitivity["spike"] > 0.5:
+        out["warnings"].append("parameter_spike")
+    return out
 
 
 def current_holdings_blocking(raw_spec: dict) -> dict:

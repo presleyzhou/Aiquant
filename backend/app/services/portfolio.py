@@ -114,7 +114,7 @@ def project_capped_simplex(v: np.ndarray, cap: float) -> np.ndarray:
     if cap * n < 1 - 1e-9:
         return np.full(n, cap)
     lo, hi = v.min() - 1.0, v.max()
-    for _ in range(100):
+    for _ in range(48):  # interval shrinks 2^-48 ≈ 4e-15 — machine precision
         tau = (lo + hi) / 2
         s = np.clip(v - tau, 0, cap).sum()
         if s > 1:
@@ -144,20 +144,29 @@ def inverse_vol_weights(returns: np.ndarray, cap: float) -> np.ndarray:
     return apply_cap(1.0 / vol, cap)
 
 
-def min_variance_weights(cov: np.ndarray, cap: float, iters: int = 400) -> np.ndarray:
-    """Projected gradient descent on w'Σw over the capped simplex."""
-    n = cov.shape[0]
-    w = project_capped_simplex(np.full(n, 1.0 / n), cap)
-    lipschitz = 2 * max(float(np.linalg.eigvalsh(cov).max()), 1e-10)
-    step = 1.0 / lipschitz
+def _accelerated_pgd(grad_fn, w0: np.ndarray, cap: float, lipschitz: float, iters: int, tol: float = 1e-8) -> np.ndarray:
+    """FISTA (Beck & Teboulle 2009): projected gradient with Nesterov momentum
+    over the capped simplex — an order of magnitude fewer iterations than
+    plain projected gradient on these ill-conditioned covariances."""
+    step = 1.0 / max(lipschitz, 1e-12)
+    w = y = w0
+    t = 1.0
     for _ in range(iters):
-        grad = 2 * cov @ w
-        nxt = project_capped_simplex(w - step * grad, cap)
-        if np.abs(nxt - w).max() < 1e-9:
-            w = nxt
-            break
-        w = nxt
+        nxt = project_capped_simplex(y - step * grad_fn(y), cap)
+        t_next = (1 + math.sqrt(1 + 4 * t * t)) / 2
+        y = nxt + (t - 1) / t_next * (nxt - w)
+        if np.abs(nxt - w).max() < tol:
+            return nxt
+        w, t = nxt, t_next
     return w
+
+
+def min_variance_weights(cov: np.ndarray, cap: float, iters: int = 300) -> np.ndarray:
+    """min w'Σw over the capped simplex by accelerated projected gradient."""
+    n = cov.shape[0]
+    w0 = project_capped_simplex(np.full(n, 1.0 / n), cap)
+    lipschitz = 2 * max(float(np.linalg.eigvalsh(cov).max()), 1e-10)
+    return _accelerated_pgd(lambda w: 2 * cov @ w, w0, cap, lipschitz, iters)
 
 
 def risk_parity_weights(cov: np.ndarray, cap: float, iters: int = 500) -> np.ndarray:
@@ -259,7 +268,7 @@ def grinold_alpha(scores: np.ndarray, vols: np.ndarray, ic: float) -> np.ndarray
 
 
 def mean_variance_weights(alpha: np.ndarray, cov: np.ndarray, cap: float, risk_aversion: float = 1.0,
-                          iters: int = 400) -> np.ndarray:
+                          iters: int = 300) -> np.ndarray:
     """max alpha'w − lambda·w'Σw  s.t. sum(w)=1, 0 <= w <= cap, by projected
     gradient. lambda is set relative to the problem's own scale — the ratio of
     typical |alpha| to typical variance times `risk_aversion` — so the trade-off
@@ -267,17 +276,9 @@ def mean_variance_weights(alpha: np.ndarray, cov: np.ndarray, cap: float, risk_a
     n = cov.shape[0]
     scale = float(np.mean(np.abs(alpha))) / max(float(np.mean(np.diag(cov))), 1e-12)
     lam = max(risk_aversion * scale, 1e-9)
-    w = project_capped_simplex(np.full(n, 1.0 / n), cap)
+    w0 = project_capped_simplex(np.full(n, 1.0 / n), cap)
     lipschitz = 2 * lam * max(float(np.linalg.eigvalsh(cov).max()), 1e-10)
-    step = 1.0 / lipschitz
-    for _ in range(iters):
-        grad = -alpha + 2 * lam * cov @ w
-        nxt = project_capped_simplex(w - step * grad, cap)
-        if np.abs(nxt - w).max() < 1e-9:
-            w = nxt
-            break
-        w = nxt
-    return w
+    return _accelerated_pgd(lambda w: -alpha + 2 * lam * cov @ w, w0, cap, lipschitz, iters)
 
 
 def construct(
@@ -731,3 +732,16 @@ def sharpe_difference_test(a: pd.Series, b: pd.Series, draws: int = 1000, seed: 
     centred = deltas - deltas.mean()
     p = float((np.abs(centred) >= abs(delta_obs)).mean())
     return {"delta_sharpe": round(delta_obs, 4), "p_value": round(p, 3)}
+
+
+def rolling_window_beat_pct(net: pd.Series, bench: pd.Series, window: int = 126) -> float | None:
+    """Share of rolling `window`-day periods in which the portfolio's
+    compounded return beat the benchmark's. 50% means the edge is a coin
+    toss over any given half-year, however good the full-sample number."""
+    frame = pd.DataFrame({"p": net, "b": bench}).dropna()
+    if len(frame) < window + 20:
+        return None
+    lp = np.log1p(frame["p"]).rolling(window).sum()
+    lb = np.log1p(frame["b"]).rolling(window).sum()
+    diff = (lp - lb).dropna()
+    return round(float((diff > 0).mean() * 100), 1) if len(diff) else None

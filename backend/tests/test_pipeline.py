@@ -478,3 +478,44 @@ def test_alternatives_carry_the_equal_weight_test():
     for scheme, row in by.items():
         if scheme != "equal":
             assert row["p_value_vs_equal"] is not None and 0 <= row["p_value_vs_equal"] <= 1
+
+
+# ------------------------------------------------- V4: robustness diagnostics
+
+
+def test_expanding_weights_gate_out_noise_factors():
+    panel = _panel(600, 20, seed=9)
+    ret = panel["close"].pct_change()
+    # a genuine (oracle-ish) factor plus pure noise: the noise should be switched off most of the time
+    panel = dict(panel)
+    spec = pipeline.normalize_spec({**SPEC, "factors": ["rank(close)", "rank(volume)"], "signal_weighting": "ic_expanding"})
+    scores, info, _ = pipeline.build_signal(spec, panel)
+    for c in info["components"]:
+        assert 0 <= c["active_pct"] <= 100
+    # gating never leaves a day without a signal
+    assert scores.notna().sum(axis=1).iloc[-1] > 0
+
+
+def test_sensitivity_grid_and_rolling_beat():
+    panel = _panel(600, 30, seed=5)
+    res = pipeline.run_pipeline_blocking({**SPEC, "compare": True}, panel=panel)
+    json.dumps(res)
+    sens = res["sensitivity"]
+    assert sens["top_n"] == [3, 6, 9] and sens["rebalance"] == [5, 10, 20]
+    assert len(sens["cells"]) == 3 and all(len(r) == 3 for r in sens["cells"])
+    centre = sens["cells"][1][1]
+    assert centre["sharpe"] == res["backtest"]["stats"]["sharpe"]
+    assert sens["median_sharpe"] is not None and "spike" in sens
+    assert 0 <= res["backtest"]["stats"]["rolling_6m_beat_pct"] <= 100
+    # the grid's extra configurations count as trials in the DSR
+    assert res["backtest"]["overfitting"]["trials"] >= len(portfolio.SCHEMES) + 8
+    off = pipeline.run_pipeline_blocking(SPEC, panel=panel)
+    assert off["sensitivity"] is None
+
+
+def test_rolling_window_beat_pct_extremes():
+    idx = pd.date_range("2023-01-01", periods=400, freq="D")
+    bench = pd.Series(0.0, index=idx)
+    assert portfolio.rolling_window_beat_pct(pd.Series(0.001, index=idx), bench) == 100.0
+    assert portfolio.rolling_window_beat_pct(pd.Series(-0.001, index=idx), bench) == 0.0
+    assert portfolio.rolling_window_beat_pct(bench.iloc[:100], bench.iloc[:100]) is None
