@@ -609,6 +609,43 @@ export interface PipelineTargetWeight {
   group?: string;
 }
 
+/** V6 per-symbol data health; sorted by coverage ascending (worst first).
+ * `gaps` = missing prints between `first` and `last`; `stale` = stopped
+ * printing before the panel's last date (delisted / halted / bad ticker). */
+export interface PipelineHealthRow {
+  symbol: string;
+  group: string;
+  /** 0 for an all-NaN symbol, whose `first` / `last` are then null. */
+  coverage_pct: number;
+  gaps: number;
+  first: string | null;
+  last: string | null;
+  /** V6.1: true only when `stale_days` > 3, so a partial newest bar is not flagged. */
+  stale: boolean;
+  /** V6.1: bars since the last print. */
+  stale_days?: number;
+}
+
+/** V6 capacity curve. Market impact per trade follows the square-root law
+ * (Almgren et al. 2005): cost = σ_daily · √(traded notional / 20-day ADV).
+ * For each AUM the annualised drag (% of NAV) is subtracted from the
+ * annualised excess over the equal-weight benchmark. `breakeven_aum` is the
+ * AUM at which net excess reaches zero — null when excess ≤ 0 or no trades.
+ * Every entry of the three per-AUM arrays is nullable. */
+export interface PipelineCapacity {
+  aum_grid: number[];
+  impact_drag_pct_ann: Array<number | null>;
+  net_excess_pct_ann: Array<number | null>;
+  /** Average traded notional as % of ADV. */
+  participation_pct: Array<number | null>;
+  excess_pct_ann: number | null;
+  breakeven_aum: number | null;
+  /** V6.1: share of traded weight that had usable liquidity data; names
+   * without volume borrow the day's median ADV. */
+  costed_trade_pct?: number | null;
+  model: "sqrt_impact" | string;
+}
+
 export interface PipelineResult {
   spec: PipelineRunRequest;
   universe: {
@@ -624,6 +661,8 @@ export interface PipelineResult {
     requested?: number | null;
     /** V5: requested tickers Yahoo could not deliver or that failed the sanity filter. */
     dropped?: string[];
+    /** V6: per-symbol coverage, worst first; absent on a pre-V6 server. */
+    health?: PipelineHealthRow[];
   };
   signal: {
     weighting: string;
@@ -649,6 +688,9 @@ export interface PipelineResult {
     composite_oos_ic?: number | null;
     /** V3 quintile check of the composite score. */
     quantiles?: PipelineQuantiles;
+    /** V6: n×n pairwise rank correlation of the selected factors in component
+     * order; null where a pair has too little overlap; diagonal is 1.0. */
+    corr_matrix?: Array<Array<number | null>>;
   };
   portfolio: {
     scheme: string;
@@ -737,6 +779,8 @@ export interface PipelineResult {
   alternatives: PipelineAlternative[];
   /** V4: null when `compare` is false. */
   sensitivity?: PipelineSensitivity | null;
+  /** V6: square-root-impact capacity curve; absent on a pre-V6 server. */
+  capacity?: PipelineCapacity | null;
   target_weights: {
     as_of: string;
     exposure_pct: number;
