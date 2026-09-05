@@ -55,6 +55,7 @@ PARSIMONY = 0.0015          # fitness penalty per AST node (bloat control)
 OBJECTIVES = {"ic", "multi"}
 ICIR_TARGET = 0.5
 TURNOVER_WEIGHT = 0.02
+COST_FACTOR = 0.6           # fitness multiplier when the Top-5 book loses money after costs
 REDUNDANCY_FACTOR = 0.5     # fitness multiplier when too correlated with the HOF
 HOF_SIZE = 8
 TRANSFORM_OPS = set(TS_UNARY) | set(CROSS) | {"ts_corr"}
@@ -206,6 +207,8 @@ def score(m: dict, objective: str) -> float:
         stability_bonus = 0.6 + 0.4 * min(1.0, abs(m["is_icir"]) / ICIR_TARGET)
         turnover_pen = TURNOVER_WEIGHT * (1.0 - max(0.0, min(1.0, m.get("stability", 1.0))))
         base = base * stability_bonus - turnover_pen
+        if (m.get("spread_after_cost_pct") or 0.0) < 0:
+            base *= COST_FACTOR  # tradability: pretty IC that cannot be traded is worth less
     return base - PARSIMONY * m["complexity"]
 
 
@@ -390,7 +393,7 @@ def evolve_blocking(
     discovered = []
     for h in hof:
         m = h["metrics"]
-        accepted, reasons = _verdict(m, mode)
+        accepted, reasons = _verdict(m, mode, trials=len(cache))
         values = m["_values"] if m["is_ic"] >= 0 else -m["_values"]
         port = _portfolio_from_values(values, panel, market, 5, horizon)
         discovered.append(
@@ -402,6 +405,9 @@ def evolve_blocking(
                 "oos_ic": m["oos_ic"],
                 "complexity": m["complexity"],
                 "stability": m.get("stability"),
+                "turnover": m.get("turnover"),
+                "spread_after_cost_pct": m.get("spread_after_cost_pct"),
+                "t_stat": m.get("t_stat"),
                 "accepted": accepted,
                 "reasons": reasons,
                 "invert": m["is_ic"] < 0,

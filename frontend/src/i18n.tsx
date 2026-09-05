@@ -329,6 +329,8 @@ const zh = {
   "fl.m.isic": "样本内 IC",
   "fl.m.oosic": "留出期 IC",
   "fl.m.corr": "与已选相关",
+  "fl.m.turnover": "换手",
+  "fl.m.cost": "扣成本价差%",
   "fl.zoo": "因子库（本次入选）",
   "fl.zooEmpty": "通过全部检验的因子会进入这里。",
   "fl.zooEmptyDone":
@@ -366,11 +368,12 @@ const zh = {
   "fl.cp.select": "选入合成",
   "fl.cp.ic": "IC 加权",
   "fl.cp.equal": "等权",
+  "fl.cp.rolling": "滚动 IC 动态加权",
   "fl.cp.run": "⚗ 合成回测（已选 {n}）",
   "fl.cp.running": "合成中…",
   "fl.cp.sameMarket": "合成的因子必须来自同一市场",
   "fl.cp.head": "{n} 因子合成 · {w} · 两两最大相关 {c} · Top-5 等权组合",
-  "fl.cp.note": "合成权重只用样本内 IC 计算（模型和权重都看不到留出期）。低相关因子合成通常降波动，但不保证跑赢单因子——结果如实呈现。",
+  "fl.cp.note": "IC 加权只用样本内 IC；滚动加权按每个因子滞后一个持有期的近 120 日 IC 动态调整（AlphaForge 思路），任何时点都不使用未知的未来收益。低相关因子合成通常降波动，但不保证跑赢单因子——结果如实呈现。",
   "fl.disclaimer":
     "IC 是统计关联而非收益承诺；入选因子仍可能失效。本栏目为研究工具，不构成投资建议。",
   // explain / usage / backup
@@ -1196,6 +1199,8 @@ const en: Record<MsgKey, string> = {
   "fl.m.isic": "IS IC",
   "fl.m.oosic": "Holdout IC",
   "fl.m.corr": "Zoo corr",
+  "fl.m.turnover": "Turnover",
+  "fl.m.cost": "Spread after cost %",
   "fl.zoo": "Factor zoo (this run)",
   "fl.zooEmpty": "Factors that pass every check land here.",
   "fl.zooEmptyDone":
@@ -1233,11 +1238,12 @@ const en: Record<MsgKey, string> = {
   "fl.cp.select": "Select for composite",
   "fl.cp.ic": "IC-weighted",
   "fl.cp.equal": "Equal-weight",
+  "fl.cp.rolling": "Rolling-IC dynamic weights",
   "fl.cp.run": "⚗ Composite backtest ({n} selected)",
   "fl.cp.running": "Blending…",
   "fl.cp.sameMarket": "Composite factors must share one market",
   "fl.cp.head": "{n}-factor composite · {w} · max pairwise corr {c} · Top-5 EW portfolio",
-  "fl.cp.note": "Blend weights use in-sample IC only (neither model nor weights see the holdout). Low-correlation blends usually cut volatility but are not guaranteed to beat the best single factor — results shown as they are.",
+  "fl.cp.note": "IC weights use in-sample IC only; rolling weights follow each factor's trailing 120-day IC lagged by its horizon (AlphaForge-style), so no unknown future return is ever used. Low-correlation blends usually cut volatility but are not guaranteed to beat a single factor — results are shown as they are.",
   "fl.disclaimer":
     "IC measures statistical association, not promised returns; accepted factors can still decay. Research tooling — not investment advice.",
   "ex.button": "🧠 Explain",

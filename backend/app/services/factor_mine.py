@@ -66,9 +66,13 @@ UNIVERSES: dict[str, list[str]] = {
 }
 
 HOLDOUT_FRACTION = 0.2      # trailing slice the LLM never gets feedback on
+ROLLING_IC_WINDOW = 120     # trailing window for dynamic composite weights
 MIN_ABS_IC = 0.015          # "standard" in-sample bar (kept for tests/back-compat)
 MAX_ZOO_CORR = 0.7          # redundancy ceiling vs accepted factors
 MAX_COMPLEXITY = 24         # AST nodes — AlphaAgent-style regularizer
+BOOK_TOP_N = 5              # tradability proxy: Top-5 book at the rebalance horizon
+COST_BPS = 10.0             # one-way cost assumption for the tradability gate
+T_BAR_BASE, T_BAR_CAP = 2.0, 3.0  # trials-aware significance bar (Harvey–Liu–Zhu spirit)
 MIN_COVERAGE = 0.55         # fraction of days with a computable cross-section
 
 # Acceptance tiers: (min |in-sample IC|, min |in-sample ICIR|). The holdout
@@ -154,6 +158,35 @@ def _daily_rank_ic(factor: pd.DataFrame, fwd: pd.DataFrame) -> pd.Series:
     return ic[both.sum(axis=1) >= 6]
 
 
+def _book_turnover(ranked: pd.DataFrame, horizon: int, top_n: int, sign: float) -> float:
+    """Fraction of the Top-N book replaced at each rebalance (horizon bars)."""
+    n_sym = ranked.notna().sum(axis=1).clip(lower=1)
+    thresh = 1 - (top_n / n_sym)
+    top = ranked.ge(thresh, axis=0) if sign > 0 else ranked.le(1 - thresh, axis=0)
+    prev = top.astype(float).shift(horizon).fillna(0.0).astype(bool)  # version-proof bool shift
+    changed = (top & ~prev).sum(axis=1) / top.sum(axis=1).clip(lower=1)
+    if len(changed) <= horizon:
+        return 1.0
+    return float(changed.iloc[horizon:].mean())
+
+
+def _quintile_returns(ranked: pd.DataFrame, fwd: pd.DataFrame, nq: int = 5) -> list[float]:
+    """Mean forward return (%, per holding period) of each rank bucket."""
+    bucket = np.ceil(ranked * nq).clip(1, nq)
+    out = []
+    for q in range(1, nq + 1):
+        per_day = fwd.where(bucket == q).mean(axis=1)
+        v = float(per_day.mean()) * 100
+        out.append(v if np.isfinite(v) else 0.0)
+    return out
+
+
+def significance_bar(trials: int) -> float:
+    """Minimum |t| for acceptance after `trials` candidates have been tried in
+    this line of research: 2.0 for the first, +0.5 per decade, capped at 3.0."""
+    return min(T_BAR_CAP, T_BAR_BASE + 0.5 * np.log10(max(int(trials), 1)))
+
+
 def evaluate_candidate(
     expression: str,
     panel: dict[str, pd.DataFrame],
@@ -198,6 +231,14 @@ def evaluate_candidate(
 
     coverage = float((values.notna().sum(axis=1) >= 6).mean())
 
+    # Tradability proxies (AlphaEval-style): does the Top-5 book survive costs?
+    sign = 1.0 if is_ic >= 0 else -1.0
+    turnover = _book_turnover(ranked, horizon, BOOK_TOP_N, sign)
+    q_ret = _quintile_returns(ranked, fwd)
+    spread = (q_ret[-1] - q_ret[0]) * sign
+    spread_after_cost = spread - turnover * 2 * COST_BPS / 100
+    t_stat = float(ic.mean() / max(float(ic.std()), 1e-6) * np.sqrt(len(ic)))
+
     return {
         "expression": expression,
         "complexity": factor_dsl.complexity(node),
@@ -208,15 +249,35 @@ def evaluate_candidate(
         "stability": round(stability, 3),
         "coverage": round(coverage, 3),
         "max_zoo_corr": round(max_corr, 3),
-        "days": int(len(ic)),
+        "turnover": round(turnover, 3),
+        "spread_pct": round(spread, 3),
+        "spread_after_cost_pct": round(spread_after_cost, 3),
+        "t_stat": round(t_stat, 2),
+        "days": len(ic),
         "_values": ranked,  # stripped before serialization
     }
 
 
-def _verdict(m: dict, mode: str = "standard") -> tuple[bool, list[str]]:
-    """Accept/reject + the reasons that become next-round feedback."""
+def _verdict(m: dict, mode: str = "standard", trials: int = 0) -> tuple[bool, list[str]]:
+    """Accept/reject + the reasons that become next-round feedback.
+
+    Beyond the IC bars: a candidate must still show a positive long-short
+    spread after costs at the rebalance horizon (tradability), and — once
+    `trials` candidates have been tried — clear a significance bar that rises
+    with the number of trials (multiple-comparison guard)."""
     min_ic, min_icir = MODES.get(mode, MODES["standard"])
     reasons: list[str] = []
+    spread_ac = m.get("spread_after_cost_pct")
+    if spread_ac is not None and spread_ac < 0:
+        reasons.append(
+            f"not tradable: long-short spread {spread_ac:+.2f}%/period after {COST_BPS:.0f} bp costs "
+            f"(turnover {m.get('turnover', 0):.0%}) — smooth the signal (ts_mean) or use a longer window"
+        )
+    t_stat = m.get("t_stat")
+    if trials > 0 and t_stat is not None:
+        bar = significance_bar(trials)
+        if abs(t_stat) < bar:
+            reasons.append(f"not significant after {trials} trials: |t| {abs(t_stat):.1f} < {bar:.1f}")
     if m["coverage"] < MIN_COVERAGE:
         reasons.append(f"coverage {m['coverage']:.0%} < {MIN_COVERAGE:.0%} — too many NaN days")
     if m["complexity"] > MAX_COMPLEXITY:
@@ -243,9 +304,13 @@ def _round_feedback(results: list[dict]) -> str:
             lines.append(f"- `{r['expression']}` FAILED to evaluate: {r['error']}")
             continue
         state = "ACCEPTED" if r["accepted"] else "rejected"
+        trade = (
+            f", turnover {r['turnover']:.0%}, spread after cost {r['spread_after_cost_pct']:+.2f}%"
+            if r.get("turnover") is not None and r.get("spread_after_cost_pct") is not None else ""
+        )
         lines.append(
             f"- `{r['expression']}` {state}: IS IC {r['is_ic']:+.3f} (ICIR {r['is_icir']:+.2f}), "
-            f"OOS IC {r['oos_ic']:+.3f}, corr_zoo {r['max_zoo_corr']:.2f}"
+            f"OOS IC {r['oos_ic']:+.3f}, corr_zoo {r['max_zoo_corr']:.2f}{trade}"
             + (f" | {'; '.join(r['reasons'])}" if r.get("reasons") else "")
         )
 
@@ -254,7 +319,13 @@ def _round_feedback(results: list[dict]) -> str:
         weak = sum(abs(r["is_ic"]) < MIN_ABS_IC for r in evaluated)
         unstable = sum(abs(r.get("is_icir", 0)) < 0.15 for r in evaluated)
         redundant = sum(r["max_zoo_corr"] > MAX_ZOO_CORR for r in evaluated)
+        costly = sum((r.get("spread_after_cost_pct") or 0) < 0 for r in evaluated)
         directives = []
+        if costly >= len(evaluated) / 2:
+            directives.append(
+                "most candidates do not survive transaction costs — lower turnover: smooth the "
+                "signal with ts_mean over 5-20 bars, use longer lookback windows, or rank a slower quantity"
+            )
         if weak >= len(evaluated) / 2:
             directives.append(
                 "most candidates were weak — combine price AND volume information, "
@@ -398,6 +469,10 @@ async def mine_stream(
     per_round = max(2, min(6, per_round))
     mode = mode if mode in MODES else "standard"
     memory = memory or {}
+    try:
+        trials = max(0, int(memory.get("trials", 0) or 0))
+    except (TypeError, ValueError):
+        trials = 0
     prior_accepted = [str(x)[:MAX_LEN_HINT] for x in memory.get("accepted", [])][:20]
     prior_lessons = [str(x)[:300] for x in memory.get("lessons", [])][:12]
 
@@ -483,7 +558,8 @@ async def mine_stream(
                        "error": str(exc), "accepted": False}
                 continue
 
-            accepted, reasons = _verdict(metrics, mode)
+            trials += 1
+            accepted, reasons = _verdict(metrics, mode, trials)
             values = metrics.pop("_values")
             row = {**metrics, "hypothesis": cand["hypothesis"], "accepted": accepted,
                    "reasons": reasons, "round": round_no}
@@ -503,6 +579,8 @@ async def mine_stream(
         "type": "done",
         "zoo": zoo_public,
         "evaluated": len(seen) - len(prior_accepted),
+        "trials": trials,
+        "significance_bar": round(float(significance_bar(trials)), 2),
         "mode": mode,
         "lessons": _session_lessons(history, market, horizon),
     }
@@ -655,12 +733,14 @@ def composite_backtest_blocking(
     if len(factors) > 8:
         raise factor_dsl.FactorError("composite supports at most 8 factors")
     market = market if market in UNIVERSES else "us"
-    weighting = weighting if weighting in ("equal", "ic") else "ic"
+    weighting = weighting if weighting in ("equal", "ic", "rolling") else "ic"
 
     panel = _load_panel_blocking(market)
     close = panel["close"]
 
     ranked_list: list[pd.DataFrame] = []
+    ic_list: list[pd.Series] = []
+    horizons: list[int] = []
     components: list[dict] = []
     for f in factors:
         expr = str(f.get("expression", ""))
@@ -673,6 +753,8 @@ def composite_backtest_blocking(
         split = int(len(ic) * (1 - HOLDOUT_FRACTION))
         is_ic = float(ic.iloc[:split].mean()) if split > 0 else 0.0
         ranked_list.append(values.rank(axis=1, pct=True))
+        ic_list.append(ic)
+        horizons.append(horizon)
         components.append({"expression": expr, "is_ic": round(is_ic, 4)})
 
     # pairwise redundancy — shown, not enforced: the user chose the blend
@@ -688,16 +770,33 @@ def composite_backtest_blocking(
                     max_pair_corr, abs(float(pair.iloc[:, 0].corr(pair.iloc[:, 1])))
                 )
 
-    if weighting == "ic":
-        raw = [abs(c["is_ic"]) for c in components]
-        total = sum(raw)
-        weights = [r / total if total > 1e-9 else 1 / n for r in raw]
+    if weighting == "rolling":
+        # AlphaForge-style dynamic weights: each factor's trailing 120-day mean
+        # IC (clipped at 0), lagged by its horizon so no forward return that is
+        # still unknown at t leaks into the weight used at t. Falls back to
+        # equal weight on days where no component has a positive trailing IC.
+        idx = ranked_list[0].index
+        w_frames = []
+        for ic, h in zip(ic_list, horizons):
+            w = ic.shift(h).rolling(ROLLING_IC_WINDOW, min_periods=ROLLING_IC_WINDOW // 2).mean()
+            w_frames.append(w.clip(lower=0).reindex(idx).ffill())
+        w_df = pd.concat(w_frames, axis=1)
+        w_df.columns = range(n)
+        total = w_df.sum(axis=1)
+        w_df = w_df.div(total.where(total > 1e-9), axis=0).fillna(1 / n)
+        combined = sum(r.mul(w_df[i], axis=0) for i, r in enumerate(ranked_list))
+        latest = w_df.iloc[-1].tolist()
+        weights = [float(x) for x in latest]
     else:
-        weights = [1 / n] * n
+        if weighting == "ic":
+            raw = [abs(c["is_ic"]) for c in components]
+            total = sum(raw)
+            weights = [r / total if total > 1e-9 else 1 / n for r in raw]
+        else:
+            weights = [1 / n] * n
+        combined = sum(r * w for r, w in zip(ranked_list, weights))
     for c, w in zip(components, weights):
         c["weight"] = round(w, 3)
-
-    combined = sum(r * w for r, w in zip(ranked_list, weights))
 
     result = _portfolio_from_values(combined, panel, market, top_n, rebalance)
     return {
@@ -731,8 +830,8 @@ def check_factor_blocking(expression: str, market: str, horizon: int) -> dict:
         "is_ic": round(float(ic.iloc[:split].mean()), 4),
         "oos_ic": round(float(ic.iloc[split:].mean()), 4),
         "recent_ic": round(float(recent.mean()), 4),
-        "recent_days": int(len(recent)),
-        "days": int(len(ic)),
+        "recent_days": len(recent),
+        "days": len(ic),
         "as_of": str(ic.index[-1].date()),
     }
 
@@ -776,12 +875,7 @@ def analyze_factor_blocking(
 
     # --- quantiles: mean forward return per bucket, per period ------------
     nq = 5
-    bucket = np.ceil(ranked * nq).clip(1, nq)
-    q_ret = []
-    for q in range(1, nq + 1):
-        mask = bucket == q
-        per_day = fwd.where(mask).mean(axis=1)
-        q_ret.append(float(per_day.mean()) * 100)
+    q_ret = _quintile_returns(ranked, fwd, nq)
     hi, lo = (q_ret[-1], q_ret[0]) if sign > 0 else (q_ret[0], q_ret[-1])
     spread_pp = hi - lo  # % per holding period, long top vs short bottom
     # Spearman by hand (pandas' method="spearman" needs scipy, absent on Vercel)
@@ -800,12 +894,7 @@ def analyze_factor_blocking(
     best_h = max(decay, key=lambda d: abs(d["ic"]))["horizon"] if decay else horizon
 
     # --- turnover of the top-N book at the rebalance horizon ------------------
-    n_sym = ranked.notna().sum(axis=1).clip(lower=1)
-    thresh = 1 - (top_n / n_sym)
-    top = (ranked.ge(thresh, axis=0)) if sign > 0 else (ranked.le(1 - thresh, axis=0))
-    prev = top.astype(float).shift(horizon).fillna(0.0).astype(bool)  # version-proof bool shift
-    changed = (top & ~prev).sum(axis=1) / top.sum(axis=1).clip(lower=1)
-    turnover = float(changed.iloc[horizon:].mean())  # fraction of names replaced per rebalance
+    turnover = _book_turnover(ranked, horizon, top_n, sign)
     rank_autocorr = float(ranked.corrwith(ranked.shift(1), axis=1).mean())
     cost_pp = turnover * 2 * cost_bps / 100  # buy + sell, in % per period
     spread_after_cost = spread_pp - cost_pp
