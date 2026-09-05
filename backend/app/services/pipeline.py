@@ -104,6 +104,8 @@ LIMITS: dict[str, list] = {
 SIGNAL_WEIGHTINGS: tuple[str, ...] = ("ic_expanding", "ic", "equal")
 IC_HORIZONS: tuple[int, ...] = (1, 2, 3, 5, 10, 15, 20)
 _IC_WARMUP = 60             # IC observations before expanding weights leave equal-weight
+MIN_ACTIVE_IC = 0.005       # |expanding IC| below this → factor gated out of the blend
+SENSITIVITY_STEPS = {"top_n": (-3, 0, 3), "rebalance": (0.5, 1.0, 2.0)}
 
 _MIN_BARS = 60
 
@@ -127,7 +129,9 @@ def config() -> dict:
 def _clamp(value: Any, lo: float, hi: float, cast=float):
     try:
         v = cast(value)
-    except (TypeError, ValueError):
+        if isinstance(v, float) and not np.isfinite(v):
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
         raise factor_dsl.FactorError(f"invalid parameter value: {value!r}") from None
     return max(lo, min(hi, v))
 
@@ -135,7 +139,7 @@ def _clamp(value: Any, lo: float, hi: float, cast=float):
 def normalize_spec(raw: dict) -> dict:
     """Coerce a request (or a stored paper-trading config) to a valid spec."""
     market = raw.get("market", "us")
-    market = market if market in UNIVERSES else "us"
+    market = market if isinstance(market, str) and market in UNIVERSES else "us"
     factors_in = raw.get("factors") or []
     if not isinstance(factors_in, list) or not (LIMITS["factors"][0] <= len(factors_in) <= LIMITS["factors"][1]):
         raise factor_dsl.FactorError("pipeline needs between 1 and 8 factors")
@@ -143,6 +147,8 @@ def normalize_spec(raw: dict) -> dict:
     for f in factors_in:
         if isinstance(f, str):
             f = {"expression": f}
+        if not isinstance(f, dict):
+            raise factor_dsl.FactorError("each factor must be an expression string or an object")
         expr = str(f.get("expression", "")).strip()
         if not expr:
             raise factor_dsl.FactorError("empty factor expression")
@@ -158,7 +164,12 @@ def normalize_spec(raw: dict) -> dict:
     weighting = str(raw.get("signal_weighting", DEFAULTS["signal_weighting"]))
     weighting = weighting if weighting in SIGNAL_WEIGHTINGS else DEFAULTS["signal_weighting"]
     tv = raw.get("target_vol_pct")
-    target_vol = None if tv in (None, "", 0, "0", False) else _clamp(tv, *LIMITS["target_vol_pct"])
+    if tv in (None, "", 0, "0", False):
+        target_vol = None
+    else:
+        target_vol = _clamp(tv, *LIMITS["target_vol_pct"])
+        if float(tv) < LIMITS["target_vol_pct"][0]:
+            raise factor_dsl.FactorError("target_vol_pct must be 0 (off) or between 5 and 40")
     return {
         "market": market,
         "factors": factors,
@@ -210,7 +221,9 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
             raise factor_dsl.FactorError(
                 f"{f['expression']}: only {len(ic)} evaluable days — factor too sparse for this universe"
             )
-        split = int(len(ic) * (1 - HOLDOUT_FRACTION))
+        # an IC observation at day s needs returns through s+h; the last
+        # in-sample observation must have CLOSED before the holdout begins
+        split = max(1, int(len(ic) * (1 - HOLDOUT_FRACTION)) - f["horizon"])
         is_ic = float(ic.iloc[:split].mean()) if split > 0 else 0.0
         oos_ic = float(ic.iloc[split:].mean()) if split < len(ic) else 0.0
         ranked_list.append(values.rank(axis=1, pct=True))
@@ -240,15 +253,22 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
             cols.append(known)
         w_t = pd.concat(cols, axis=1)
         w_t.columns = range(n)
-        mags = w_t.abs()
+        # AlphaForge-style dynamic selection (Shi et al. 2024): a factor whose
+        # realised IC is indistinguishable from zero is switched OFF rather
+        # than flipped — flipping a coin-toss signal only adds noise. If every
+        # factor is gated out the blend falls back to equal weight.
+        gated = w_t.where(w_t.abs() >= MIN_ACTIVE_IC, 0.0)
+        mags = gated.abs()
         total = mags.sum(axis=1)
-        # normalised signed IC weights; equal-weight (positive) while warming up
-        w_t = w_t.div(total.where(total > 1e-9), axis=0)
-        w_t = w_t.where(total.notna() & (total > 1e-9), 1.0 / n)
+        warm = w_t.notna().all(axis=1)
+        w_t = gated.div(total.where(total > 1e-9), axis=0)
+        w_t = w_t.where(warm & (total > 1e-9), 1.0 / n)
         scores = sum(ranked_list[k].mul(w_t[k], axis=0) for k in range(n))
         for k, c in enumerate(components):
             c["weight"] = round(float(w_t[k].iloc[-1]), 3)
             c["avg_weight"] = round(float(w_t[k].mean()), 3)
+            live = w_t[k][warm]
+            c["active_pct"] = round(float((live.abs() > 1e-12).mean() * 100), 1) if len(live) else 100.0
     else:
         signs = [1.0 if c["is_ic"] >= 0 else -1.0 for c in components]
         if weighting == "ic":
@@ -261,6 +281,7 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
         for c, w in zip(components, weights):
             c["weight"] = round(w, 3)
             c["avg_weight"] = round(w, 3)
+            c["active_pct"] = 100.0
         scores = sum(r * w for r, w in zip(ranked_list, weights))
 
     # composite diagnostics: IC at several horizons (the information-horizon
@@ -270,17 +291,17 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
     for h in IC_HORIZONS:
         fwd = close.pct_change(h).shift(-h)
         ic_h = _daily_rank_ic(scores, fwd)
-        ic_by_horizon.append({"horizon": h, "ic": round(float(ic_h.mean()), 4) if len(ic_h) >= 30 else None})
+        ic_by_horizon.append({"horizon": h, "ic": _r(float(ic_h.mean()), 4) if len(ic_h) >= 30 else None})
     main_h = max(1, int(round(float(np.mean([f["horizon"] for f in spec["factors"]])))))
     ic_main = _daily_rank_ic(scores, close.pct_change(main_h).shift(-main_h))
-    split = int(len(ic_main) * (1 - HOLDOUT_FRACTION))
+    split = max(1, int(len(ic_main) * (1 - HOLDOUT_FRACTION)) - main_h)
     composite_is_ic = float(ic_main.iloc[:split].mean()) if split > 0 else 0.0
 
     info = {
         "weighting": weighting, "components": components, "max_pair_corr": round(max_pair_corr, 3),
         "ic_by_horizon": ic_by_horizon,
         "composite_is_ic": round(composite_is_ic if np.isfinite(composite_is_ic) else 0.0, 4),
-        "composite_oos_ic": round(float(ic_main.iloc[split:].mean()), 4) if split < len(ic_main) else None,
+        "composite_oos_ic": _r(float(ic_main.iloc[split:].mean()), 4) if split < len(ic_main) else None,
     }
     return scores, info, ranked_list
 
@@ -324,6 +345,13 @@ def _decide_weights(
     if len(candidates) < 2:
         return pd.Series(dtype=float), 1.0
     top_n = min(spec["top_n"], len(candidates))
+    if held and spec["hold_buffer"] > 0:
+        # a held name whose score is missing TODAY (data hiccup) is not sold
+        # on that account: it is treated as sitting at the edge of the band
+        missing = [h for h in held if h not in candidates.index and bool(usable.get(h, False))]
+        if missing:
+            edge = candidates.sort_values(ascending=False).iloc[min(top_n, len(candidates)) - 1]
+            candidates = pd.concat([candidates, pd.Series(edge, index=missing)])
     selected = _select(candidates, top_n, spec["hold_buffer"], held or set())
     sub = trailing[selected.index]
     w = portfolio.construct(scheme, selected.values, sub.values, spec["max_weight"], ic=ic)
@@ -345,7 +373,10 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
     market = spec["market"]
     ann = 252 if market == "us" else 365
     close = panel["close"]
-    ret = close.pct_change()
+    # forward-fill BEFORE differencing: a single missing close would otherwise
+    # turn two daily returns into NaN (→ 0) and silently erase the move across
+    # the gap. Leading NaNs (late listings) stay NaN; a delisted name earns 0.
+    ret = close.ffill().pct_change()
     symbols = list(close.columns)
     scores = scores.reindex(index=close.index, columns=symbols)
     ret_np = ret.to_numpy(dtype=float)
@@ -419,7 +450,14 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
 
     # latest decision (for target weights): newest complete row with a full cross-section
     current = {symbols[k] for k in np.flatnonzero(held > 1e-6)}
+    # the newest row is often partial (a few names not yet printed): only a
+    # row with a near-complete cross-section may define the live target
+    counts = scores.notna().sum(axis=1)
+    typical = float(counts.iloc[first:].median()) if T > first else 0.0
+    needed = max(spec["top_n"], int(np.ceil(0.8 * typical)))
     for i in range(T - 1, max(first, T - 8) - 1, -1):
+        if counts.iloc[i] < needed:
+            continue
         trailing = ret.iloc[i - lookback + 1: i + 1]
         w, scale = _decide_weights(scheme, scores.iloc[i], trailing, spec, ann, held=current, ic=ic)
         if len(w) >= min(spec["top_n"], 2):
@@ -494,6 +532,7 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
     dd = (equity / equity.cummax() - 1) * 100
 
     stats = portfolio.period_stats(net, bench, ann)
+    stats["rolling_6m_beat_pct"] = portfolio.rolling_window_beat_pct(net, bench, 126)
     bench_stats = portfolio.period_stats(bench, bench, ann)
     rel = portfolio.relative_stats(net, bench, ann)
     split = int(len(net) * (1 - HOLDOUT_FRACTION))
@@ -660,7 +699,7 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
 
     scores, signal, ranked_list = build_signal(spec, panel)
     ic = signal["composite_is_ic"]
-    signal["quantiles"] = portfolio.quantile_returns(scores, close.pct_change(), 252 if spec["market"] == "us" else 365)
+    signal["quantiles"] = portfolio.quantile_returns(scores, close.ffill().pct_change(), 252 if spec["market"] == "us" else 365)
     sim = simulate(scores, panel, spec, ic=ic)
     trials: list[float] = []  # every configuration evaluated → the DSR's N
 
@@ -701,7 +740,44 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
             alternatives.append(row)
     trials.append(_daily_sharpe(sim))
 
-    return report(spec, panel, signal, sim, alternatives, universe, [t for t in trials if t is not None])
+    # Parameter sensitivity (López de Prado's "plateau vs spike" test): the
+    # same signal and scheme on a 3×3 grid around the chosen top_n × rebalance.
+    # A robust result degrades gently; an overfit one collapses one step away.
+    sensitivity = None
+    if spec["compare"]:
+        top_ns = sorted({int(min(LIMITS["top_n"][1], max(LIMITS["top_n"][0], spec["top_n"] + d))) for d in SENSITIVITY_STEPS["top_n"]})
+        rebs = sorted({int(min(LIMITS["rebalance"][1], max(LIMITS["rebalance"][0], round(spec["rebalance"] * m)))) for m in SENSITIVITY_STEPS["rebalance"]})
+        grid = []
+        for tn in top_ns:
+            row = []
+            for rb in rebs:
+                if tn == spec["top_n"] and rb == spec["rebalance"]:
+                    cell_sim = sim
+                else:
+                    try:
+                        cell_sim = simulate(scores, panel, {**spec, "top_n": tn, "rebalance": rb}, ic=ic)
+                        trials.append(_daily_sharpe(cell_sim))
+                    except factor_dsl.FactorError:
+                        row.append(None)
+                        continue
+                st = portfolio.period_stats(cell_sim["net"], cell_sim["bench"], sim["ann"])
+                row.append({"sharpe": st["sharpe"], "excess_pct": st["excess_pct"], "max_drawdown_pct": st["max_drawdown_pct"]})
+            grid.append(row)
+        sharpes = [c["sharpe"] for r_ in grid for c in r_ if c and c["sharpe"] is not None]
+        centre = portfolio.period_stats(sim["net"], sim["bench"], sim["ann"])["sharpe"]
+        sensitivity = {
+            "top_n": top_ns, "rebalance": rebs, "cells": grid,
+            "median_sharpe": _r(float(np.median(sharpes)), 2) if sharpes else None,
+            "min_sharpe": _r(min(sharpes), 2) if sharpes else None,
+            # spike ratio: how far the chosen cell sits above the neighbourhood median
+            "spike": _r(centre - float(np.median(sharpes)), 2) if sharpes and centre is not None else None,
+        }
+
+    out = report(spec, panel, signal, sim, alternatives, universe, [t for t in trials if t is not None])
+    out["sensitivity"] = sensitivity
+    if sensitivity and sensitivity["spike"] is not None and sensitivity["spike"] > 0.5:
+        out["warnings"].append("parameter_spike")
+    return out
 
 
 def current_holdings_blocking(raw_spec: dict) -> dict:
