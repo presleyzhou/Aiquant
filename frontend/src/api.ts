@@ -438,6 +438,9 @@ export type PipelineLimitKey =
  * every daily weight is out-of-sample; `ic` fixes them on the first 80%. */
 export type PipelineSignalWeighting = "ic_expanding" | "ic" | "equal";
 
+/** V5: panel depth. 5y (or any custom list) takes the slower custom-download path. */
+export type PipelineHistory = "3y" | "5y";
+
 export interface PipelineConfig {
   markets: string[];
   universes: Record<string, string[]>;
@@ -447,6 +450,8 @@ export interface PipelineConfig {
   starter_factors: Record<string, PipelineStarterFactor[]>;
   /** V3: group (sector) label per universe symbol, e.g. AAPL → "tech", BTC-USD → "layer1". */
   sectors?: Record<string, string>;
+  /** V5: history lengths the server accepts; absent on a pre-V5 server. */
+  histories?: PipelineHistory[];
   defaults: {
     scheme: string;
     signal_weighting: PipelineSignalWeighting;
@@ -461,8 +466,11 @@ export interface PipelineConfig {
     trade_rate?: number;
     /** V3: blend toward 1/N; 0 = off. */
     shrink_to_equal?: number;
+    /** V5: default panel depth (3y). */
+    history?: PipelineHistory;
   };
-  limits: Record<PipelineLimitKey, [number, number]>;
+  /** V5: `symbols` = [min, max] size of a custom universe; absent on a pre-V5 server. */
+  limits: Record<PipelineLimitKey, [number, number]> & { symbols?: [number, number] };
 }
 
 export interface PipelineRunRequest {
@@ -485,6 +493,11 @@ export interface PipelineRunRequest {
   /** V3: pipeline runs already made in this browser; added to the Deflated Sharpe's N. */
   prior_trials?: number;
   compare?: boolean;
+  /** V5: custom universe of 8–40 Yahoo tickers; omitted = the built-in universe of `market`.
+   * Server uppercases, dedupes and validates (400 with `detail`). Cached 6 h, so the first run is slower. */
+  symbols?: string[];
+  /** V5: panel depth, default 3y. */
+  history?: PipelineHistory;
 }
 
 export interface PipelineSplitStats {
@@ -588,7 +601,20 @@ export interface PipelineTargetWeight {
 
 export interface PipelineResult {
   spec: PipelineRunRequest;
-  universe: { market: string; symbols: number; from: string; to: string; bars: number };
+  universe: {
+    market: string;
+    symbols: number;
+    from: string;
+    to: string;
+    bars: number;
+    /** V5: true when the run used a custom ticker list. */
+    custom?: boolean;
+    history?: PipelineHistory | string;
+    /** V5: tickers requested; null for built-in universes. */
+    requested?: number | null;
+    /** V5: requested tickers Yahoo could not deliver or that failed the sanity filter. */
+    dropped?: string[];
+  };
   signal: {
     weighting: string;
     components: Array<
@@ -709,6 +735,58 @@ export interface PipelineResult {
     groups?: Array<{ group: string; weight_pct: number }>;
   };
   warnings: string[];
+}
+
+/* ------------------------------------------------ V5 rebalance ticket ---
+ * POST /api/pipeline/orders turns the latest target book into whole-share
+ * orders against the user's current holdings. Sells come first (they fund
+ * the buys); the ticket never shorts. */
+
+export interface PipelineOrdersRequest {
+  /** The same body as /run (market, symbols, history, factors, scheme, ...). */
+  spec: PipelineRunRequest;
+  /** Total portfolio value incl. cash, account currency, > 0. */
+  nav: number;
+  /** Shares currently held; omitted / empty = all cash. */
+  current?: Record<string, number>;
+  /** Suppress trades smaller than this % of NAV (0–5, default 0.25). */
+  min_trade_pct?: number;
+}
+
+export interface PipelineOrder {
+  symbol: string;
+  side: "buy" | "sell";
+  shares: number;
+  price: number;
+  notional: number;
+  from_weight_pct: number;
+  to_weight_pct: number;
+  group?: string;
+}
+
+export interface PipelineOrders {
+  /** Date of the target-weight decision (latest complete bar). */
+  as_of: string;
+  /** Date of the reference prices (last available close). */
+  price_date: string;
+  nav: number;
+  orders: PipelineOrder[];
+  /** Held symbols with no price in the panel (cannot be sized). */
+  unpriced: string[];
+  summary: {
+    buys: number;
+    sells: number;
+    buy_notional: number;
+    sell_notional: number;
+    turnover_pct: number;
+    est_cost: number;
+    /** V5.1: null when `cash_unknown` (a held symbol could not be priced). */
+    cash_before: number | null;
+    cash_after: number | null;
+    /** V5.1: true when `unpriced` is non-empty; cash_before / cash_after are then null. */
+    cash_unknown?: boolean;
+    target_exposure_pct: number;
+  };
 }
 
 /* ---------------------------------------- AI investment-committee memo ---
@@ -990,6 +1068,14 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(json<PipelineResult>),
+
+  /** V5. 400 `{detail}` on a bad spec / shares / NAV, 404 when the universe download failed, 422 on schema. */
+  pipelineOrders: (body: PipelineOrdersRequest) =>
+    fetch("/api/pipeline/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<PipelineOrders>),
 
   /** 503 when no AI key (check `aiStatus().enabled` first), 429 on rate limit, 502 on an empty model reply. */
   pipelineMemo: (body: PipelineMemoRequest) =>

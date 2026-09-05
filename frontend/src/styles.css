@@ -4124,6 +4124,134 @@ tbody tr:hover td {
   justify-content: flex-end;
 }
 
+/* V5: stage-① universe row (market · history · custom toggle) */
+.pl-uni-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.pl-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pl-symbols {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  box-sizing: border-box;
+}
+
+.pl-custom__bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.pl-counter {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.pl-counter.is-bad {
+  color: var(--amber);
+}
+
+.pl-hint--warn {
+  color: var(--amber);
+}
+
+/* dropped tickers / unpriced holdings: a warning chip that may run long */
+.pl-dropped {
+  max-width: 100%;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+/* V5: rebalance ticket card (stage ⑥) */
+.pl-ticket {
+  border: 1px solid rgba(255, 176, 0, 0.35);
+  background: rgba(255, 176, 0, 0.04);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pl-ticket__form {
+  display: grid;
+  grid-template-columns: minmax(140px, 180px) minmax(120px, 150px) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.pl-ticket__holdings .pl-symbols {
+  min-height: 60px;
+}
+
+.pl-badlines {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  font-size: 11px;
+  color: var(--amber);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pl-side {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  border-radius: 3px;
+  padding: 1px 6px;
+  border: 1px solid;
+}
+
+.pl-side--buy {
+  color: var(--green);
+  border-color: rgba(61, 220, 132, 0.45);
+  background: rgba(61, 220, 132, 0.1);
+}
+
+.pl-side--sell {
+  color: var(--red, #ff5c6c);
+  border-color: rgba(255, 92, 108, 0.45);
+  background: rgba(255, 92, 108, 0.1);
+}
+
+.pl-orders td,
+.pl-orders th {
+  white-space: nowrap;
+}
+
+@media (max-width: 820px) {
+  .pl-ticket__form {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .pl-ticket__holdings {
+    grid-column: 1 / -1;
+  }
+
+  .pl-uni-row .field {
+    max-width: none !important;
+    flex: 1 1 140px;
+  }
+}
+
 /* paper: deployment kind badge */
 .pp-kind {
   margin-left: 8px;
