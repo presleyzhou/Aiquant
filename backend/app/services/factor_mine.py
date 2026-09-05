@@ -246,6 +246,19 @@ def evaluate_candidate(
     spread_after_cost = spread - turnover * 2 * COST_BPS / 100
     t_stat = float(ic.mean() / max(float(ic.std()), 1e-6) * np.sqrt(len(ic)))
 
+    # Robustness: how many of 4 time folds agree with the overall sign, and
+    # does the signal hold in both up and down markets (universe EW return)?
+    n_ic = len(ic)
+    positive_folds = sum(
+        1 for k in range(4)
+        if float(ic.iloc[k * n_ic // 4:(k + 1) * n_ic // 4].mean()) * sign > 0
+    )
+    mkt = fwd.mean(axis=1).reindex(ic.index)
+    up, down = ic[mkt > 0], ic[mkt <= 0]
+    regime_ok = bool(
+        len(up) >= 20 and len(down) >= 20 and float(up.mean()) * sign > 0 and float(down.mean()) * sign > 0
+    )
+
     return {
         "expression": expression,
         "complexity": factor_dsl.complexity(node),
@@ -260,6 +273,8 @@ def evaluate_candidate(
         "spread_pct": round(spread, 3),
         "spread_after_cost_pct": round(spread_after_cost, 3),
         "t_stat": round(t_stat, 2),
+        "positive_folds": positive_folds,
+        "regime_ok": regime_ok,
         "days": len(ic),
         "_values": ranked,  # stripped before serialization
     }
@@ -280,6 +295,12 @@ def _verdict(m: dict, mode: str = "standard", trials: int = 0) -> tuple[bool, li
             f"not tradable: long-short spread {spread_ac:+.2f}%/period after {COST_BPS:.0f} bp costs "
             f"(turnover {m.get('turnover', 0):.0%}) — smooth the signal (ts_mean) or use a longer window"
         )
+    if mode == "strict":
+        folds = m.get("positive_folds")
+        if folds is not None and folds < 3:
+            reasons.append(f"strict: only {folds}/4 time folds share the sign — signal is period-specific")
+        if m.get("regime_ok") is False:
+            reasons.append("strict: IC fails in up or down markets — add a regime filter or reject")
     t_stat = m.get("t_stat")
     if trials > 0 and t_stat is not None:
         bar = significance_bar(trials)
@@ -1001,4 +1022,64 @@ def analyze_factor_blocking(
         "regimes": regimes,
         "grades": grades,
         "suggestions": suggestions,
+    }
+
+
+def marginal_contribution_blocking(
+    candidate: dict, others: list[dict], market: str, top_n: int = 5, rebalance: int = 10
+) -> dict:
+    """Does adding `candidate` to the existing blend improve the PORTFOLIO?
+
+    Pairwise correlation < 0.7 is a proxy; the question a PM actually asks is
+    whether Sharpe goes up once the factor is in the book. Both blends use
+    the same rolling-IC weighting and the same portfolio rules, so the delta
+    is attributable to the factor alone.
+    """
+    market = market if market in UNIVERSES else "us"
+    if not others:
+        raise factor_dsl.FactorError("marginal contribution needs at least one existing factor")
+    others = others[:7]
+
+    def sharpe_of(factors: list[dict]) -> dict:
+        if len(factors) == 1:
+            f = factors[0]
+            res = portfolio_backtest_blocking(
+                str(f["expression"]), market, top_n, rebalance, bool(f.get("invert"))
+            )
+        else:
+            res = composite_backtest_blocking(factors, market, "rolling", top_n, rebalance)
+        st = res["stats"]
+        return {
+            "sharpe": st["sharpe"], "cagr_pct": st["cagr_pct"], "max_drawdown_pct": st["max_drawdown_pct"],
+            "excess_pct": round(st["total_return_pct"] - st["benchmark"]["total_return_pct"], 2),
+        }
+
+    without = sharpe_of(others)
+    with_ = sharpe_of([*others, candidate])
+
+    # correlation of the candidate with the existing blend (rank space)
+    panel = _load_panel_blocking(market)
+    cand_vals, _ = factor_dsl.compute(str(candidate["expression"]), panel)
+    if bool(candidate.get("invert")):
+        cand_vals = -cand_vals
+    blend = None
+    for f in others:
+        v, _ = factor_dsl.compute(str(f["expression"]), panel)
+        if bool(f.get("invert")):
+            v = -v
+        r = v.rank(axis=1, pct=True)
+        blend = r if blend is None else blend + r
+    pair = pd.concat([cand_vals.rank(axis=1, pct=True).stack(), blend.stack()], axis=1).dropna()
+    corr = float(pair.iloc[:, 0].corr(pair.iloc[:, 1])) if len(pair) > 200 else float("nan")
+
+    delta = round(with_["sharpe"] - without["sharpe"], 3)
+    verdict = "adds" if delta > 0.05 else "neutral" if delta > -0.05 else "hurts"
+    return {
+        "candidate": candidate["expression"],
+        "n_others": len(others),
+        "without": without,
+        "with": with_,
+        "sharpe_delta": delta,
+        "corr_with_blend": round(corr, 3) if np.isfinite(corr) else None,
+        "verdict": verdict,
     }

@@ -4,8 +4,7 @@ import {
   streamNDJSON,
   type CompositeResult,
   type FactorBacktestResult,
-  type FactorCheck,
-} from "../api";
+  type FactorCheck, type MarginalResult } from "../api";
 import { useT } from "../i18n";
 import {
   deleteFactor,
@@ -16,6 +15,7 @@ import {
   type SavedFactor,
   factorTrials,
   saveFactorTrials,
+  updateFactor,
 } from "../store";
 import { buildFactorShare, takeFactorShare } from "../share";
 import { deployPaper } from "../store";
@@ -76,6 +76,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   const [btError, setBtError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [weighting, setWeighting] = useState("ic");
+  const [marginal, setMarginal] = useState<Record<string, MarginalResult | "pending" | "failed">>({});
   const [compositeResult, setCompositeResult] = useState<CompositeResult | null>(null);
   const [compositing, setCompositing] = useState(false);
   const [health, setHealth] = useState<Record<string, FactorCheck | "pending" | "failed">>({});
@@ -223,7 +224,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
           expression: f.expression,
           market: f.market,
           top_n: 5,
-          rebalance: f.horizon,
+          rebalance: f.best_horizon ?? f.horizon,
           invert: f.is_ic < 0, // negative IC = signal works inverted
         }),
       );
@@ -303,6 +304,26 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
       setTransfer((prev) => ({ ...prev, [key(f)]: result }));
     } catch {
       setTransfer((prev) => ({ ...prev, [key(f)]: "failed" }));
+    }
+  };
+
+  /** Portfolio-level increment: blend Sharpe of the rest of this market's
+   * library with vs without this factor (rolling-IC weights, same rules). */
+  const runMarginal = async (f: SavedFactor) => {
+    const others = saved.filter((o) => o.market === f.market && o.expression !== f.expression).slice(0, 7);
+    if (others.length === 0) return;
+    setMarginal((prev) => ({ ...prev, [key(f)]: "pending" }));
+    try {
+      const res = await api.factorMarginal({
+        candidate: { expression: f.expression, invert: f.is_ic < 0, horizon: f.horizon },
+        others: others.map((o) => ({ expression: o.expression, invert: o.is_ic < 0, horizon: o.horizon })),
+        market: f.market,
+        top_n: 5,
+        rebalance: f.best_horizon ?? f.horizon,
+      });
+      setMarginal((prev) => ({ ...prev, [key(f)]: res }));
+    } catch {
+      setMarginal((prev) => ({ ...prev, [key(f)]: "failed" }));
     }
   };
 
@@ -631,7 +652,29 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                               )}
                               {tr === "pending" && <div className="fl-badge dim">⇄ …</div>}
                               <ExplainButton expression={f.expression} market={f.market} enabled={aiEnabled} />
-                              <FactorReportButton expression={f.expression} market={f.market} horizon={f.horizon} />
+                              <FactorReportButton
+                                expression={f.expression}
+                                market={f.market}
+                                horizon={f.horizon}
+                                onBestHorizon={(h) => {
+                                  if (h !== (f.best_horizon ?? f.horizon)) setSaved(updateFactor(f.market, f.expression, { best_horizon: h }));
+                                }}
+                              />
+                              {f.best_horizon !== undefined && f.best_horizon !== f.horizon && (
+                                <div className="fl-badge" title={t("fl.bh.title")}>{t("fl.bh.badge", { h: String(f.best_horizon) })}</div>
+                              )}
+                              {(() => {
+                                const mg = marginal[key(f)];
+                                if (!mg) return null;
+                                if (mg === "pending") return <div className="fl-badge dim">Δ …</div>;
+                                if (mg === "failed") return <div className="fl-badge fl-badge--warn">Δ {t("fl.mg.failed")}</div>;
+                                const cls = mg.verdict === "adds" ? "fl-badge--ok" : mg.verdict === "hurts" ? "fl-badge--warn" : "";
+                                return (
+                                  <div className={`fl-badge ${cls}`} title={t("fl.mg.title", { a: mg.without.sharpe.toFixed(2), b: mg.with.sharpe.toFixed(2), n: String(mg.n_others) })}>
+                                    {t(`fl.mg.${mg.verdict}` as "fl.mg.adds", { d: `${mg.sharpe_delta >= 0 ? "+" : ""}${mg.sharpe_delta.toFixed(2)}` })}
+                                  </div>
+                                );
+                              })()}
                             </div>
                             <div className="lab-saved__actions">
                               <button
@@ -647,7 +690,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                                     expression: f.expression,
                                     market: f.market,
                                     top_n: 5,
-                                    rebalance: f.horizon,
+                                    rebalance: f.best_horizon ?? f.horizon,
                                     invert: f.is_ic < 0,
                                   })
                                 }
@@ -659,6 +702,16 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                               >
                                 ⇄
                               </button>
+                              {saved.filter((o) => o.market === f.market).length >= 2 && (
+                                <button
+                                  className="btn btn--mini"
+                                  title={t("fl.mg.button")}
+                                  disabled={marginal[key(f)] === "pending"}
+                                  onClick={() => runMarginal(f)}
+                                >
+                                  Δ
+                                </button>
+                              )}
                               <button
                                 className="watch-row__x"
                                 title={t("lab.mine.del")}
