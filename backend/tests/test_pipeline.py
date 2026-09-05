@@ -772,7 +772,7 @@ def test_data_health_reports_gaps_and_stale_names():
     panel = {**panel, "close": close}
     rows = {r["symbol"]: r for r in pipeline.data_health(panel)}
     assert rows["S0"]["gaps"] == 3 and rows["S0"]["stale"] is False
-    assert rows["S1"]["stale"] is True and rows["S1"]["gaps"] == 0
+    assert rows["S1"]["stale"] is True and rows["S1"]["stale_days"] == 20 and rows["S1"]["gaps"] == 0
     assert rows["S2"]["first"] == str(close.index[50].date()) and rows["S2"]["coverage_pct"] == pytest.approx(83.3, abs=0.1)
 
 
@@ -785,3 +785,47 @@ def test_factor_correlation_matrix_is_symmetric_with_unit_diagonal():
     assert m[0][1] == m[1][0] and m[0][1] > 0.7          # near-duplicate factors
     assert abs(m[0][2]) < 0.5
     assert info["max_pair_corr"] == pytest.approx(max(abs(m[0][1]), abs(m[0][2]), abs(m[1][2])), abs=1e-9)
+
+
+# ------------------------------------------------ V6.1: capacity review fixes
+
+
+def test_capacity_does_not_drop_trades_without_volume():
+    panel = _panel(500, 30, seed=5)
+    full = pipeline.run_pipeline_blocking({**SPEC, "compare": False}, panel=panel)["capacity"]
+    half = dict(panel)
+    vol = panel["volume"].copy()
+    vol.iloc[:, :15] = np.nan  # half the universe has no volume data at all
+    half["volume"] = vol
+    partial = pipeline.run_pipeline_blocking({**SPEC, "compare": False}, panel=half)["capacity"]
+    assert partial["costed_trade_pct"] == 100.0  # borrowed the cross-sectional median ADV instead of dropping
+    assert partial["impact_drag_pct_ann"][0] > 0.5 * full["impact_drag_pct_ann"][0]
+    none = dict(panel)
+    none["volume"] = panel["volume"] * np.nan
+    empty = pipeline.run_pipeline_blocking({**SPEC, "compare": False}, panel=none)["capacity"]
+    assert empty["breakeven_aum"] is None and empty["impact_drag_pct_ann"] == [None] * 4  # no ADV → no claim
+
+
+def test_breakeven_uses_unrounded_drag_and_consistent_scaling():
+    panel = _panel(500, 30, seed=5)
+    panel = dict(panel)
+    panel["volume"] = panel["volume"] * 1e3  # very liquid → tiny drags
+    res = pipeline.run_pipeline_blocking({**SPEC, "compare": False}, panel=panel)
+    cap = res["capacity"]
+    if cap["excess_pct_ann"] and cap["excess_pct_ann"] > 0:
+        # net excess hits zero at the breakeven: drag(AUM*) == excess, using the √AUM law from the 1M cell
+        implied = cap["impact_drag_pct_ann"][0] * (cap["breakeven_aum"] / 1e6) ** 0.5
+        assert implied == pytest.approx(cap["excess_pct_ann"], rel=0.02)
+
+
+def test_partial_newest_bar_is_not_stale():
+    panel = _panel(300, 6, seed=2)
+    close = panel["close"].copy()
+    close.iloc[-1, 0] = np.nan  # today's print not in yet
+    close.iloc[-10:, 1] = np.nan
+    rows = {r["symbol"]: r for r in pipeline.data_health({**panel, "close": close})}
+    assert rows["S0"]["stale"] is False and rows["S0"]["stale_days"] == 1
+    assert rows["S1"]["stale"] is True and rows["S1"]["stale_days"] == 10
+    allnan = close.copy(); allnan["S2"] = np.nan
+    rows = {r["symbol"]: r for r in pipeline.data_health({**panel, "close": allnan})}
+    assert rows["S2"]["coverage_pct"] == 0.0 and rows["S2"]["first"] is None

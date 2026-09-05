@@ -1002,9 +1002,12 @@ def data_health(panel: dict[str, pd.DataFrame]) -> list[dict]:
         col = close[sym]
         valid = col.notna()
         if not valid.any():
+            rows.append({"symbol": str(sym), "group": SECTORS.get(str(sym), "other"), "coverage_pct": 0.0,
+                         "gaps": 0, "first": None, "last": None, "stale_days": int(len(close)), "stale": True})
             continue
         first, last = col.first_valid_index(), col.last_valid_index()
         inner = valid.loc[first:last]
+        stale_days = int(len(close) - 1 - close.index.get_loc(last))
         rows.append({
             "symbol": str(sym),
             "group": SECTORS.get(str(sym), "other"),
@@ -1012,7 +1015,9 @@ def data_health(panel: dict[str, pd.DataFrame]) -> list[dict]:
             "gaps": int((~inner).sum()),                # missing prints between first and last
             "first": str(pd.Timestamp(first).date()),
             "last": str(pd.Timestamp(last).date()),
-            "stale": bool(last < close.index[-1]),      # stopped printing before the panel ends
+            "stale_days": stale_days,
+            # the newest 1–3 bars are often partial; only a longer silence means delisted/halted
+            "stale": stale_days > 3,
         })
     rows.sort(key=lambda r: (r["coverage_pct"], r["symbol"]))
     return rows
@@ -1042,15 +1047,27 @@ def capacity_curve(sim: dict, panel: dict[str, pd.DataFrame], spec: dict, stats:
     ann = sim["ann"]
     close = panel["close"].ffill()
     vol = panel["volume"].reindex(columns=trades.columns)
-    dollar_vol = (vol * close if spec["market"] == "us" else vol).rolling(ADV_WINDOW, min_periods=5).mean()
+    # Yahoo reports crypto volume in quote currency already; equities in shares
+    is_quote_ccy = pd.Series([str(c).upper().endswith(("-USD", "-USDT", "-USDC")) for c in vol.columns], index=vol.columns)
+    dollar_vol = vol.where(is_quote_ccy, vol * close.reindex(columns=vol.columns))
+    dollar_vol = dollar_vol.rolling(ADV_WINDOW, min_periods=5).mean()
     adv = dollar_vol.shift(1).reindex(index=trades.index, columns=trades.columns)   # known before the trade
+    # a name without volume data borrows that day's cross-sectional median ADV
+    # rather than being costed at zero — understating impact is the worse error
+    adv = adv.apply(lambda row: row.fillna(row.median()), axis=1)
     sigma = close.pct_change().rolling(ADV_WINDOW, min_periods=5).std().shift(1).reindex(index=trades.index, columns=trades.columns)
+    sigma = sigma.apply(lambda row: row.fillna(row.median()), axis=1)
     mask = trades.values > 0
-    tw = trades.values[mask]
-    adv_v = np.nan_to_num(adv.values[mask], nan=np.nan)
-    sig_v = np.nan_to_num(sigma.values[mask], nan=np.nan)
+    tw_all = trades.values[mask]
+    adv_v = adv.values[mask].astype(float)
+    sig_v = sigma.values[mask].astype(float)
     ok = np.isfinite(adv_v) & (adv_v > 0) & np.isfinite(sig_v)
-    tw, adv_v, sig_v = tw[ok], adv_v[ok], sig_v[ok]
+    costed_pct = float(tw_all[ok].sum() / tw_all.sum() * 100) if tw_all.sum() > 0 else 0.0
+    tw, adv_v, sig_v = tw_all[ok], adv_v[ok], sig_v[ok]
+    if len(tw) == 0:
+        return {"aum_grid": list(AUM_GRID), "impact_drag_pct_ann": [None] * len(AUM_GRID),
+                "net_excess_pct_ann": [None] * len(AUM_GRID), "participation_pct": [None] * len(AUM_GRID),
+                "breakeven_aum": None, "excess_pct_ann": None, "costed_trade_pct": 0.0, "model": "sqrt_impact"}
     years = len(sim["net"]) / ann
     excess_ann = None
     if stats.get("cagr_pct") is not None and stats.get("benchmark", {}).get("cagr_pct") is not None:
@@ -1058,20 +1075,20 @@ def capacity_curve(sim: dict, panel: dict[str, pd.DataFrame], spec: dict, stats:
     elif years > 0:
         excess_ann = float(stats["excess_pct"]) / years
     drags, nets, parts = [], [], []
+    exact_drags = []
     for aum in AUM_GRID:
         q = tw * aum                                    # traded notional per name
         participation = q / adv_v
         cost = IMPACT_COEF * sig_v * np.sqrt(participation) * tw   # fraction of NAV lost on each trade
-        drag_ann = float(cost.sum()) / max(years, 1e-9) * 100 if len(cost) else 0.0
+        drag_ann = float(cost.sum()) / max(years, 1e-9) * 100
+        exact_drags.append(drag_ann)
         drags.append(round(drag_ann, 3))
         nets.append(round(excess_ann - drag_ann, 2) if excess_ann is not None else None)
-        parts.append(round(float(np.mean(participation)) * 100, 3) if len(participation) else None)
+        parts.append(round(float(np.mean(participation)) * 100, 3))
     breakeven = None
-    if excess_ann is not None and excess_ann > 0 and drags and drags[-1] > 0:
-        # drag scales as AUM^0.5 → AUM* = AUM_ref · (excess / drag_ref)^2
-        ref_aum, ref_drag = AUM_GRID[0], drags[0]
-        if ref_drag > 0:
-            breakeven = float(ref_aum * (excess_ann / ref_drag) ** 2)
+    if excess_ann is not None and excess_ann > 0 and exact_drags[0] > 0:
+        # drag scales as AUM^0.5 → AUM* = AUM_ref · (excess / drag_ref)^2 (unrounded reference)
+        breakeven = float(AUM_GRID[0] * (excess_ann / exact_drags[0]) ** 2)
     return {
         "aum_grid": list(AUM_GRID),
         "impact_drag_pct_ann": drags,
@@ -1079,5 +1096,6 @@ def capacity_curve(sim: dict, panel: dict[str, pd.DataFrame], spec: dict, stats:
         "participation_pct": parts,
         "excess_pct_ann": _r(excess_ann, 2),
         "breakeven_aum": _r(breakeven, 0),
+        "costed_trade_pct": round(costed_pct, 1),
         "model": "sqrt_impact",
     }
