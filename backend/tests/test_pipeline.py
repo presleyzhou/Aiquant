@@ -111,7 +111,7 @@ def test_drawdown_episodes_find_peak_trough_recovery():
 def test_pipeline_runs_and_is_json_clean():
     panel = _panel(500, 20)
     res = pipeline.run_pipeline_blocking({**SPEC, "compare": True}, panel=panel)
-    json.dumps(res)  # numpy scalars must not leak
+    json.dumps(res, allow_nan=False)  # numpy scalars / NaN must not leak (Starlette rejects NaN)
     for key in ("spec", "universe", "signal", "portfolio", "backtest", "risk", "alternatives", "target_weights", "warnings"):
         assert key in res
     assert {a["scheme"] for a in res["alternatives"]} == set(portfolio.SCHEMES)
@@ -161,9 +161,9 @@ def test_max_weight_cap_is_honoured_in_targets():
 
 
 def test_normalize_spec_clamps_and_validates():
-    spec = pipeline.normalize_spec({"market": "nope", "factors": ["rank(close)"], "top_n": 99, "max_weight": 3, "target_vol_pct": 1})
+    spec = pipeline.normalize_spec({"market": "nope", "factors": ["rank(close)"], "top_n": 99, "max_weight": 3, "target_vol_pct": 55})
     assert spec["market"] == "us" and spec["top_n"] == 20 and spec["max_weight"] == 1.0
-    assert spec["target_vol_pct"] == 5
+    assert spec["target_vol_pct"] == 40
     with pytest.raises(factor_dsl.FactorError):
         pipeline.normalize_spec({"factors": []})
     with pytest.raises(factor_dsl.FactorError):
@@ -519,3 +519,80 @@ def test_rolling_window_beat_pct_extremes():
     assert portfolio.rolling_window_beat_pct(pd.Series(0.001, index=idx), bench) == 100.0
     assert portfolio.rolling_window_beat_pct(pd.Series(-0.001, index=idx), bench) == 0.0
     assert portfolio.rolling_window_beat_pct(bench.iloc[:100], bench.iloc[:100]) is None
+
+
+# ------------------------------------------------- V4.1: review fixes
+
+
+def test_gap_day_return_is_not_erased():
+    panel = _panel(300, 6, seed=2)
+    close = panel["close"].copy()
+    close.iloc[150, 0] = np.nan  # one missing print
+    panel = {**panel, "close": close}
+    spec = pipeline.normalize_spec({**SPEC, "factors": ["rank(close)"], "scheme": "equal", "top_n": 6, "cost_bps": 0, "hold_buffer": 0})
+    scores = pd.DataFrame(1.0, index=close.index, columns=close.columns)
+    sim = pipeline.simulate(scores, panel, spec)
+    # equal-weight of every name, no costs: the portfolio must compound like the true equal-weight index
+    true_ret = close.ffill().pct_change().loc[sim["net"].index].mean(axis=1)
+    assert abs(float((1 + sim["net"]).prod()) - float((1 + true_ret).prod())) < 0.02
+
+
+def test_partial_newest_bar_does_not_define_target_weights():
+    panel = _panel(500, 30, seed=5)
+    for k in ("open", "high", "low", "close", "volume"):
+        panel[k].iloc[-1, 10:] = np.nan  # only 10 of 30 names printed today
+    panel["returns"] = panel["close"].pct_change(); panel["vwap"] = (panel["high"] + panel["low"] + panel["close"]) / 3
+    res = pipeline.run_pipeline_blocking({**SPEC, "factors": ["rank(delta(close, 5))"]}, panel=panel)
+    assert res["target_weights"]["as_of"] == str(panel["close"].index[-2].date())
+    assert len(res["target_weights"]["weights"]) == 6
+
+
+def test_mean_variance_reacts_to_ic_magnitude():
+    cov, _ = _cov()
+    scores = np.array([-2.0, 2.0, 1.0, -1.0])  # best-scored name is NOT the lowest-vol one
+    vols = np.sqrt(np.diag(cov))
+    weak = portfolio.mean_variance_weights(portfolio.grinold_alpha(scores, vols, 0.001), cov, cap=1.0)
+    strong = portfolio.mean_variance_weights(portfolio.grinold_alpha(scores, vols, 0.2), cov, cap=1.0)
+    minvar = portfolio.min_variance_weights(cov, cap=1.0)
+    assert np.abs(weak - minvar).max() < 0.1           # (almost) no signal → (almost) minimum variance
+    assert strong[1] > weak[1] + 0.3                    # strong signal → tilt into the top-scored name
+
+
+def test_in_sample_ic_window_closes_before_holdout():
+    panel = _panel(600, 20, seed=1)
+    spec = pipeline.normalize_spec({**SPEC, "factors": [{"expression": "rank(delta(close, 5))", "horizon": 30}]})
+    _, info, _ = pipeline.build_signal(spec, panel)
+    # with h=30 the naive 80% split would let 30 observations peek into the holdout; the
+    # function must instead report an in-sample IC over fewer observations — check via the composite path
+    assert info["composite_is_ic"] is not None
+    ic = pipeline._daily_rank_ic(pipeline.factor_dsl.compute("rank(delta(close, 5))", panel)[0],
+                                 panel["close"].pct_change(30).shift(-30))
+    naive = float(ic.iloc[: int(len(ic) * 0.8)].mean())
+    clean = float(ic.iloc[: int(len(ic) * 0.8) - 30].mean())
+    assert info["components"][0]["is_ic"] == pytest.approx(round(clean, 4), abs=1e-4)
+    assert info["components"][0]["is_ic"] != pytest.approx(round(naive, 4), abs=1e-6) or abs(naive - clean) < 1e-6
+
+
+def test_normalize_spec_rejects_garbage_without_crashing():
+    for bad in (
+        {"factors": [1]},
+        {"factors": ["rank(close)"], "top_n": float("inf")},
+        {"factors": ["rank(close)"], "target_vol_pct": 2},
+    ):
+        with pytest.raises(factor_dsl.FactorError):
+            pipeline.normalize_spec(bad)
+    # an unhashable market is coerced to the default instead of crashing
+    assert pipeline.normalize_spec({"factors": ["rank(close)"], "market": ["us"]})["market"] == "us"
+
+
+def test_held_name_with_missing_score_is_not_liquidated():
+    panel = _panel(400, 8, seed=4)
+    idx = panel["close"].index
+    scores = pd.DataFrame(np.tile(np.arange(8, dtype=float), (len(idx), 1)), index=idx, columns=panel["close"].columns)
+    day = 250  # a rebalance day for rebalance=10 once the loop starts at `first`
+    spec = pipeline.normalize_spec({**SPEC, "factors": ["rank(close)"], "scheme": "equal", "top_n": 3, "hold_buffer": 2, "rebalance": 10, "cost_bps": 0})
+    scores.iloc[day:day + 12, 7] = np.nan  # the best name loses its score for a few days
+    sim = pipeline.simulate(scores, panel, spec)
+    held = sim["held"]
+    # S7 was held before the hiccup; it must still be held right after the affected rebalances
+    assert float(held.iloc[day + 5]["S7"]) > 0.2

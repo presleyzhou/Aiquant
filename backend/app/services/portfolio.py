@@ -30,6 +30,7 @@ import pandas as pd
 SCHEMES: tuple[str, ...] = ("equal", "score", "inverse_vol", "min_variance", "risk_parity", "hrp", "mean_variance")
 
 COV_SHRINKAGE = 0.3        # fallback intensity when the analytic estimate is unusable
+REF_IC = 0.02              # Grinold alpha at this IC balances the mean-variance trade-off
 _EPS = 1e-12
 
 
@@ -269,13 +270,17 @@ def grinold_alpha(scores: np.ndarray, vols: np.ndarray, ic: float) -> np.ndarray
 
 def mean_variance_weights(alpha: np.ndarray, cov: np.ndarray, cap: float, risk_aversion: float = 1.0,
                           iters: int = 300) -> np.ndarray:
-    """max alpha'w − lambda·w'Σw  s.t. sum(w)=1, 0 <= w <= cap, by projected
-    gradient. lambda is set relative to the problem's own scale — the ratio of
-    typical |alpha| to typical variance times `risk_aversion` — so the trade-off
-    is meaningful for daily crypto and daily equities alike."""
+    """max alpha'w − lambda·w'Σw  s.t. sum(w)=1, 0 <= w <= cap, by accelerated
+    projected gradient. lambda scales with the typical volatility only (see
+    REF_IC), so the alpha keeps its Grinold units and a bigger IC really does
+    tilt the book harder."""
     n = cov.shape[0]
-    scale = float(np.mean(np.abs(alpha))) / max(float(np.mean(np.diag(cov))), 1e-12)
-    lam = max(risk_aversion * scale, 1e-9)
+    # Risk scale independent of alpha, so |IC| genuinely moves the answer:
+    # at a reference IC of 0.02 the alpha and risk gradients are comparable;
+    # a weaker signal collapses toward minimum variance, a stronger one
+    # concentrates up to the caps.
+    sigma_typ = max(float(np.mean(np.sqrt(np.clip(np.diag(cov), 1e-16, None)))), 1e-8)
+    lam = max(risk_aversion * REF_IC / sigma_typ, 1e-9)
     w0 = project_capped_simplex(np.full(n, 1.0 / n), cap)
     lipschitz = 2 * lam * max(float(np.linalg.eigvalsh(cov).max()), 1e-10)
     return _accelerated_pgd(lambda w: -alpha + 2 * lam * cov @ w, w0, cap, lipschitz, iters)

@@ -129,7 +129,9 @@ def config() -> dict:
 def _clamp(value: Any, lo: float, hi: float, cast=float):
     try:
         v = cast(value)
-    except (TypeError, ValueError):
+        if isinstance(v, float) and not np.isfinite(v):
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
         raise factor_dsl.FactorError(f"invalid parameter value: {value!r}") from None
     return max(lo, min(hi, v))
 
@@ -137,7 +139,7 @@ def _clamp(value: Any, lo: float, hi: float, cast=float):
 def normalize_spec(raw: dict) -> dict:
     """Coerce a request (or a stored paper-trading config) to a valid spec."""
     market = raw.get("market", "us")
-    market = market if market in UNIVERSES else "us"
+    market = market if isinstance(market, str) and market in UNIVERSES else "us"
     factors_in = raw.get("factors") or []
     if not isinstance(factors_in, list) or not (LIMITS["factors"][0] <= len(factors_in) <= LIMITS["factors"][1]):
         raise factor_dsl.FactorError("pipeline needs between 1 and 8 factors")
@@ -145,6 +147,8 @@ def normalize_spec(raw: dict) -> dict:
     for f in factors_in:
         if isinstance(f, str):
             f = {"expression": f}
+        if not isinstance(f, dict):
+            raise factor_dsl.FactorError("each factor must be an expression string or an object")
         expr = str(f.get("expression", "")).strip()
         if not expr:
             raise factor_dsl.FactorError("empty factor expression")
@@ -160,7 +164,12 @@ def normalize_spec(raw: dict) -> dict:
     weighting = str(raw.get("signal_weighting", DEFAULTS["signal_weighting"]))
     weighting = weighting if weighting in SIGNAL_WEIGHTINGS else DEFAULTS["signal_weighting"]
     tv = raw.get("target_vol_pct")
-    target_vol = None if tv in (None, "", 0, "0", False) else _clamp(tv, *LIMITS["target_vol_pct"])
+    if tv in (None, "", 0, "0", False):
+        target_vol = None
+    else:
+        target_vol = _clamp(tv, *LIMITS["target_vol_pct"])
+        if float(tv) < LIMITS["target_vol_pct"][0]:
+            raise factor_dsl.FactorError("target_vol_pct must be 0 (off) or between 5 and 40")
     return {
         "market": market,
         "factors": factors,
@@ -212,7 +221,9 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
             raise factor_dsl.FactorError(
                 f"{f['expression']}: only {len(ic)} evaluable days — factor too sparse for this universe"
             )
-        split = int(len(ic) * (1 - HOLDOUT_FRACTION))
+        # an IC observation at day s needs returns through s+h; the last
+        # in-sample observation must have CLOSED before the holdout begins
+        split = max(1, int(len(ic) * (1 - HOLDOUT_FRACTION)) - f["horizon"])
         is_ic = float(ic.iloc[:split].mean()) if split > 0 else 0.0
         oos_ic = float(ic.iloc[split:].mean()) if split < len(ic) else 0.0
         ranked_list.append(values.rank(axis=1, pct=True))
@@ -280,17 +291,17 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
     for h in IC_HORIZONS:
         fwd = close.pct_change(h).shift(-h)
         ic_h = _daily_rank_ic(scores, fwd)
-        ic_by_horizon.append({"horizon": h, "ic": round(float(ic_h.mean()), 4) if len(ic_h) >= 30 else None})
+        ic_by_horizon.append({"horizon": h, "ic": _r(float(ic_h.mean()), 4) if len(ic_h) >= 30 else None})
     main_h = max(1, int(round(float(np.mean([f["horizon"] for f in spec["factors"]])))))
     ic_main = _daily_rank_ic(scores, close.pct_change(main_h).shift(-main_h))
-    split = int(len(ic_main) * (1 - HOLDOUT_FRACTION))
+    split = max(1, int(len(ic_main) * (1 - HOLDOUT_FRACTION)) - main_h)
     composite_is_ic = float(ic_main.iloc[:split].mean()) if split > 0 else 0.0
 
     info = {
         "weighting": weighting, "components": components, "max_pair_corr": round(max_pair_corr, 3),
         "ic_by_horizon": ic_by_horizon,
         "composite_is_ic": round(composite_is_ic if np.isfinite(composite_is_ic) else 0.0, 4),
-        "composite_oos_ic": round(float(ic_main.iloc[split:].mean()), 4) if split < len(ic_main) else None,
+        "composite_oos_ic": _r(float(ic_main.iloc[split:].mean()), 4) if split < len(ic_main) else None,
     }
     return scores, info, ranked_list
 
@@ -334,6 +345,13 @@ def _decide_weights(
     if len(candidates) < 2:
         return pd.Series(dtype=float), 1.0
     top_n = min(spec["top_n"], len(candidates))
+    if held and spec["hold_buffer"] > 0:
+        # a held name whose score is missing TODAY (data hiccup) is not sold
+        # on that account: it is treated as sitting at the edge of the band
+        missing = [h for h in held if h not in candidates.index and bool(usable.get(h, False))]
+        if missing:
+            edge = candidates.sort_values(ascending=False).iloc[min(top_n, len(candidates)) - 1]
+            candidates = pd.concat([candidates, pd.Series(edge, index=missing)])
     selected = _select(candidates, top_n, spec["hold_buffer"], held or set())
     sub = trailing[selected.index]
     w = portfolio.construct(scheme, selected.values, sub.values, spec["max_weight"], ic=ic)
@@ -355,7 +373,10 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
     market = spec["market"]
     ann = 252 if market == "us" else 365
     close = panel["close"]
-    ret = close.pct_change()
+    # forward-fill BEFORE differencing: a single missing close would otherwise
+    # turn two daily returns into NaN (→ 0) and silently erase the move across
+    # the gap. Leading NaNs (late listings) stay NaN; a delisted name earns 0.
+    ret = close.ffill().pct_change()
     symbols = list(close.columns)
     scores = scores.reindex(index=close.index, columns=symbols)
     ret_np = ret.to_numpy(dtype=float)
@@ -429,7 +450,14 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
 
     # latest decision (for target weights): newest complete row with a full cross-section
     current = {symbols[k] for k in np.flatnonzero(held > 1e-6)}
+    # the newest row is often partial (a few names not yet printed): only a
+    # row with a near-complete cross-section may define the live target
+    counts = scores.notna().sum(axis=1)
+    typical = float(counts.iloc[first:].median()) if T > first else 0.0
+    needed = max(spec["top_n"], int(np.ceil(0.8 * typical)))
     for i in range(T - 1, max(first, T - 8) - 1, -1):
+        if counts.iloc[i] < needed:
+            continue
         trailing = ret.iloc[i - lookback + 1: i + 1]
         w, scale = _decide_weights(scheme, scores.iloc[i], trailing, spec, ann, held=current, ic=ic)
         if len(w) >= min(spec["top_n"], 2):
@@ -671,7 +699,7 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
 
     scores, signal, ranked_list = build_signal(spec, panel)
     ic = signal["composite_is_ic"]
-    signal["quantiles"] = portfolio.quantile_returns(scores, close.pct_change(), 252 if spec["market"] == "us" else 365)
+    signal["quantiles"] = portfolio.quantile_returns(scores, close.ffill().pct_change(), 252 if spec["market"] == "us" else 365)
     sim = simulate(scores, panel, spec, ic=ic)
     trials: list[float] = []  # every configuration evaluated → the DSR's N
 
