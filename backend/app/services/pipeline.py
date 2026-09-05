@@ -21,17 +21,21 @@ into one simulation with the honesty rules the rest of the site enforces:
 
 from __future__ import annotations
 
+import hashlib
+import re
+import time
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from app.services import factor_dsl, portfolio
+from app.services import disk_cache, factor_dsl, portfolio
 from app.services.factor_mine import (
     HOLDOUT_FRACTION,
     UNIVERSES,
     _daily_rank_ic,
     _load_panel_blocking,
+    download_panel,
 )
 
 SCHEME_INFO: list[dict[str, str]] = [
@@ -94,7 +98,7 @@ SECTORS: dict[str, str] = {
 DEFAULTS: dict[str, Any] = {
     "scheme": "inverse_vol", "signal_weighting": "ic_expanding", "top_n": 8, "rebalance": 10,
     "max_weight": 0.25, "cost_bps": 7.0, "target_vol_pct": None, "vol_lookback": 60, "horizon": 10,
-    "hold_buffer": 4, "trade_rate": 1.0, "shrink_to_equal": 0.0,
+    "hold_buffer": 4, "trade_rate": 1.0, "shrink_to_equal": 0.0, "history": "3y",
 }
 LIMITS: dict[str, list] = {
     "factors": [1, 8], "top_n": [2, 20], "rebalance": [1, 30], "max_weight": [0.05, 1.0],
@@ -108,6 +112,12 @@ MIN_ACTIVE_IC = 0.005       # |expanding IC| below this → factor gated out of 
 SENSITIVITY_STEPS = {"top_n": (-3, 0, 3), "rebalance": (0.5, 1.0, 2.0)}
 
 _MIN_BARS = 60
+HISTORIES: tuple[str, ...] = ("3y", "5y")
+MAX_CUSTOM_SYMBOLS = 40
+MIN_CUSTOM_SYMBOLS = 8
+_SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-=^]{0,19}$")
+_CUSTOM_CACHE: dict[str, tuple[float, dict[str, pd.DataFrame]]] = {}
+_CUSTOM_TTL = 6 * 3600
 
 
 def config() -> dict:
@@ -119,7 +129,8 @@ def config() -> dict:
         "sectors": SECTORS,
         "starter_factors": STARTER_FACTORS,
         "defaults": DEFAULTS,
-        "limits": LIMITS,
+        "limits": {**LIMITS, "symbols": [MIN_CUSTOM_SYMBOLS, MAX_CUSTOM_SYMBOLS]},
+        "histories": list(HISTORIES),
     }
 
 
@@ -140,6 +151,9 @@ def normalize_spec(raw: dict) -> dict:
     """Coerce a request (or a stored paper-trading config) to a valid spec."""
     market = raw.get("market", "us")
     market = market if isinstance(market, str) and market in UNIVERSES else "us"
+    symbols = parse_symbols(raw.get("symbols"))
+    history = raw.get("history", DEFAULTS["history"])
+    history = history if isinstance(history, str) and history in HISTORIES else DEFAULTS["history"]
     factors_in = raw.get("factors") or []
     if not isinstance(factors_in, list) or not (LIMITS["factors"][0] <= len(factors_in) <= LIMITS["factors"][1]):
         raise factor_dsl.FactorError("pipeline needs between 1 and 8 factors")
@@ -172,6 +186,8 @@ def normalize_spec(raw: dict) -> dict:
             raise factor_dsl.FactorError("target_vol_pct must be 0 (off) or between 5 and 40")
     return {
         "market": market,
+        "symbols": symbols,
+        "history": history,
         "factors": factors,
         "signal_weighting": weighting,
         "scheme": scheme,
@@ -189,6 +205,56 @@ def normalize_spec(raw: dict) -> dict:
         "prior_trials": int(_clamp(raw.get("prior_trials", 0) or 0, *LIMITS["prior_trials"], cast=int)),
         "compare": bool(raw.get("compare", True)),
     }
+
+
+def parse_symbols(raw: Any) -> list[str]:
+    """A user-supplied universe: 8–40 distinct tickers, or empty for the
+    built-in one. Rejects anything that is not a plain ticker string."""
+    if raw in (None, "", [], ()):
+        return []
+    if isinstance(raw, str):
+        raw = re.split(r"[\s,;]+", raw)
+    if not isinstance(raw, (list, tuple)):
+        raise factor_dsl.FactorError("symbols must be a list of tickers")
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise factor_dsl.FactorError("symbols must be strings")
+        sym = item.strip().upper()
+        if not sym:
+            continue
+        if not _SYMBOL_RE.match(sym):
+            raise factor_dsl.FactorError(f"invalid symbol {item!r}")
+        if sym not in out:
+            out.append(sym)
+    if not out:
+        return []
+    if not (MIN_CUSTOM_SYMBOLS <= len(out) <= MAX_CUSTOM_SYMBOLS):
+        raise factor_dsl.FactorError(f"a custom universe needs {MIN_CUSTOM_SYMBOLS}–{MAX_CUSTOM_SYMBOLS} symbols (got {len(out)})")
+    return out
+
+
+def load_panel(spec: dict) -> dict[str, pd.DataFrame]:
+    """The OHLCV panel for a spec: the shared built-in universe when no
+    symbols are given and history is 3y, otherwise a custom download cached
+    (memory + disk) for 6 hours under a key derived from the request."""
+    if not spec["symbols"] and spec["history"] == "3y":
+        return _load_panel_blocking(spec["market"])
+    tickers = spec["symbols"] or list(UNIVERSES[spec["market"]])
+    digest = hashlib.sha1(",".join(sorted(tickers)).encode()).hexdigest()[:12]
+    key = f"panel-custom-{spec['history']}-{digest}"
+    hit = _CUSTOM_CACHE.get(key)
+    if hit and time.time() - hit[0] < _CUSTOM_TTL:
+        return hit[1]
+    disk = disk_cache.load(key, _CUSTOM_TTL)
+    if isinstance(disk, dict) and "close" in disk:
+        _CUSTOM_CACHE[key] = (time.time(), disk)
+        return disk
+    label = "custom" if spec["symbols"] else spec["market"]
+    panel = download_panel(tickers, spec["history"], label, min_symbols=MIN_CUSTOM_SYMBOLS)
+    _CUSTOM_CACHE[key] = (time.time(), panel)
+    disk_cache.store(key, panel)
+    return panel
 
 
 # --------------------------------------------------------------- signal
@@ -690,11 +756,14 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
     """The whole pipeline, synchronously. Raises FactorError (400) or
     LookupError (404, from the data layer)."""
     spec = normalize_spec(raw_spec)
-    panel = panel if panel is not None else _load_panel_blocking(spec["market"])
+    panel = panel if panel is not None else load_panel(spec)
     close = panel["close"]
     universe = {
         "market": spec["market"], "symbols": int(close.shape[1]),
         "from": str(close.index[0].date()), "to": str(close.index[-1].date()), "bars": int(len(close)),
+        "custom": bool(spec["symbols"]), "history": spec["history"],
+        "requested": len(spec["symbols"]) if spec["symbols"] else None,
+        "dropped": sorted(set(spec["symbols"]) - set(map(str, close.columns))) if spec["symbols"] else [],
     }
 
     scores, signal, ranked_list = build_signal(spec, panel)
@@ -783,7 +852,7 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
 def current_holdings_blocking(raw_spec: dict) -> dict:
     """Paper-trading position: the latest target weights of a deployed spec."""
     spec = normalize_spec(raw_spec)
-    panel = _load_panel_blocking(spec["market"])
+    panel = load_panel(spec)
     scores, signal, _ = build_signal(spec, panel)
     sim = simulate(scores, panel, spec, ic=signal["composite_is_ic"])
     if sim["last_target"] is None:
@@ -795,4 +864,96 @@ def current_holdings_blocking(raw_spec: dict) -> dict:
         "symbols": [str(s) for s in ordered.index],
         "weights_pct": [round(float(v) * 100, 2) for v in ordered.values],
         "since": str(pd.Timestamp(ts).date()),
+    }
+
+
+# ------------------------------------------------------------- execution
+
+
+def orders_blocking(raw_spec: dict, nav: float, current: dict[str, float] | None = None,
+                    min_trade_pct: float = 0.25, panel: dict[str, pd.DataFrame] | None = None) -> dict:
+    """Rebalance ticket: the trades that move a real book (`nav` in account
+    currency, `current` = {symbol: shares}) to the pipeline's latest target
+    weights. Reference prices are the last available closes in the panel —
+    the sheet says so, and the user fills at the open. Trades below
+    `min_trade_pct` of NAV are suppressed as dust."""
+    spec = normalize_spec(raw_spec)
+    if not np.isfinite(nav) or nav <= 0:
+        raise factor_dsl.FactorError("nav must be a positive number")
+    panel = panel if panel is not None else load_panel(spec)
+    scores, signal, _ = build_signal(spec, panel)
+    sim = simulate(scores, panel, spec, ic=signal["composite_is_ic"])
+    if sim["last_target"] is None:
+        raise factor_dsl.FactorError("no complete bar to build target weights from")
+    ts, target, _scale = sim["last_target"]
+    prices = panel["close"].ffill().iloc[-1]
+
+    holdings: dict[str, float] = {}
+    for sym, shares in (current or {}).items():
+        s_ = str(sym).strip().upper()
+        try:
+            q = float(shares)
+        except (TypeError, ValueError):
+            raise factor_dsl.FactorError(f"invalid share count for {sym!r}") from None
+        if q < 0 or not np.isfinite(q):
+            raise factor_dsl.FactorError(f"share count for {s_} must be a non-negative number")
+        if q > 0:
+            holdings[s_] = holdings.get(s_, 0.0) + q
+
+    symbols = sorted(set(target.index.astype(str)) | set(holdings))
+    orders: list[dict] = []
+    unpriced: list[str] = []
+    buy_total = sell_total = 0.0
+    invested_now = 0.0
+    for sym in symbols:
+        px = float(prices.get(sym, np.nan))
+        if not np.isfinite(px) or px <= 0:
+            unpriced.append(sym)
+            continue
+        cur_sh = holdings.get(sym, 0.0)
+        cur_val = cur_sh * px
+        invested_now += cur_val
+        tgt_w = float(target.get(sym, 0.0))
+        tgt_val = tgt_w * nav
+        delta = tgt_val - cur_val
+        if abs(delta) < nav * min_trade_pct / 100:
+            continue
+        shares = int(np.floor(abs(delta) / px))
+        if shares == 0:
+            continue
+        notional = shares * px
+        side = "buy" if delta > 0 else "sell"
+        if side == "sell":
+            shares = min(shares, int(np.floor(cur_sh)))  # never short
+            notional = shares * px
+            if shares == 0:
+                continue
+            sell_total += notional
+        else:
+            buy_total += notional
+        orders.append({
+            "symbol": sym, "side": side, "shares": shares, "price": round(px, 4),
+            "notional": round(notional, 2),
+            "from_weight_pct": round(cur_val / nav * 100, 2), "to_weight_pct": round(tgt_w * 100, 2),
+            "group": SECTORS.get(sym, "other"),
+        })
+    orders.sort(key=lambda o: (o["side"] != "sell", -o["notional"]))  # sells first (they fund the buys)
+    cost = (buy_total + sell_total) * spec["cost_bps"] / 10_000
+    cash_now = nav - invested_now
+    return {
+        "as_of": str(pd.Timestamp(ts).date()),
+        "price_date": str(prices.name.date()) if hasattr(prices.name, "date") else None,
+        "nav": round(nav, 2),
+        "orders": orders,
+        "unpriced": unpriced,
+        "summary": {
+            "buys": len([o for o in orders if o["side"] == "buy"]),
+            "sells": len([o for o in orders if o["side"] == "sell"]),
+            "buy_notional": round(buy_total, 2), "sell_notional": round(sell_total, 2),
+            "turnover_pct": round((buy_total + sell_total) / 2 / nav * 100, 2),
+            "est_cost": round(cost, 2),
+            "cash_before": round(cash_now, 2),
+            "cash_after": round(cash_now + sell_total - buy_total - cost, 2),
+            "target_exposure_pct": round(float(target.sum()) * 100, 1),
+        },
     }

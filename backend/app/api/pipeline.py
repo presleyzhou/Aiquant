@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.services import factor_dsl
 from app.services.pipeline import config as pipeline_config
-from app.services.pipeline import run_pipeline_blocking
+from app.services.pipeline import orders_blocking, run_pipeline_blocking
 from app.services.ratelimit import limiter
 
 log = logging.getLogger("aiquant.pipeline")
@@ -28,6 +28,8 @@ class PipelineFactor(BaseModel):
 
 class PipelineRequest(BaseModel):
     market: str = Field("us", pattern="^(us|crypto)$")
+    symbols: list[str] = Field(default_factory=list, max_length=40, description="custom universe (8–40 tickers); empty = built-in")
+    history: str = Field("3y", pattern="^(3y|5y)$")
     factors: list[PipelineFactor] = Field(min_length=1, max_length=8)
     signal_weighting: str = Field("ic_expanding", pattern="^(ic_expanding|ic|equal)$")
     scheme: str = Field("inverse_vol", pattern="^(equal|score|inverse_vol|min_variance|risk_parity|hrp|mean_variance)$")
@@ -53,6 +55,28 @@ async def get_config() -> dict:
 async def run(req: PipelineRequest) -> dict:
     try:
         return await asyncio.to_thread(run_pipeline_blocking, req.model_dump())
+    except factor_dsl.FactorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class OrdersRequest(BaseModel):
+    spec: PipelineRequest
+    nav: float = Field(gt=0, le=1e12, description="portfolio value incl. cash, account currency")
+    current: dict[str, float] = Field(default_factory=dict, description="{symbol: shares} currently held")
+    min_trade_pct: float = Field(0.25, ge=0, le=5, description="suppress trades below this % of NAV")
+
+
+@router.post("/orders")
+async def orders(req: OrdersRequest) -> dict:
+    """Rebalance ticket from the current book to the latest target weights."""
+    if len(req.current) > 200:
+        raise HTTPException(status_code=400, detail="at most 200 current positions")
+    try:
+        return await asyncio.to_thread(
+            orders_blocking, req.spec.model_dump(), req.nav, req.current, req.min_trade_pct
+        )
     except factor_dsl.FactorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
