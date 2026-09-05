@@ -596,3 +596,150 @@ def test_held_name_with_missing_score_is_not_liquidated():
     held = sim["held"]
     # S7 was held before the hiccup; it must still be held right after the affected rebalances
     assert float(held.iloc[day + 5]["S7"]) > 0.2
+
+
+# ----------------------------------------------- V5: custom universes, orders
+
+
+def test_parse_symbols_validates_and_dedupes():
+    assert pipeline.parse_symbols(None) == [] and pipeline.parse_symbols("") == []
+    got = pipeline.parse_symbols(" aapl, MSFT;nvda goog\nmeta amzn tsla jpm aapl ")
+    assert got == ["AAPL", "MSFT", "NVDA", "GOOG", "META", "AMZN", "TSLA", "JPM"]
+    with pytest.raises(factor_dsl.FactorError):
+        pipeline.parse_symbols(["AAPL", "MSFT"])  # too few
+    with pytest.raises(factor_dsl.FactorError):
+        pipeline.parse_symbols(["AAPL; DROP TABLE"] + ["X%d" % i for i in range(8)])
+    with pytest.raises(factor_dsl.FactorError):
+        pipeline.parse_symbols([1, 2, 3, 4, 5, 6, 7, 8])
+
+
+def test_custom_universe_uses_downloader_and_caches(monkeypatch):
+    calls = []
+    synthetic = _panel(400, 10, seed=8)
+    names = ["AAPL", "MSFT", "NVDA", "GOOG", "META", "AMZN", "TSLA", "JPM", "V", "MA"]
+    synthetic = {k: v.set_axis(names, axis=1) for k, v in synthetic.items()}
+
+    def fake_download(tickers, period, label, min_symbols=8):
+        calls.append((tuple(tickers), period, label))
+        return synthetic
+
+    monkeypatch.setattr(pipeline, "download_panel", fake_download)
+    monkeypatch.setattr(pipeline.disk_cache, "load", lambda key, ttl: None)
+    monkeypatch.setattr(pipeline.disk_cache, "store", lambda key, obj: None)
+    pipeline._CUSTOM_CACHE.clear()
+    spec = {**SPEC, "symbols": names + ["ZZZZ"], "history": "5y"}
+    res = pipeline.run_pipeline_blocking(spec)
+    assert calls and calls[0][1] == "5y" and "ZZZZ" in calls[0][0]
+    assert res["universe"]["custom"] is True and res["universe"]["history"] == "5y"
+    assert res["universe"]["dropped"] == ["ZZZZ"] and res["universe"]["requested"] == 11
+    pipeline.run_pipeline_blocking(spec)
+    assert len(calls) == 1  # second run served from the in-memory cache
+    # built-in universe with 3y never touches the custom path
+    monkeypatch.setattr(pipeline, "_load_panel_blocking", lambda market: synthetic)
+    plain = pipeline.run_pipeline_blocking(SPEC)
+    assert plain["universe"]["custom"] is False and len(calls) == 1
+
+
+def test_orders_move_book_to_target_and_never_short():
+    panel = _panel(500, 30, seed=5)
+    real = pipeline.UNIVERSES["us"][:30]
+    panel = {k: v.set_axis(real, axis=1) for k, v in panel.items()}
+    res = pipeline.run_pipeline_blocking(SPEC, panel=panel)
+    targets = {w["symbol"]: w["weight_pct"] for w in res["target_weights"]["weights"]}
+    # currently hold a name that is NOT in the target → must be sold entirely; hold cash otherwise
+    stray = next(s for s in real if s not in targets)
+    px = float(panel["close"].ffill().iloc[-1][stray])
+    ticket = pipeline.orders_blocking(SPEC, nav=100_000, current={stray: 100}, panel=panel)
+    sells = [o for o in ticket["orders"] if o["side"] == "sell"]
+    assert len(sells) == 1 and sells[0]["symbol"] == stray and sells[0]["shares"] == 100
+    assert sells[0]["notional"] == pytest.approx(100 * px, rel=1e-6)
+    buys = {o["symbol"]: o for o in ticket["orders"] if o["side"] == "buy"}
+    assert set(buys) == set(targets)
+    for sym, o in buys.items():
+        assert o["to_weight_pct"] == targets[sym]
+        assert o["notional"] <= targets[sym] / 100 * 100_000 + 1e-6  # floor to whole shares
+    s_ = ticket["summary"]
+    assert s_["sells"] == 1 and s_["buys"] == len(targets)
+    assert s_["cash_after"] == pytest.approx(s_["cash_before"] + s_["sell_notional"] - s_["buy_notional"] - s_["est_cost"], abs=0.01)
+    assert ticket["orders"][0]["side"] == "sell"  # sells listed first
+    # already at target → no orders
+    shares = {sym: int(np.floor(targets[sym] / 100 * 100_000 / float(panel["close"].ffill().iloc[-1][sym]))) for sym in targets}
+    quiet = pipeline.orders_blocking(SPEC, nav=100_000, current=shares, panel=panel)
+    assert quiet["orders"] == [] or all(o["notional"] < 100_000 * 0.01 for o in quiet["orders"])
+    with pytest.raises(factor_dsl.FactorError):
+        pipeline.orders_blocking(SPEC, nav=-5, panel=panel)
+    with pytest.raises(factor_dsl.FactorError):
+        pipeline.orders_blocking(SPEC, nav=1000, current={"AAPL": -3}, panel=panel)
+
+
+def test_orders_endpoint_contract(monkeypatch):
+    panel = _panel(500, 30, seed=5)
+    monkeypatch.setattr(pipeline, "_load_panel_blocking", lambda market: panel)
+    r = client.post("/api/pipeline/orders", json={"spec": SPEC, "nav": 50_000, "current": {"S1": 10}})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["nav"] == 50_000 and "orders" in body and body["summary"]["turnover_pct"] >= 0
+    assert client.post("/api/pipeline/orders", json={"spec": SPEC, "nav": 0}).status_code == 422
+    bad = client.post("/api/pipeline/run", json={**SPEC, "symbols": ["AAPL", "MSFT"]})
+    assert bad.status_code == 400  # too few custom symbols
+
+
+# ------------------------------------------------ V5.1: second review fixes
+
+
+def test_orders_reject_absurd_positions_and_flag_unknown_cash():
+    panel = _panel(500, 30, seed=5)
+    with pytest.raises(factor_dsl.FactorError):
+        pipeline.orders_blocking(SPEC, nav=1e5, current={"S1": 1e308}, panel=panel)
+    ticket = pipeline.orders_blocking(SPEC, nav=1e5, current={"NOPE": 100, "S1": 10}, panel=panel)
+    assert ticket["unpriced"] == ["NOPE"]
+    assert ticket["summary"]["cash_unknown"] is True
+    assert ticket["summary"]["cash_before"] is None and ticket["summary"]["cash_after"] is None
+    json.dumps(ticket, allow_nan=False)
+
+
+def test_nan_in_request_is_a_422_not_a_500():
+    import math
+
+    body = json.dumps({**SPEC, "max_weight": float("nan")}, allow_nan=True)
+    r = client.post("/api/pipeline/run", content=body, headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    r = client.post("/api/pipeline/orders", content=json.dumps({"spec": SPEC, "nav": math.inf}), headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    r = client.post("/api/pipeline/orders", json={"spec": SPEC, "nav": 1000, "current": {"S1": 1e300}})
+    assert r.status_code == 400
+
+
+def test_custom_cache_is_bounded(monkeypatch):
+    pipeline._CUSTOM_CACHE.clear()
+    monkeypatch.setattr(pipeline, "_CUSTOM_CACHE_MAX", 3)
+    dummy = {"close": pd.DataFrame()}
+    for i in range(10):
+        pipeline._remember_custom(f"k{i}", dummy)
+    assert len(pipeline._CUSTOM_CACHE) == 3 and "k9" in pipeline._CUSTOM_CACHE and "k0" not in pipeline._CUSTOM_CACHE
+    pipeline._CUSTOM_CACHE.clear()
+
+
+def test_symbol_regex_accepts_indices_and_rejects_unicode():
+    base = ["AAPL", "MSFT", "NVDA", "GOOG", "META", "AMZN", "TSLA"]
+    assert "^GSPC" in pipeline.parse_symbols(base + ["^gspc"])
+    with pytest.raises(factor_dsl.FactorError):
+        pipeline.parse_symbols(base + ["ıbm"])
+    with pytest.raises(factor_dsl.FactorError):
+        pipeline.parse_symbols(base + ["AAPL^"])
+
+
+def test_download_panel_survives_a_field_missing_a_column(monkeypatch):
+    from app.services import factor_mine
+
+    n, syms = 300, ["A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8"]
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    rng = np.random.default_rng(0)
+    close = pd.DataFrame(100 * np.exp(np.cumsum(rng.normal(0, 0.01, (n, 9)), axis=0)), index=idx, columns=syms)
+    vol = pd.DataFrame(1e6, index=idx, columns=syms)
+    vol["A3"] = np.nan  # a symbol with no volume at all (futures / indices)
+    raw = pd.concat({"Open": close, "High": close * 1.01, "Low": close * 0.99, "Close": close, "Volume": vol}, axis=1)
+    monkeypatch.setattr(factor_mine.yf, "download", lambda *a, **k: raw)
+    panel = factor_mine.download_panel(syms, "3y", "test")
+    assert list(panel["volume"].columns) == list(panel["close"].columns)
+    assert panel["volume"]["A3"].isna().all()

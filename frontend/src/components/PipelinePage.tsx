@@ -6,8 +6,11 @@ import {
   type PipelineConfig,
   type PipelineContributor,
   type PipelineFactorSpec,
+  type PipelineHistory,
   type PipelineMemo,
   type PipelineMemoRequest,
+  type PipelineOrder,
+  type PipelineOrders,
   type PipelineQuantiles,
   type PipelineRegime,
   type PipelineResult,
@@ -54,11 +57,24 @@ interface FormState {
   /** V3: blend toward 1/N, 0–1. */
   shrinkToEqual: number;
   compare: boolean;
+  /** V5: run on the user's own ticker list instead of the built-in universe. */
+  customOn: boolean;
+  /** V5: raw textarea contents; parsed (split, uppercased, deduped) at request time. */
+  symbolsText: string;
+  /** V5: panel depth. */
+  history: PipelineHistory;
 }
 
 /** V2 select options; used when the server predates `config.signal_weightings`. */
 const SIGNAL_WEIGHTINGS: PipelineSignalWeighting[] = ["ic_expanding", "ic", "equal"];
 const IC_HORIZONS = [1, 2, 3, 5, 10, 15, 20];
+/** V5 fallbacks for a pre-V5 config. */
+const HISTORIES: PipelineHistory[] = ["3y", "5y"];
+const SYMBOL_LIMITS: [number, number] = [8, 40];
+/** V5: where the terminal's watchlist tab keeps its ticker arrays, per market. */
+const WATCHLIST_KEYS: Record<string, string> = { us: "aiquant.watchlist", crypto: "aiquant.watchlist.crypto" };
+/** V5: `min_trade_pct` bounds per the contract. */
+const MIN_TRADE_RANGE: [number, number] = [0, 5];
 
 /** Pre-config placeholder: the page must be usable before (or without) the
  * config request, so the contract's scheme ids and defaults live here too.
@@ -76,6 +92,7 @@ const FALLBACK_CONFIG: PipelineConfig = {
     { id: "mean_variance", zh: "均值-方差（Grinold α）", en: "Mean-variance (Grinold alpha)", desc_zh: "把信号换算成 α，与协方差一起求最优权重；最激进，也最依赖信号质量", desc_en: "Turns the signal into alpha and optimises it against covariance — the most aggressive, and the most signal-dependent" },
   ],
   signal_weightings: SIGNAL_WEIGHTINGS,
+  histories: HISTORIES,
   starter_factors: { us: [], crypto: [] },
   defaults: {
     scheme: "inverse_vol",
@@ -90,6 +107,7 @@ const FALLBACK_CONFIG: PipelineConfig = {
     hold_buffer: 4,
     trade_rate: 1,
     shrink_to_equal: 0,
+    history: "3y",
   },
   limits: {
     factors: [1, 8],
@@ -103,6 +121,7 @@ const FALLBACK_CONFIG: PipelineConfig = {
     trade_rate: [0.1, 1],
     shrink_to_equal: [0, 1],
     prior_trials: [0, 10000],
+    symbols: SYMBOL_LIMITS,
   },
 };
 
@@ -143,7 +162,10 @@ function formFromDefaults(d: PipelineConfig["defaults"], base?: Partial<FormStat
     inverts: {},
     custom: {},
     compare: true,
+    customOn: false,
+    symbolsText: "",
     ...base,
+    history: d.history ?? "3y",
     signalWeighting: d.signal_weighting,
     scheme: d.scheme,
     topN: d.top_n,
@@ -220,6 +242,43 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+/** V5: comma / space / newline separated tickers → uppercased, deduped, in order. */
+function parseSymbols(text: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of text.split(/[\s,;]+/)) {
+    const sym = raw.trim().toUpperCase();
+    if (!sym || seen.has(sym)) continue;
+    seen.add(sym);
+    out.push(sym);
+  }
+  return out;
+}
+
+interface HoldingLine {
+  line: number;
+  text: string;
+  symbol?: string;
+  shares?: number;
+}
+
+/** V5: "AAPL 120" / "AAPL,120" per line. A line that does not parse keeps
+ * its text and line number so the UI can flag it in place. */
+function parseHoldings(text: string): HoldingLine[] {
+  const out: HoldingLine[] = [];
+  text.split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line) return;
+    const m = /^([A-Za-z0-9.^=\-]+)[\s,;:]+(\d+(?:\.\d+)?)$/.exec(line);
+    if (!m) {
+      out.push({ line: i + 1, text: line });
+      return;
+    }
+    out.push({ line: i + 1, text: line, symbol: m[1].toUpperCase(), shares: Number(m[2]) });
+  });
+  return out;
+}
+
 function loadForm(): FormState | null {
   try {
     const raw = localStorage.getItem(FORM_KEY);
@@ -233,6 +292,9 @@ function loadForm(): FormState | null {
       selected: Array.isArray(parsed.selected) ? parsed.selected.filter((x) => typeof x === "string") : [],
       inverts: parsed.inverts && typeof parsed.inverts === "object" ? parsed.inverts : {},
       custom: parsed.custom && typeof parsed.custom === "object" ? parsed.custom : {},
+      customOn: parsed.customOn === true,
+      symbolsText: typeof parsed.symbolsText === "string" ? parsed.symbolsText : "",
+      history: parsed.history === "5y" ? "5y" : "3y",
     };
   } catch {
     return null;
@@ -346,6 +408,45 @@ export function PipelinePage({ hidden }: Props) {
   const universe = config.universes[form.market] ?? [];
   const schemes = config.schemes;
   const weightings = config.signal_weightings ?? SIGNAL_WEIGHTINGS;
+  const histories = config.histories ?? HISTORIES;
+  // V5: the custom list, parsed live; only its size gates the run button — the
+  // server does the real validation and reports what it could not deliver.
+  const symbolLimits = limits.symbols ?? SYMBOL_LIMITS;
+  const customSymbols = useMemo(() => parseSymbols(form.symbolsText), [form.symbolsText]);
+  const universeIssue: "tooFew" | "tooMany" | null = !form.customOn
+    ? null
+    : customSymbols.length < symbolLimits[0]
+      ? "tooFew"
+      : customSymbols.length > symbolLimits[1]
+        ? "tooMany"
+        : null;
+  const universeMsg =
+    universeIssue === "tooFew"
+      ? t("pl.uni.tooFew", { min: symbolLimits[0] })
+      : universeIssue === "tooMany"
+        ? t("pl.uni.tooMany", { max: symbolLimits[1] })
+        : null;
+  const [importNote, setImportNote] = useState<string | null>(null);
+
+  /** V5: fill the textarea from the terminal's watchlist for this market. */
+  const importWatchlist = () => {
+    let list: string[] = [];
+    try {
+      const raw = localStorage.getItem(WATCHLIST_KEYS[form.market] ?? WATCHLIST_KEYS.us);
+      const parsed: unknown = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(parsed)) list = parsed.filter((x): x is string => typeof x === "string");
+    } catch {
+      list = [];
+    }
+    const merged = parseSymbols([...customSymbols, ...list].join(" "));
+    if (list.length === 0) {
+      setImportNote(t("pl.uni.importEmpty"));
+    } else {
+      setImportNote(t("pl.uni.imported", { n: list.length }));
+      patch({ symbolsText: merged.join(", ") });
+    }
+    window.setTimeout(() => setImportNote(null), 3000);
+  };
   const schemeName = (id: string) => {
     const s = schemes.find((x) => x.id === id);
     return s ? (lang === "zh" ? s.zh : s.en) : id;
@@ -453,10 +554,13 @@ export function PipelinePage({ hidden }: Props) {
     shrink_to_equal: clamp(Math.round(form.shrinkToEqual * 10) / 10, limits.shrink_to_equal),
     prior_trials: clamp(Math.round(trials), limits.prior_trials),
     compare: form.compare,
+    history: form.history,
+    // V5: only when the toggle is on — an omitted key means the built-in universe
+    ...(form.customOn ? { symbols: customSymbols } : {}),
   });
 
   const run = async () => {
-    if (running || chosen.length === 0) return;
+    if (running || chosen.length === 0 || universeIssue !== null) return;
     setRunning(true);
     setError(null);
     setDeployed(false);
@@ -606,42 +710,142 @@ export function PipelinePage({ hidden }: Props) {
             <div className="panel__head">
               <span className="panel__title">① {t("pl.stage1")}</span>
               <span className="panel__meta">
-                {configState === "loading" ? t("pl.configLoading") : t("pl.uni.size", { n: String(universe.length) })}
+                {configState === "loading"
+                  ? t("pl.configLoading")
+                  : form.customOn
+                    ? t("pl.uni.customSize", { n: customSymbols.length })
+                    : t("pl.uni.size", { n: String(universe.length) })}
               </span>
             </div>
             <div className="panel__body pl-body">
-              <label className="field" style={{ maxWidth: 220 }}>
-                <span className="field__label">{t("fl.market")}</span>
-                <select
-                  className="select"
-                  value={form.market}
-                  disabled={running}
-                  onChange={(e) => patch({ market: e.target.value })}
-                >
-                  {config.markets.map((m) => (
-                    <option key={m} value={m}>
-                      {marketLabel(m)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <p className="dim pl-hint">{t("pl.uni.hint")}</p>
-              {universe.length > 0 && (
-                <div className="chip-row pl-chip-row">
-                  {universe.slice(0, 14).map((s) => (
-                    <span key={s} className="chip">{s}</span>
-                  ))}
-                  {universe.length > 14 && (
-                    <span className="chip dim">+{universe.length - 14}</span>
+              <div className="pl-uni-row">
+                <label className="field" style={{ maxWidth: 220 }}>
+                  <span className="field__label">{t("fl.market")}</span>
+                  <select
+                    className="select"
+                    value={form.market}
+                    disabled={running}
+                    onChange={(e) => patch({ market: e.target.value })}
+                  >
+                    {config.markets.map((m) => (
+                      <option key={m} value={m}>
+                        {marketLabel(m)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field" style={{ maxWidth: 140 }} title={t("pl.uni.historyHint")}>
+                  <span className="field__label">{t("pl.uni.history")}</span>
+                  <select
+                    className="select"
+                    value={form.history}
+                    disabled={running}
+                    onChange={(e) => patch({ history: e.target.value === "5y" ? "5y" : "3y" })}
+                    data-testid="pl-history"
+                  >
+                    {histories.map((h) => (
+                      <option key={h} value={h}>
+                        {t(`pl.uni.h.${h}` as MsgKey)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span className="field__label">{t("pl.uni.custom")}</span>
+                  <div className="pl-inline">
+                    <input
+                      type="checkbox"
+                      className="fl-zoo-row__check"
+                      checked={form.customOn}
+                      disabled={running}
+                      onChange={(e) => patch({ customOn: e.target.checked })}
+                      aria-label={t("pl.uni.custom")}
+                      data-testid="pl-custom-toggle"
+                    />
+                    <span className="dim">{form.customOn ? t("pl.uni.customOn") : t("pl.uni.customOff")}</span>
+                  </div>
+                </label>
+              </div>
+              {form.customOn ? (
+                <div className="pl-custom" data-testid="pl-custom">
+                  <textarea
+                    className="textarea pl-symbols"
+                    value={form.symbolsText}
+                    disabled={running}
+                    placeholder={t("pl.uni.customPh")}
+                    onChange={(e) => patch({ symbolsText: e.target.value })}
+                    aria-label={t("pl.uni.custom")}
+                    spellCheck={false}
+                    data-testid="pl-symbols"
+                  />
+                  <div className="pl-custom__bar">
+                    <span
+                      className={`pl-counter${universeIssue ? " is-bad" : ""}`}
+                      data-testid="pl-symbols-count"
+                    >
+                      {t("pl.uni.counter", { n: customSymbols.length, max: symbolLimits[1], min: symbolLimits[0] })}
+                    </span>
+                    <button className="btn btn--mini" onClick={importWatchlist} disabled={running} data-testid="pl-import-watchlist">
+                      {t("pl.uni.import")}
+                    </button>
+                    {importNote && <span className="dim pl-hint" data-testid="pl-import-note">{importNote}</span>}
+                    {universeMsg && <span className="pl-badge pl-badge--warn" data-testid="pl-symbols-issue">{universeMsg}</span>}
+                  </div>
+                  <p className="dim pl-hint">{t("pl.uni.customHint")}</p>
+                </div>
+              ) : (
+                <>
+                  <p className="dim pl-hint">{t("pl.uni.hint")}</p>
+                  {universe.length > 0 && (
+                    <div className="chip-row pl-chip-row">
+                      {universe.slice(0, 14).map((s) => (
+                        <span key={s} className="chip">{s}</span>
+                      ))}
+                      {universe.length > 14 && (
+                        <span className="chip dim">+{universe.length - 14}</span>
+                      )}
+                    </div>
                   )}
-                </div>
+                </>
               )}
+              <p className="dim pl-hint">{t("pl.uni.historyHint")}</p>
               {result && (
-                <div className="stat-grid pl-stats">
-                  <Stat label={t("pl.uni.covered")} value={`${result.universe.symbols} / ${universe.length || result.universe.symbols}`} />
-                  <Stat label={t("pl.uni.bars")} value={String(result.universe.bars)} />
-                  <Stat label={t("pl.uni.span")} value={`${result.universe.from} → ${result.universe.to}`} small />
-                </div>
+                <>
+                  <div className="stat-grid pl-stats">
+                    <Stat
+                      label={t("pl.uni.covered")}
+                      value={`${result.universe.symbols} / ${
+                        result.universe.custom
+                          ? result.universe.requested ?? result.universe.symbols
+                          : universe.length || result.universe.symbols
+                      }`}
+                    />
+                    <Stat label={t("pl.uni.bars")} value={String(result.universe.bars)} />
+                    <Stat label={t("pl.uni.span")} value={`${result.universe.from} → ${result.universe.to}`} small />
+                  </div>
+                  {(result.universe.custom || result.universe.history || (result.universe.dropped?.length ?? 0) > 0) && (
+                    <div className="chip-row pl-chip-row" data-testid="pl-universe-summary">
+                      {result.universe.custom ? (
+                        <span className="chip is-on">
+                          {t("pl.uni.customSummary", { n: result.universe.symbols, h: result.universe.history ?? form.history })}
+                        </span>
+                      ) : (
+                        result.universe.history && (
+                          <span className="chip">{t("pl.uni.builtinSummary", { h: result.universe.history })}</span>
+                        )
+                      )}
+                      {result.universe.dropped && result.universe.dropped.length > 0 && (
+                        <span
+                          className="pl-badge pl-badge--warn pl-dropped"
+                          title={result.universe.dropped.join(", ")}
+                          data-testid="pl-dropped"
+                        >
+                          ⚠ {t("pl.uni.dropped", { n: result.universe.dropped.length, list: result.universe.dropped.join(", ") })}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </section>
@@ -983,7 +1187,8 @@ export function PipelinePage({ hidden }: Props) {
               <button
                 className="btn btn--primary"
                 onClick={run}
-                disabled={running || chosen.length === 0}
+                disabled={running || chosen.length === 0 || universeIssue !== null}
+                title={universeMsg ?? undefined}
                 data-testid="pl-run"
               >
                 {running ? t("pl.bt.running") : t("pl.bt.run")}
@@ -993,13 +1198,16 @@ export function PipelinePage({ hidden }: Props) {
                   {t("pl.bt.restored", { d: result.target_weights.as_of || result.backtest.span.to })}
                 </span>
               )}
-              <span className="dim pl-hint">
+              <span className={`pl-hint ${universeMsg ? "pl-hint--warn" : "dim"}`} data-testid="pl-run-hint">
                 {chosen.length === 0
                   ? t("pl.bt.needFactor")
-                  : t("pl.bt.summary", {
+                  : universeMsg ??
+                    t("pl.bt.summary", {
                       n: String(chosen.length),
                       s: schemeName(form.scheme),
-                      m: marketLabel(form.market),
+                      m: form.customOn
+                        ? t("pl.uni.customSummary", { n: customSymbols.length, h: form.history })
+                        : marketLabel(form.market),
                     })}
               </span>
             </div>
@@ -1505,6 +1713,8 @@ export function PipelinePage({ hidden }: Props) {
                     {copied === "fail" && <span className="pl-badge pl-badge--warn">{t("pl.deploy.copyFailed")}</span>}
                   </div>
                   <p className="dim pl-hint">{t("pl.deploy.note")}</p>
+
+                  <TicketCard spec={result.spec ?? buildRequest()} sectorLabel={sectorLabel} />
 
                   <MemoCard result={result} enabled={aiEnabled} lang={lang} />
                 </>
@@ -2224,6 +2434,216 @@ function memoRequest(r: PipelineResult, lang: Lang): PipelineMemoRequest {
   };
 }
 
+/** V5 rebalance ticket (stage ⑥): NAV + current holdings → whole-share buy /
+ * sell orders against the latest target book. The spec posted is the run on
+ * screen (or the form's when none), so the ticket matches the numbers above;
+ * a new run clears the previous ticket for the same reason. */
+function TicketCard({ spec, sectorLabel }: { spec: PipelineRunRequest; sectorLabel: (id: string) => string }) {
+  const { t } = useT();
+  const [nav, setNav] = useState<number>(100000);
+  const [holdingsText, setHoldingsText] = useState("");
+  const [minTradePct, setMinTradePct] = useState<number>(0.25);
+  const [ticket, setTicket] = useState<PipelineOrders | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [csvCopied, setCsvCopied] = useState<"idle" | "ok" | "fail">("idle");
+
+  // Keyed on content, not identity: the caller may rebuild the spec object per render.
+  const specKey = JSON.stringify(spec);
+  useEffect(() => {
+    setTicket(null);
+    setError(null);
+  }, [specKey]);
+
+  const lines = useMemo(() => parseHoldings(holdingsText), [holdingsText]);
+  const badLines = lines.filter((l) => l.symbol === undefined);
+  const navOk = Number.isFinite(nav) && nav > 0;
+  const minOk = Number.isFinite(minTradePct) && minTradePct >= MIN_TRADE_RANGE[0] && minTradePct <= MIN_TRADE_RANGE[1];
+  const issue = !navOk ? t("pl.tk.navInvalid") : !minOk ? t("pl.tk.minInvalid") : badLines.length > 0 ? t("pl.tk.fixLines") : null;
+
+  const build = async () => {
+    if (pending || issue !== null) return;
+    setPending(true);
+    setError(null);
+    setCsvCopied("idle");
+    const current: Record<string, number> = {};
+    for (const l of lines) {
+      if (l.symbol === undefined || l.shares === undefined) continue;
+      current[l.symbol] = (current[l.symbol] ?? 0) + l.shares;
+    }
+    try {
+      setTicket(await api.pipelineOrders({ spec, nav, current, min_trade_pct: minTradePct }));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const copyCsv = async () => {
+    if (!ticket) return;
+    const rows = [
+      "side,symbol,shares,price,notional,from_weight_pct,to_weight_pct,group",
+      ...ticket.orders.map((o) =>
+        [o.side, o.symbol, o.shares, o.price, o.notional.toFixed(2), o.from_weight_pct.toFixed(2), o.to_weight_pct.toFixed(2), o.group ?? ""].join(","),
+      ),
+    ];
+    const ok = await copyText(rows.join("\n"));
+    setCsvCopied(ok ? "ok" : "fail");
+    window.setTimeout(() => setCsvCopied("idle"), 2500);
+  };
+
+  const sm = ticket?.summary;
+  return (
+    <div className="pl-ticket" data-testid="pl-ticket">
+      <div className="pl-memo__head">
+        <span className="pl-subhead" style={{ marginTop: 0 }}>{t("pl.tk.title")}</span>
+        {ticket && (
+          <span className="dim pl-hint" data-testid="pl-ticket-dates">
+            {t("pl.tk.asOf", { d: ticket.as_of, p: ticket.price_date })}
+          </span>
+        )}
+      </div>
+      <p className="dim pl-hint">{t("pl.tk.hint")}</p>
+      <div className="pl-ticket__form">
+        <label className="field">
+          <span className="field__label">{t("pl.tk.nav")}</span>
+          <input
+            type="number"
+            className="input pl-num-input"
+            value={Number.isFinite(nav) ? nav : ""}
+            min={1}
+            step={1000}
+            onChange={(e) => setNav(e.target.value === "" ? Number.NaN : Number(e.target.value))}
+            aria-label={t("pl.tk.nav")}
+            data-testid="pl-ticket-nav"
+          />
+        </label>
+        <label className="field">
+          <span className="field__label">
+            {t("pl.tk.minTrade")} <span className="pl-range">{MIN_TRADE_RANGE[0]}–{MIN_TRADE_RANGE[1]}</span>
+          </span>
+          <input
+            type="number"
+            className="input pl-num-input"
+            value={Number.isFinite(minTradePct) ? minTradePct : ""}
+            min={MIN_TRADE_RANGE[0]}
+            max={MIN_TRADE_RANGE[1]}
+            step={0.05}
+            onChange={(e) => setMinTradePct(e.target.value === "" ? Number.NaN : Number(e.target.value))}
+            aria-label={t("pl.tk.minTrade")}
+            data-testid="pl-ticket-min"
+          />
+        </label>
+        <label className="field pl-ticket__holdings">
+          <span className="field__label">{t("pl.tk.holdings")}</span>
+          <textarea
+            className="textarea pl-symbols"
+            value={holdingsText}
+            placeholder={t("pl.tk.holdingsPh")}
+            onChange={(e) => setHoldingsText(e.target.value)}
+            aria-label={t("pl.tk.holdings")}
+            spellCheck={false}
+            data-testid="pl-ticket-holdings"
+          />
+          {badLines.length > 0 && (
+            <ul className="pl-badlines" data-testid="pl-ticket-badlines">
+              {badLines.map((l) => (
+                <li key={l.line}>⚠ {t("pl.tk.badLine", { n: l.line, s: l.text })}</li>
+              ))}
+            </ul>
+          )}
+        </label>
+      </div>
+      <div className="pl-runbar">
+        <button className="btn btn--primary" onClick={build} disabled={pending || issue !== null} title={issue ?? undefined} data-testid="pl-ticket-build">
+          {pending ? t("pl.tk.building") : t("pl.tk.build")}
+        </button>
+        {pending && <span className="spinner" aria-hidden="true" />}
+        {issue && <span className="pl-hint pl-hint--warn" data-testid="pl-ticket-issue">{issue}</span>}
+        {ticket && (
+          <>
+            <button className="btn" onClick={copyCsv} data-testid="pl-ticket-csv">
+              {t("pl.tk.copyCsv")}
+            </button>
+            {csvCopied === "ok" && <span className="pl-badge pl-badge--ok" data-testid="pl-ticket-csv-copied">✓ {t("pl.deploy.copied")}</span>}
+            {csvCopied === "fail" && <span className="pl-badge pl-badge--warn">{t("pl.deploy.copyFailed")}</span>}
+          </>
+        )}
+      </div>
+      {error && <div className="err" data-testid="pl-ticket-error">{error}</div>}
+      {ticket && sm && (
+        <>
+          <div className="chip-row pl-chip-row" data-testid="pl-ticket-summary">
+            <span className="chip">{t("pl.tk.counts", { b: sm.buys, s: sm.sells })}</span>
+            <span className="chip" title={t("pl.tk.turnoverTitle")} data-testid="pl-ticket-turnover">
+              {t("pl.tk.turnover", { v: sm.turnover_pct.toFixed(1) })}
+            </span>
+            <span className="chip" title={t("pl.tk.costTitle")}>{t("pl.tk.cost", { v: money(sm.est_cost) })}</span>
+            {sm.cash_unknown || sm.cash_before === null || sm.cash_after === null ? (
+              <span className="chip pl-tone--warn" title={t("pl.tk.unpriced", { list: ticket.unpriced.join(", ") })} data-testid="pl-ticket-cash-unknown">
+                {t("pl.tk.cashUnknown")}
+              </span>
+            ) : (
+              <span className="chip" data-testid="pl-ticket-cash">{t("pl.tk.cash", { a: money(sm.cash_before), b: money(sm.cash_after) })}</span>
+            )}
+            <span className="chip">{t("pl.tk.exposure", { v: sm.target_exposure_pct.toFixed(0) })}</span>
+          </div>
+          {ticket.unpriced.length > 0 && (
+            <div className="pl-badge pl-badge--warn pl-dropped" data-testid="pl-ticket-unpriced">
+              ⚠ {t("pl.tk.unpriced", { list: ticket.unpriced.join(", ") })}
+            </div>
+          )}
+          {ticket.orders.length === 0 ? (
+            <div className="empty">{t("pl.tk.empty")}</div>
+          ) : (
+            <div className="table-scroll pl-weights-scroll">
+              <table className="lab-stats pl-orders" data-testid="pl-ticket-table">
+                <thead>
+                  <tr>
+                    <th>{t("pl.tk.side")}</th>
+                    <th>{t("pl.deploy.symbol")}</th>
+                    <th className="pl-num">{t("pl.tk.shares")}</th>
+                    <th className="pl-num">{t("pl.tk.price")}</th>
+                    <th className="pl-num">{t("pl.tk.notional")}</th>
+                    <th className="pl-num">{t("pl.tk.weights")}</th>
+                    <th>{t("pl.deploy.sector")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ticket.orders.map((o) => (
+                    <OrderRow key={`${o.side}-${o.symbol}`} o={o} sectorLabel={sectorLabel} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="dim pl-hint" data-testid="pl-ticket-note">{t("pl.tk.note")}</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function OrderRow({ o, sectorLabel }: { o: PipelineOrder; sectorLabel: (id: string) => string }) {
+  const { t } = useT();
+  return (
+    <tr className={`pl-order pl-order--${o.side}`} data-side={o.side}>
+      <td>
+        <span className={`pl-side pl-side--${o.side}`}>{o.side === "buy" ? t("pl.tk.buy") : t("pl.tk.sell")}</span>
+      </td>
+      <td><b>{o.symbol}</b></td>
+      <td className="pl-num">{o.shares.toLocaleString("en-US")}</td>
+      <td className="pl-num">{price(o.price)}</td>
+      <td className="pl-num">{money(o.notional)}</td>
+      <td className="pl-num">
+        <span className="dim">{o.from_weight_pct.toFixed(1)}%</span> → {o.to_weight_pct.toFixed(1)}%
+      </td>
+      <td className="dim">{o.group ? sectorLabel(o.group) : "—"}</td>
+    </tr>
+  );
+}
+
 /** AI investment-committee memo (stage ⑥). The button is live only when the
  * server reports an AI key; a new run clears the previous memo so the verdict
  * always refers to the numbers on screen. */
@@ -2306,6 +2726,10 @@ function MemoList({ title, items }: { title: string; items: string[] }) {
 // ------------------------------------------------------------------ helpers
 
 const maxWeight = (r: PipelineResult) => Math.max(0.01, ...r.target_weights.weights.map((w) => w.weight_pct));
+/** V5 ticket amounts: account currency, two decimals, thousands separators. */
+const money = (v: number) => v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/** Reference prices: two decimals above 1, four significant digits below (sub-dollar crypto). */
+const price = (v: number) => (Math.abs(v) >= 1 ? money(v) : v.toPrecision(4));
 const tone = (v: number) => (v > 0 ? "up" : v < 0 ? "dn" : "");
 const pct = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(2)}%`;
 const pctOpt = (v: number | null) => (v === null ? "—" : pct(v));

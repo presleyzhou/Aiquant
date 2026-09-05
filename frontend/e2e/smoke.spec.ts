@@ -143,6 +143,8 @@ async function mockApi(page: Page) {
           { id: "mean_variance", zh: "均值-方差（Grinold α）", en: "Mean-variance (Grinold alpha)", desc_zh: "α 对协方差最优化", desc_en: "Alpha vs covariance" },
         ],
         signal_weightings: ["ic_expanding", "ic", "equal"],
+        // V5: custom-universe size bounds and the history lengths
+        histories: ["3y", "5y"],
         starter_factors: {
           us: [
             { expression: "neg(delta(close, 5) / ts_std(returns, 20))", zh: "短期反转", en: "Short-term reversal", invert: false, horizon: 10 },
@@ -155,14 +157,18 @@ async function mockApi(page: Page) {
         // V3: sector per universe symbol
         sectors: { AAPL: "tech", MSFT: "tech", NVDA: "tech", INTC: "financials", "BTC-USD": "layer1", "ETH-USD": "layer1" },
         defaults: { scheme: "inverse_vol", signal_weighting: "ic_expanding", top_n: 8, rebalance: 10, max_weight: 0.25, cost_bps: 7,
-          target_vol_pct: null, vol_lookback: 60, horizon: 10, hold_buffer: 4, trade_rate: 1.0, shrink_to_equal: 0.0 },
+          target_vol_pct: null, vol_lookback: 60, horizon: 10, hold_buffer: 4, trade_rate: 1.0, shrink_to_equal: 0.0, history: "3y" },
         limits: { factors: [1, 8], top_n: [2, 20], rebalance: [1, 30], max_weight: [0.05, 1.0], cost_bps: [0, 50],
           target_vol_pct: [5, 40], vol_lookback: [20, 120], hold_buffer: [0, 20], trade_rate: [0.1, 1.0],
-          shrink_to_equal: [0, 1], prior_trials: [0, 10000] },
+          shrink_to_equal: [0, 1], prior_trials: [0, 10000], symbols: [8, 40] },
       });
     if (path === "/api/pipeline/run") {
       const body = route.request().postDataJSON() as
-        { factors?: unknown[]; scheme?: string; shrink_to_equal?: number; prior_trials?: number } | null;
+        { factors?: unknown[]; scheme?: string; shrink_to_equal?: number; prior_trials?: number; symbols?: string[]; history?: string } | null;
+      // V5: a custom list echoes back as `custom`; anything outside the fixture's known names is "dropped"
+      const known = ["AAPL", "MSFT", "NVDA", "INTC", "AMZN", "GOOG", "META", "TSLA"];
+      const custom = Array.isArray(body?.symbols) && body.symbols.length > 0;
+      const dropped = custom ? body!.symbols!.filter((sym) => !known.includes(sym)) : [];
       const factors = Array.isArray(body?.factors) && body.factors.length > 0
         ? body.factors
         : [{ expression: "neg(delta(close, 5) / ts_std(returns, 20))", invert: false, horizon: 10 }];
@@ -172,8 +178,10 @@ async function mockApi(page: Page) {
       return json({
         spec: { market: "us", factors, signal_weighting: "ic_expanding", scheme, top_n: 8, rebalance: 10, max_weight: 0.25,
           cost_bps: 7, target_vol_pct: null, vol_lookback: 60, hold_buffer: 4, trade_rate: 1.0,
-          shrink_to_equal: body?.shrink_to_equal ?? 0, prior_trials: body?.prior_trials ?? 0, compare: true },
-        universe: { market: "us", symbols: 4, from: "2023-09-05", to: "2026-09-03", bars: 752 },
+          shrink_to_equal: body?.shrink_to_equal ?? 0, prior_trials: body?.prior_trials ?? 0, compare: true,
+          ...(custom ? { symbols: body!.symbols } : {}), history: body?.history ?? "3y" },
+        universe: { market: "us", symbols: 4, from: "2023-09-05", to: "2026-09-03", bars: 752,
+          custom, history: body?.history ?? "3y", requested: custom ? body!.symbols!.length : null, dropped },
         signal: {
           weighting: "ic_expanding",
           components: (factors as Array<{ expression: string; invert: boolean; horizon: number }>).map((f, i) => ({
@@ -282,6 +290,24 @@ async function mockApi(page: Page) {
           groups: [{ group: "tech", weight_pct: 75.0 }, { group: "financials", weight_pct: 25.0 }],
         },
         warnings: ["few_rebalances", "not_significant", "parameter_spike"],
+      });
+    }
+    if (path === "/api/pipeline/orders") {
+      // V5: a two-order ticket — the sell (funding) first, then the buy; NAV echoed from the request
+      const body = route.request().postDataJSON() as { nav?: number } | null;
+      const nav = body?.nav ?? 100000;
+      return json({
+        as_of: "2026-09-03",
+        price_date: "2026-09-04",
+        nav,
+        orders: [
+          { symbol: "INTC", side: "sell", shares: 100, price: 31.2, notional: 3120.0, from_weight_pct: 6.24, to_weight_pct: 0.0, group: "financials" },
+          { symbol: "AAPL", side: "buy", shares: 55, price: 227.1, notional: 12490.5, from_weight_pct: 4.54, to_weight_pct: 25.0, group: "tech" },
+        ],
+        unpriced: ["ZZZZ"],
+        // V5.1: an unpriced holding makes cash unknown — both cash figures null
+        summary: { buys: 1, sells: 1, buy_notional: 12490.5, sell_notional: 3120.0, turnover_pct: 15.6, est_cost: 10.9,
+          cash_before: null, cash_after: null, cash_unknown: true, target_exposure_pct: 100.0 },
       });
     }
     if (path === "/api/pipeline/memo")
@@ -529,7 +555,32 @@ test("pipeline: tick a starter factor, run the six stages, deploy to paper", asy
   await expect(page.getByRole("radio", { name: /层次风险平价 HRP/ })).toBeVisible();
   await page.getByRole("checkbox", { name: "短期反转" }).check();
   await expect(run).toBeEnabled();
+  // ① V5 custom universe: too few tickers disables Run with a reason; nine (one bogus) enables it
+  await expect(page.getByTestId("pl-history")).toHaveValue("3y");
+  await page.getByTestId("pl-custom-toggle").check();
+  const symbols = page.getByTestId("pl-symbols");
+  await expect(symbols).toBeVisible();
+  await symbols.fill("AAPL MSFT NVDA");
+  await expect(page.getByTestId("pl-symbols-count")).toHaveText("3 / 40（至少 8）");
+  await expect(page.getByTestId("pl-symbols-count")).toHaveClass(/is-bad/);
+  await expect(run).toBeDisabled();
+  await expect(page.getByTestId("pl-run-hint")).toContainText("至少需要 8 个标的");
+  await symbols.fill("AAPL, MSFT, NVDA, INTC\nAMZN GOOG META tsla zzzz");
+  await expect(page.getByTestId("pl-symbols-count")).toHaveText("9 / 40（至少 8）");
+  await expect(page.getByTestId("pl-symbols-count")).not.toHaveClass(/is-bad/);
+  await expect(page.getByTestId("pl-symbols-issue")).toHaveCount(0);
+  await expect(run).toBeEnabled();
   await run.click();
+  // ① → request: the parsed, uppercased, deduped list travels only because the toggle is on; history defaults to 3y
+  await expect(page.getByTestId("pl-sharpe")).toBeVisible();
+  expect(runBody).not.toBeNull();
+  expect(runBody!.symbols).toEqual(["AAPL", "MSFT", "NVDA", "INTC", "AMZN", "GOOG", "META", "TSLA", "ZZZZ"]);
+  expect(runBody!.history).toBe("3y");
+  // ① after the run: the custom summary chip and the dropped-ticker warning
+  await expect(page.getByTestId("pl-universe-summary")).toContainText("自定义 · 4 只 · 3y");
+  const dropped = page.getByTestId("pl-dropped");
+  await expect(dropped).toBeVisible();
+  await expect(dropped).toHaveText("⚠ 未能获取 1 个标的：ZZZZ");
   // ④ headline stats: Sharpe alongside its benchmark
   await expect(page.getByTestId("pl-sharpe")).toContainText("0.88");
   await expect(page.getByTestId("pl-sharpe")).toContainText("0.74");
@@ -661,6 +712,52 @@ test("pipeline: tick a starter factor, run the six stages, deploy to paper", asy
   expect(JSON.stringify(memoBody)).not.toContain("equity_curve");
   expect(JSON.stringify(memoBody)).not.toContain("rolling_beta");
   expect((memoBody!.risk as { drawdowns: unknown[] }).drawdowns.length).toBeLessThanOrEqual(3);
+  // ⑥ V5 rebalance ticket: NAV 50000 + one holding → sell row first, then the buy; summary chips; CSV copy
+  let ordersBody: Record<string, unknown> | null = null;
+  await page.route("**/api/pipeline/orders", (route) => {
+    ordersBody = route.request().postDataJSON() as Record<string, unknown>;
+    return route.fallback();
+  });
+  const ticket = page.getByTestId("pl-ticket");
+  await expect(ticket).toBeVisible();
+  await expect(page.getByTestId("pl-ticket-nav")).toHaveValue("100000");
+  await expect(page.getByTestId("pl-ticket-min")).toHaveValue("0.25");
+  await page.getByTestId("pl-ticket-nav").fill("50000");
+  const holdings = page.getByTestId("pl-ticket-holdings");
+  await holdings.fill("AAPL 10\nnonsense line");
+  await expect(page.getByTestId("pl-ticket-badlines")).toContainText("第 2 行无法解析：nonsense line");
+  await expect(page.getByTestId("pl-ticket-build")).toBeDisabled();
+  await holdings.fill("AAPL 10");
+  await expect(page.getByTestId("pl-ticket-badlines")).toHaveCount(0);
+  await page.getByTestId("pl-ticket-build").click();
+  const orderRows = page.getByTestId("pl-ticket-table").locator("tbody tr");
+  await expect(orderRows).toHaveCount(2);
+  await expect(orderRows.nth(0)).toHaveAttribute("data-side", "sell");
+  await expect(orderRows.nth(0)).toContainText("卖出");
+  await expect(orderRows.nth(0)).toContainText("INTC");
+  await expect(orderRows.nth(1)).toHaveAttribute("data-side", "buy");
+  await expect(orderRows.nth(1)).toContainText("买入");
+  await expect(orderRows.nth(1)).toContainText("12,490.50");
+  await expect(page.getByTestId("pl-ticket-turnover")).toHaveText("换手 15.6%");
+  await expect(page.getByTestId("pl-ticket-unpriced")).toContainText("ZZZZ");
+  await expect(page.getByTestId("pl-ticket-cash-unknown")).toHaveText("现金未知（有持仓无法定价）");
+  await expect(page.getByTestId("pl-ticket-cash")).toHaveCount(0);
+  await expect(page.getByTestId("pl-ticket-dates")).toContainText("2026-09-04");
+  await expect(page.getByTestId("pl-ticket-note")).toHaveText("参考价为最近收盘价，实际以开盘成交；股数已取整、不做空。");
+  // the request carried the current spec (the run on screen), the NAV, the parsed holdings and the default threshold
+  expect(ordersBody).not.toBeNull();
+  expect(ordersBody!.nav).toBe(50000);
+  expect(ordersBody!.min_trade_pct).toBe(0.25);
+  expect(ordersBody!.current).toEqual({ AAPL: 10 });
+  expect((ordersBody!.spec as { market: string; symbols?: string[] }).market).toBe("us");
+  expect((ordersBody!.spec as { symbols?: string[] }).symbols).toHaveLength(9);
+  // CSV copy goes through the same stubbed clipboard as the Markdown report
+  await page.getByTestId("pl-ticket-csv").click();
+  await expect(page.getByTestId("pl-ticket-csv-copied")).toBeVisible();
+  const csv = await page.evaluate(() => (window as unknown as { __md: string }).__md);
+  expect(csv.split("\n")[0]).toBe("side,symbol,shares,price,notional,from_weight_pct,to_weight_pct,group");
+  expect(csv).toContain("sell,INTC,100,31.2,3120.00");
+  expect(csv).toContain("buy,AAPL,55,227.1,12490.50");
   const deploy = page.getByTestId("pl-deploy");
   await expect(deploy).toBeVisible();
   await deploy.click();

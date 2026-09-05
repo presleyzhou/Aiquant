@@ -105,18 +105,28 @@ def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
         _PANEL_CACHE[market] = (time.time(), disk)
         return disk
 
-    tickers = UNIVERSES[market]
+    panel = download_panel(UNIVERSES[market], "3y", market)
+    _PANEL_CACHE[market] = (time.time(), panel)
+    disk_cache.store(cache_key, panel)
+    return panel
+
+
+def download_panel(tickers: list[str], period: str, label: str, min_symbols: int = 8) -> dict[str, pd.DataFrame]:
+    """Download and clean an OHLCV panel for `tickers` (blocking, one Yahoo
+    batch call). Shared by the built-in universes and user-supplied ones."""
     raw = yf.download(
-        tickers, period="3y", interval="1d", auto_adjust=True,
+        list(tickers), period=period, interval="1d", auto_adjust=True,
         progress=False, group_by="column", threads=True,
     )
     if raw is None or raw.empty:
-        raise LookupError(f"could not download the {market} universe")
+        raise LookupError(f"could not download the {label} universe")
 
     panel: dict[str, pd.DataFrame] = {}
     for field, source in (("open", "Open"), ("high", "High"), ("low", "Low"),
                           ("close", "Close"), ("volume", "Volume")):
         frame = raw[source].copy()
+        if isinstance(frame, pd.Series):  # a single ticker comes back flat
+            frame = frame.to_frame(list(tickers)[0])
         frame = frame.dropna(axis=1, how="all")
         panel[field] = frame
 
@@ -125,17 +135,14 @@ def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
     close_ok = panel["close"].notna().mean() > 0.7
     sane = panel["close"].pct_change().abs().max() < 4.0
     good = panel["close"].columns[close_ok & sane]
-    if len(good) < 8:
-        raise LookupError(f"only {len(good)} usable symbols in the {market} universe")
+    if len(good) < min_symbols:
+        raise LookupError(f"only {len(good)} usable symbols in the {label} universe (need {min_symbols})")
     for field in list(panel):
-        panel[field] = panel[field][good]
+        panel[field] = panel[field].reindex(columns=good)  # a field missing a column stays NaN, never KeyError
 
     close = panel["close"]
     panel["returns"] = close.pct_change()
     panel["vwap"] = (panel["high"] + panel["low"] + close) / 3
-
-    _PANEL_CACHE[market] = (time.time(), panel)
-    disk_cache.store(cache_key, panel)
     return panel
 
 
