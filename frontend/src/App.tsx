@@ -98,6 +98,12 @@ export default function App() {
     }
     const share = parseShareFromUrl();
     if (!share) return;
+    // V6: a pipeline configuration link only opens the pipeline tab — the
+    // page pre-fills its form from the stashed spec and waits for Run.
+    if (share.kind === "pl") {
+      switchView("pipeline");
+      return;
+    }
     const market = share.market as MarketId;
     if (share.symbol) {
       add(market, share.symbol);

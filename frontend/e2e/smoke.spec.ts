@@ -181,7 +181,12 @@ async function mockApi(page: Page) {
           shrink_to_equal: body?.shrink_to_equal ?? 0, prior_trials: body?.prior_trials ?? 0, compare: true,
           ...(custom ? { symbols: body!.symbols } : {}), history: body?.history ?? "3y" },
         universe: { market: "us", symbols: 4, from: "2023-09-05", to: "2026-09-03", bars: 752,
-          custom, history: body?.history ?? "3y", requested: custom ? body!.symbols!.length : null, dropped },
+          custom, history: body?.history ?? "3y", requested: custom ? body!.symbols!.length : null, dropped,
+          // V6 / V6.1: per-symbol health, worst coverage first; INTC stopped printing 4 bars before the panel's end
+          health: [
+            { symbol: "INTC", group: "financials", coverage_pct: 83.3, gaps: 3, first: "2024-02-01", last: "2026-08-28", stale: true, stale_days: 4 },
+            { symbol: "AAPL", group: "tech", coverage_pct: 100.0, gaps: 0, first: "2023-09-05", last: "2026-09-03", stale: false, stale_days: 0 },
+          ] },
         signal: {
           weighting: "ic_expanding",
           components: (factors as Array<{ expression: string; invert: boolean; horizon: number }>).map((f, i) => ({
@@ -197,6 +202,8 @@ async function mockApi(page: Page) {
           ],
           composite_is_ic: 0.011,
           composite_oos_ic: 0.008,
+          // V6: n×n rank correlation of the selected factors (0.31 off the diagonal, matching max_pair_corr)
+          corr_matrix: factors.map((_, i) => factors.map((__, j) => (i === j ? 1.0 : 0.31))),
           // V3: quintile check — bucket 3 null, bucket 4 negative, so both edge cases render
           quantiles: {
             buckets: [
@@ -279,6 +286,17 @@ async function mockApi(page: Page) {
           ],
           median_sharpe: 0.24, min_sharpe: -0.15, spike: 0.64,
         },
+        // V6 / V6.1: square-root-impact capacity curve, breakeven at 2.65B; every trade had volume data
+        capacity: {
+          aum_grid: [1000000, 10000000, 100000000, 1000000000],
+          impact_drag_pct_ann: [0.12, 0.38, 1.2, 3.8],
+          net_excess_pct_ann: [6.1, 5.8, 5.0, 2.4],
+          participation_pct: [0.02, 0.2, 2.0, 20.0],
+          excess_pct_ann: 6.2,
+          breakeven_aum: 2650000000,
+          costed_trade_pct: 100,
+          model: "sqrt_impact",
+        },
         target_weights: {
           as_of: "2026-09-03", exposure_pct: 100.0,
           weights: [
@@ -289,7 +307,7 @@ async function mockApi(page: Page) {
           ],
           groups: [{ group: "tech", weight_pct: 75.0 }, { group: "financials", weight_pct: 25.0 }],
         },
-        warnings: ["few_rebalances", "not_significant", "parameter_spike"],
+        warnings: ["few_rebalances", "not_significant", "parameter_spike", "low_capacity"],
       });
     }
     if (path === "/api/pipeline/orders") {
@@ -555,6 +573,8 @@ test("pipeline: tick a starter factor, run the six stages, deploy to paper", asy
   await expect(page.getByRole("radio", { name: /层次风险平价 HRP/ })).toBeVisible();
   await page.getByRole("checkbox", { name: "短期反转" }).check();
   await expect(run).toBeEnabled();
+  // a second factor so the V6 correlation matrix is a real 2×2
+  await page.getByRole("checkbox", { name: "中期动量" }).check();
   // ① V5 custom universe: too few tickers disables Run with a reason; nine (one bogus) enables it
   await expect(page.getByTestId("pl-history")).toHaveValue("3y");
   await page.getByTestId("pl-custom-toggle").check();
@@ -676,6 +696,77 @@ test("pipeline: tick a starter factor, run the six stages, deploy to paper", asy
   expect(md).toContain("| 1 | AAPL | 科技 | 25.0% |");
   expect(md).toContain("参数尖峰");
   expect(md).not.toContain("equity_curve");
+  // V6 the Markdown report also carries the capacity section
+  expect(md).toContain("## 容量分析");
+  expect(md).toContain("估算容量 ≈ 2.65B");
+  // ① V6 data-health table: collapsed by default, header summarises, expands to two rows with one stale badge
+  const health = page.getByTestId("pl-health");
+  await expect(health).toBeVisible();
+  const healthSummary = page.getByTestId("pl-health-summary");
+  await expect(healthSummary).toContainText("2 只 · 最低覆盖 83.3%");
+  await expect(healthSummary).toContainText("1 只失效");
+  const healthRows = health.locator("tbody tr");
+  await expect(healthRows.first()).toBeHidden();
+  await healthSummary.click();
+  await expect(healthRows).toHaveCount(2);
+  await expect(healthRows.first()).toBeVisible();
+  await expect(healthRows.first()).toContainText("INTC"); // worst coverage first, as sent
+  await expect(healthRows.first()).toHaveAttribute("data-stale", "true");
+  const stale = page.getByTestId("pl-stale");
+  await expect(stale).toHaveCount(1);
+  await expect(stale).toContainText("已停牌/失效");
+  await expect(stale).toContainText("已 4 根未更新"); // V6.1 stale_days
+  await expect(health).toContainText("金融");
+  // ② V6 factor correlation heatmap: 2 factors → 4 cells, off-diagonal 0.31, index labels ①②
+  const corr = page.getByTestId("pl-corr");
+  await expect(corr).toBeVisible();
+  await expect(corr.locator(".pl-corr__cell")).toHaveCount(4);
+  await expect(corr.locator(".pl-corr__cell.is-diag")).toHaveCount(2);
+  await expect(corr.locator(".pl-corr__cell[data-corr=\"0.31\"]")).toHaveCount(2);
+  await expect(corr.locator(".pl-corr__hdr", { hasText: "①" })).toHaveCount(2); // column + row header
+  // ⑤ V6 capacity: four AUM rows formatted 1M … 1B, headline chip at the 2.65B breakeven, V6.1 costed chip, note
+  const capacity = page.getByTestId("pl-capacity");
+  await expect(capacity).toBeVisible();
+  const capRows = capacity.locator("tbody tr");
+  await expect(capRows).toHaveCount(4);
+  await expect(capRows.nth(0)).toContainText("1M");
+  await expect(capRows.nth(3)).toContainText("1B");
+  await expect(capRows.nth(3)).toContainText("20.00%");
+  await expect(page.getByTestId("pl-capacity-chip")).toContainText("2.65B");
+  await expect(page.getByTestId("pl-capacity-chip")).toHaveClass(/pl-tone--ok/);
+  await expect(page.getByTestId("pl-capacity-costed")).toHaveText("已计成本的交易 100%");
+  await expect(capacity).toContainText("Almgren");
+  // the V6 low_capacity warning is translated like the others
+  await expect(page.locator(".pl-warning", { hasText: "估算容量不足 1000 万" })).toBeVisible();
+  // ③ V6 presets: 保守 sets Top-N 12 (and the rest) and shows the applied chip; a manual edit retires the chip
+  await page.getByTestId("pl-preset-conservative").click();
+  await expect(page.getByTestId("pl-topn")).toHaveValue("12");
+  await expect(page.getByTestId("pl-shrink")).toHaveValue("0.3");
+  await expect(page.getByRole("radio", { name: /波动率倒数/ })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByTestId("pl-preset-applied")).toHaveText("✓ 已应用预设 保守");
+  await page.getByTestId("pl-topn").fill("13");
+  await expect(page.getByTestId("pl-preset-applied")).toHaveCount(0);
+  await page.getByTestId("pl-preset-aggressive").click();
+  await expect(page.getByTestId("pl-topn")).toHaveValue("6");
+  await expect(page.getByTestId("pl-preset-applied")).toHaveText("✓ 已应用预设 进取");
+  await expect(page.getByRole("radio", { name: /信号加权/ })).toHaveAttribute("aria-checked", "true");
+  // ④ V6 share config: the link lands in the (stubbed) clipboard as ?pl=<base64url JSON of the normalized spec>
+  await page.getByTestId("pl-share").click();
+  await expect(page.getByTestId("pl-share-copied")).toBeVisible();
+  const shareLink = await page.evaluate(() => (window as unknown as { __md: string }).__md);
+  expect(shareLink).toContain("?pl=");
+  const plParam = new URL(shareLink).searchParams.get("pl")!;
+  expect(plParam).not.toMatch(/[+/=]/); // base64url, unpadded
+  const sharedSpec = JSON.parse(Buffer.from(plParam, "base64url").toString("utf8")) as Record<string, unknown>;
+  expect(sharedSpec.market).toBe("us");
+  expect(sharedSpec.scheme).toBe("score");
+  expect(sharedSpec.top_n).toBe(6);
+  expect(sharedSpec.max_weight).toBe(0.3);
+  expect(sharedSpec.target_vol_pct).toBeNull();
+  expect(sharedSpec.symbols).toHaveLength(9);
+  expect(sharedSpec.history).toBe("3y");
+  expect((sharedSpec.factors as unknown[]).length).toBe(2);
+  expect(sharedSpec).not.toHaveProperty("prior_trials");
   // ⑤ V3 regime table (five rows, labels translated) and Brinson-Fachler attribution
   const regimes = page.getByTestId("pl-regimes");
   await expect(regimes.locator("tbody tr")).toHaveCount(5);
@@ -787,4 +878,68 @@ test("pipeline: tick a starter factor, run the six stages, deploy to paper", asy
   await page.getByTestId("pl-run").click();
   await expect(page.getByTestId("pl-trials")).toContainText("已尝试 2 次");
   await expect(restored).toHaveCount(0);
+});
+
+test("pipeline: a ?pl= link pre-fills the form (hrp, custom factor) without running", async ({ page }) => {
+  let runs = 0;
+  await page.route("**/api/pipeline/run", (route) => {
+    runs += 1;
+    return route.fallback();
+  });
+  // one starter (inverted) + one expression the config does not know, HRP, a custom 8-ticker universe, 5y
+  const spec = {
+    market: "us",
+    factors: [
+      { expression: "rank(delta(close, 5))", invert: false, horizon: 10 },
+      { expression: "rank(ts_mean(returns, 60))", invert: true, horizon: 10 },
+    ],
+    signal_weighting: "equal",
+    scheme: "hrp",
+    top_n: 5,
+    rebalance: 15,
+    max_weight: 0.2,
+    cost_bps: 9,
+    target_vol_pct: 12,
+    vol_lookback: 40,
+    hold_buffer: 3,
+    trade_rate: 0.8,
+    shrink_to_equal: 0.2,
+    compare: false,
+    symbols: ["AAPL", "MSFT", "NVDA", "INTC", "AMZN", "GOOG", "META", "TSLA"],
+    history: "5y",
+  };
+  const encoded = Buffer.from(JSON.stringify(spec)).toString("base64url");
+  await page.goto(`/?pl=${encoded}`);
+  // routed straight to the pipeline tab, query string cleaned, no run fired
+  await expect(page.locator(".nav-tab.is-on")).toHaveText("端到端量化");
+  await expect(page.getByText("端到端量化投资")).toBeVisible();
+  await expect(page.getByTestId("pl-share-loaded")).toHaveText("已载入分享配置");
+  expect(page.url()).not.toContain("pl=");
+  // ③ the scheme and every parameter came from the link, and survived the config load that follows
+  await expect(page.getByRole("radio", { name: /层次风险平价 HRP/ })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByTestId("pl-topn")).toHaveValue("5");
+  await expect(page.getByTestId("pl-shrink")).toHaveValue("0.2");
+  await expect(page.getByRole("checkbox", { name: "启用目标波动" })).toBeChecked();
+  await expect(page.getByTestId("pl-run-hint")).toContainText("层次风险平价 HRP");
+  // ② the unknown expression is listed as a custom factor and ticked; the starter is ticked and inverted
+  const custom = page.locator(".pl-factor", { hasText: "rank(delta(close, 5))" });
+  await expect(custom).toBeVisible();
+  await expect(custom).toContainText("自定义");
+  await expect(custom.getByRole("checkbox")).toBeChecked();
+  const starter = page.locator(".pl-factor", { hasText: "中期动量" });
+  await expect(starter.getByRole("checkbox")).toBeChecked();
+  await expect(starter.locator(".chip.is-on")).toContainText("反向");
+  await expect(page.locator(".pl-factor", { hasText: "短期反转" }).getByRole("checkbox")).not.toBeChecked();
+  // ① the custom universe and 5-year history are pre-filled too
+  await expect(page.getByTestId("pl-custom-toggle")).toBeChecked();
+  await expect(page.getByTestId("pl-symbols")).toHaveValue("AAPL, MSFT, NVDA, INTC, AMZN, GOOG, META, TSLA");
+  await expect(page.getByTestId("pl-symbols-count")).toHaveText("8 / 40（至少 8）");
+  await expect(page.getByTestId("pl-history")).toHaveValue("5y");
+  // ready to run, but nothing ran by itself
+  await expect(page.getByTestId("pl-run")).toBeEnabled();
+  expect(runs).toBe(0);
+  // a garbage payload is ignored: plain landing on the terminal, no chip
+  await page.goto("/?pl=not-base64url-json");
+  await expect(page.locator(".nav-tab.is-on")).toHaveText("美股");
+  await expect(page.getByTestId("pl-share-loaded")).toHaveCount(0);
 });

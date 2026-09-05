@@ -4252,6 +4252,191 @@ tbody tr:hover td {
   }
 }
 
+/* V6: data-health table (stage ①) — a <details>, collapsed by default */
+.pl-health {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  max-width: 100%;
+}
+
+.pl-health__summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  cursor: pointer;
+  list-style: none;
+  font-size: 11.5px;
+  user-select: none;
+}
+
+.pl-health__summary::-webkit-details-marker {
+  display: none;
+}
+
+.pl-health__summary::before {
+  content: "▸";
+  color: var(--text-faint);
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+
+.pl-health[open] > .pl-health__summary::before {
+  transform: rotate(90deg);
+}
+
+.pl-health__title {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.pl-health__scroll {
+  max-height: 260px;
+  margin-top: 8px;
+}
+
+.pl-health__table td,
+.pl-health__table th {
+  white-space: nowrap;
+}
+
+.pl-health__row--stale td {
+  color: var(--text-dim);
+}
+
+.pl-health__row--stale td b {
+  color: var(--amber);
+}
+
+/* V6: factor correlation heatmap (stage ②) — diverging red · dark · green */
+.pl-corr {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.pl-corr__grid {
+  display: grid;
+  gap: 3px;
+  align-items: center;
+  width: max-content;
+  max-width: 100%;
+}
+
+.pl-corr__hdr {
+  font-size: 12px;
+  color: var(--text-faint);
+  text-align: center;
+  cursor: help;
+}
+
+.pl-corr__cell {
+  height: 34px;
+  border-radius: 3px;
+  display: grid;
+  place-items: center;
+  font-size: 11.5px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  cursor: default;
+}
+
+.pl-corr__cell.is-diag {
+  color: var(--text-dim);
+}
+
+.pl-corr__cell--none {
+  background: rgba(255, 255, 255, 0.015);
+  border: 1px dashed var(--border);
+  color: var(--text-faint);
+}
+
+.pl-corr__legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+}
+
+.pl-corr__legend li {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.pl-corr__legend code {
+  white-space: normal;
+  word-break: break-all;
+}
+
+.pl-corr__idx {
+  color: var(--text-faint);
+  flex: none;
+}
+
+/* V6: capacity block (stage ⑤) */
+.pl-cap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.pl-cap__table td,
+.pl-cap__table th {
+  white-space: nowrap;
+}
+
+.pl-cap__row--under td {
+  background: rgba(255, 92, 108, 0.05);
+}
+
+/* V6: parameter presets row (stage ③) */
+.pl-presets {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pl-presets__label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.pl-preset {
+  cursor: pointer;
+}
+
+.pl-presets__hint {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+@media (max-width: 820px) {
+  .pl-corr__grid {
+    /* narrow cards: let the cells shrink before the grid scrolls */
+    grid-auto-columns: minmax(40px, 1fr);
+  }
+
+  .pl-health__scroll,
+  .pl-cap .table-scroll {
+    max-width: 100%;
+  }
+}
+
 /* paper: deployment kind badge */
 .pp-kind {
   margin-left: 8px;

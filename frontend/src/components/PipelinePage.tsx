@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type PipelineAlternative,
   type PipelineAttribution,
+  type PipelineCapacity,
   type PipelineConfig,
   type PipelineContributor,
   type PipelineFactorSpec,
+  type PipelineHealthRow,
   type PipelineHistory,
   type PipelineMemo,
   type PipelineMemoRequest,
@@ -17,9 +19,11 @@ import {
   type PipelineRunRequest,
   type PipelineSensitivity,
   type PipelineSignalWeighting,
+  type PipelineStarterFactor,
   type Point,
 } from "../api";
 import { useT, type Lang, type MsgKey } from "../i18n";
+import { buildPipelineShare, takePipelineShare } from "../share";
 import { deployPaper, savedFactors, type SavedFactor } from "../store";
 import { EquityChart } from "./EquityChart";
 
@@ -153,7 +157,86 @@ const WARNING_KEYS: Record<string, MsgKey> = {
   low_psr: "pl.warn.low_psr",
   not_significant: "pl.warn.not_significant",
   parameter_spike: "pl.warn.parameter_spike",
+  low_capacity: "pl.warn.low_capacity",
 };
+
+/* ---- V6 parameter presets (frontend-only) ------------------------------
+ * Three risk appetites over the portfolio parameters. They deliberately leave
+ * cost_bps and vol_lookback alone: those describe the market, not the appetite.
+ * 平衡 / Balanced is whatever the server's defaults are. */
+type PresetId = "conservative" | "balanced" | "aggressive";
+const PRESET_IDS: PresetId[] = ["conservative", "balanced", "aggressive"];
+type PresetFields = Pick<
+  FormState,
+  "scheme" | "topN" | "rebalance" | "maxWeightPct" | "targetVolPct" | "holdBuffer" | "tradeRate" | "shrinkToEqual"
+>;
+const PRESET_KEYS: Array<keyof PresetFields> = [
+  "scheme", "topN", "rebalance", "maxWeightPct", "targetVolPct", "holdBuffer", "tradeRate", "shrinkToEqual",
+];
+
+function presetFields(id: PresetId, d: PipelineConfig["defaults"]): PresetFields {
+  switch (id) {
+    case "conservative":
+      return { scheme: "inverse_vol", topN: 12, rebalance: 20, maxWeightPct: 15, targetVolPct: 10, holdBuffer: 6, tradeRate: 0.5, shrinkToEqual: 0.3 };
+    case "aggressive":
+      return { scheme: "score", topN: 6, rebalance: 5, maxWeightPct: 30, targetVolPct: null, holdBuffer: 2, tradeRate: 1, shrinkToEqual: 0 };
+    default:
+      return {
+        scheme: d.scheme,
+        topN: d.top_n,
+        rebalance: d.rebalance,
+        maxWeightPct: Math.round(d.max_weight * 100),
+        targetVolPct: d.target_vol_pct,
+        holdBuffer: d.hold_buffer ?? FALLBACK_CONFIG.defaults.hold_buffer ?? 4,
+        tradeRate: d.trade_rate ?? FALLBACK_CONFIG.defaults.trade_rate ?? 1,
+        shrinkToEqual: d.shrink_to_equal ?? 0,
+      };
+  }
+}
+
+const matchesPreset = (f: FormState, p: PresetFields) => PRESET_KEYS.every((k) => f[k] === p[k]);
+
+/** V6: a shared `?pl=` spec → the form, on top of whatever the browser had.
+ * Expressions the config / zoo do not know become custom factors of that
+ * market so they show up (and can be removed) like any typed-in expression. */
+function formFromShare(
+  spec: PipelineRunRequest,
+  base: FormState,
+  starters: PipelineStarterFactor[],
+  zoo: SavedFactor[],
+): FormState {
+  const known = new Set([
+    ...starters.map((f) => f.expression),
+    ...zoo.filter((z) => z.market === spec.market).map((z) => z.expression),
+  ]);
+  const selected = [...new Set(spec.factors.map((f) => f.expression))];
+  const inverts = { ...base.inverts };
+  for (const f of spec.factors) inverts[f.expression] = f.invert;
+  const existing = base.custom[spec.market] ?? [];
+  const extra = selected.filter((e) => !known.has(e) && !existing.includes(e));
+  return {
+    ...base,
+    market: spec.market,
+    selected,
+    inverts,
+    custom: extra.length > 0 ? { ...base.custom, [spec.market]: [...existing, ...extra] } : base.custom,
+    signalWeighting: spec.signal_weighting ?? base.signalWeighting,
+    scheme: spec.scheme ?? base.scheme,
+    topN: spec.top_n ?? base.topN,
+    rebalance: spec.rebalance ?? base.rebalance,
+    maxWeightPct: spec.max_weight === undefined ? base.maxWeightPct : Math.round(spec.max_weight * 100),
+    costBps: spec.cost_bps ?? base.costBps,
+    targetVolPct: spec.target_vol_pct === undefined ? base.targetVolPct : spec.target_vol_pct,
+    volLookback: spec.vol_lookback ?? base.volLookback,
+    holdBuffer: spec.hold_buffer ?? base.holdBuffer,
+    tradeRate: spec.trade_rate ?? base.tradeRate,
+    shrinkToEqual: spec.shrink_to_equal ?? base.shrinkToEqual,
+    compare: spec.compare ?? base.compare,
+    customOn: (spec.symbols?.length ?? 0) > 0,
+    symbolsText: spec.symbols ? spec.symbols.join(", ") : base.symbolsText,
+    history: spec.history ?? base.history,
+  };
+}
 
 function formFromDefaults(d: PipelineConfig["defaults"], base?: Partial<FormState>): FormState {
   return {
@@ -341,7 +424,26 @@ export function PipelinePage({ hidden }: Props) {
   const [stage, setStage] = useState(1);
   const [trials, setTrials] = useState<number>(loadTrials);
   const [aiEnabled, setAiEnabled] = useState(false);
+  // V6: last preset clicked (the chip only shows while the form still matches it)
+  const [preset, setPreset] = useState<PresetId | null>(null);
+  // V6: config-link share state
+  const [shareCopied, setShareCopied] = useState<"idle" | "ok" | "fail">("idle");
+  const [shareLoaded, setShareLoaded] = useState(false);
   const stageRefs = useRef<Array<HTMLElement | null>>([]);
+
+  // V6 shared-link replay (?pl=): pre-fill the form, never run. Marking the
+  // result as the "stored" form keeps the config load from resetting it to
+  // the server defaults a moment later. Effect (not initializer) so a
+  // StrictMode double-mount cannot lose the single-use share.
+  useEffect(() => {
+    const share = takePipelineShare();
+    if (!share) return;
+    const next = formFromShare(share, form, config.starter_factors[share.market] ?? [], zoo);
+    storedRef.current = next;
+    setForm(next);
+    setShareLoaded(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // AI availability decides whether the committee-memo button is live; read
   // once, the same way the analyst panel does.
@@ -377,6 +479,12 @@ export function PipelinePage({ hidden }: Props) {
             next.signalWeighting = cfg.defaults.signal_weighting;
           }
           if (!cfg.markets.includes(next.market)) next.market = cfg.markets[0] ?? "us";
+          // a shared expression added as "custom" before the config arrived may be a starter after all
+          const starters = new Set((cfg.starter_factors[next.market] ?? []).map((sf) => sf.expression));
+          const own = next.custom[next.market] ?? [];
+          if (own.some((e) => starters.has(e))) {
+            next.custom = { ...next.custom, [next.market]: own.filter((e) => !starters.has(e)) };
+          }
           return next;
         });
       })
@@ -566,6 +674,7 @@ export function PipelinePage({ hidden }: Props) {
     setDeployed(false);
     setCopied("idle");
     setMdCopied("idle");
+    setShareLoaded(false);
     try {
       const res = await api.pipelineRun(buildRequest());
       setResult(res);
@@ -631,6 +740,27 @@ export function PipelinePage({ hidden }: Props) {
     setMdCopied(ok ? "ok" : "fail");
     window.setTimeout(() => setMdCopied("idle"), 2500);
   };
+
+  /** V6: the normalized spec without the browser-specific trial count. */
+  const shareSpec = (): PipelineRunRequest => {
+    const spec = buildRequest();
+    delete spec.prior_trials;
+    return spec;
+  };
+
+  const shareConfig = async () => {
+    if (chosen.length === 0) return;
+    const ok = await copyText(buildPipelineShare(shareSpec()));
+    setShareCopied(ok ? "ok" : "fail");
+    window.setTimeout(() => setShareCopied("idle"), 2500);
+  };
+
+  const applyPreset = (id: PresetId) => {
+    patch(presetFields(id, config.defaults));
+    setPreset(id);
+  };
+  const activePreset = preset !== null && matchesPreset(form, presetFields(preset, config.defaults)) ? preset : null;
+  const presetName = (id: PresetId) => t(`pl.preset.${id}` as MsgKey);
 
   const goStage = (n: number) => {
     setStage(n);
@@ -845,6 +975,9 @@ export function PipelinePage({ hidden }: Props) {
                       )}
                     </div>
                   )}
+                  {result.universe.health && result.universe.health.length > 0 && (
+                    <HealthTable rows={result.universe.health} sectorLabel={sectorLabel} />
+                  )}
                 </>
               )}
             </div>
@@ -946,6 +1079,13 @@ export function PipelinePage({ hidden }: Props) {
                       c: result.signal.max_pair_corr.toFixed(2),
                     })}
                   </div>
+                  {result.signal.corr_matrix && result.signal.corr_matrix.length >= 2 && (
+                    <>
+                      <div className="pl-subhead">{t("pl.sig.corr")}</div>
+                      <CorrHeatmap m={result.signal.corr_matrix} labels={result.signal.components.map((c) => c.expression)} />
+                      <p className="dim pl-hint">{t("pl.sig.corrNote")}</p>
+                    </>
+                  )}
                   {result.signal.ic_by_horizon && result.signal.ic_by_horizon.length > 0 && (
                     <>
                       <div className="pl-subhead">
@@ -1030,6 +1170,28 @@ export function PipelinePage({ hidden }: Props) {
             <span className="panel__meta">{schemeName(form.scheme)}</span>
           </div>
           <div className="panel__body pl-body">
+            <div className="pl-presets" data-testid="pl-presets">
+              <span className="pl-presets__label">{t("pl.preset.title")}</span>
+              {PRESET_IDS.map((id) => (
+                <button
+                  key={id}
+                  className={`chip pl-preset${activePreset === id ? " is-on" : ""}`}
+                  onClick={() => applyPreset(id)}
+                  disabled={running}
+                  title={t(`pl.preset.${id}Title` as MsgKey)}
+                  aria-pressed={activePreset === id}
+                  data-testid={`pl-preset-${id}`}
+                >
+                  {presetName(id)}
+                </button>
+              ))}
+              {activePreset && (
+                <span className="pl-badge pl-badge--ok" data-testid="pl-preset-applied">
+                  ✓ {t("pl.preset.applied", { p: presetName(activePreset) })}
+                </span>
+              )}
+              <span className="dim pl-hint pl-presets__hint">{t("pl.preset.hint")}</span>
+            </div>
             <div className="pl-schemes" role="radiogroup" aria-label={t("pl.pf.scheme")}>
               {schemes.map((s) => (
                 <button
@@ -1051,6 +1213,7 @@ export function PipelinePage({ hidden }: Props) {
                 value={form.topN}
                 range={limits.top_n}
                 onChange={(v) => patch({ topN: v })}
+                testId="pl-topn"
               />
               <NumField
                 label={t("pl.pf.rebalance")}
@@ -1193,6 +1356,22 @@ export function PipelinePage({ hidden }: Props) {
               >
                 {running ? t("pl.bt.running") : t("pl.bt.run")}
               </button>
+              <button
+                className="btn"
+                onClick={shareConfig}
+                disabled={chosen.length === 0}
+                title={t("pl.share.title")}
+                data-testid="pl-share"
+              >
+                {t("pl.share.button")}
+              </button>
+              {shareCopied === "ok" && <span className="pl-badge pl-badge--ok" data-testid="pl-share-copied">✓ {t("pl.share.copied")}</span>}
+              {shareCopied === "fail" && <span className="pl-badge pl-badge--warn">{t("pl.share.failed")}</span>}
+              {shareLoaded && (
+                <span className="chip pl-restored" data-testid="pl-share-loaded">
+                  {t("pl.share.loaded")}
+                </span>
+              )}
               {restored && result && (
                 <span className="chip pl-restored" data-testid="pl-restored">
                   {t("pl.bt.restored", { d: result.target_weights.as_of || result.backtest.span.to })}
@@ -1627,6 +1806,13 @@ export function PipelinePage({ hidden }: Props) {
                       <div className="pl-subhead">{t("pl.risk.attr")}</div>
                       <AttributionBlock a={result.risk.attribution} sectorLabel={sectorLabel} />
                       <p className="dim pl-hint">{t("pl.risk.attrNote")}</p>
+                    </>
+                  )}
+
+                  {result.capacity && (
+                    <>
+                      <div className="pl-subhead">{t("pl.cap.title")}</div>
+                      <CapacityBlock c={result.capacity} />
                     </>
                   )}
                 </>
@@ -2138,6 +2324,190 @@ function SectorStack({
   );
 }
 
+/** V6 per-symbol data health (stage ①): collapsed by default, worst coverage
+ * first as the server sends it; stale names carry a badge with the bars
+ * since their last print. */
+function HealthTable({ rows, sectorLabel }: { rows: PipelineHealthRow[]; sectorLabel: (id: string) => string }) {
+  const { t } = useT();
+  const minCov = Math.min(...rows.map((r) => r.coverage_pct));
+  const stale = rows.filter((r) => r.stale).length;
+  return (
+    <details className="pl-health" data-testid="pl-health">
+      <summary className="pl-health__summary" data-testid="pl-health-summary">
+        <span className="pl-health__title">{t("pl.health.title")}</span>
+        <span className="dim">{t("pl.health.head", { n: rows.length, min: minCov.toFixed(1) })}</span>
+        {stale > 0 && (
+          <>
+            <span className="dim">·</span>
+            <span className="pl-badge pl-badge--warn">{t("pl.health.staleCount", { n: stale })}</span>
+          </>
+        )}
+      </summary>
+      <div className="table-scroll pl-health__scroll">
+        <table className="lab-stats pl-health__table" data-testid="pl-health-table">
+          <thead>
+            <tr>
+              <th>{t("pl.health.symbol")}</th>
+              <th>{t("pl.health.sector")}</th>
+              <th className="pl-num">{t("pl.health.coverage")}</th>
+              <th className="pl-num">{t("pl.health.gaps")}</th>
+              <th>{t("pl.health.first")}</th>
+              <th>{t("pl.health.last")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.symbol} className={r.stale ? "pl-health__row--stale" : ""} data-stale={r.stale ? "true" : undefined}>
+                <td>
+                  <b>{r.symbol}</b>
+                  {r.stale && (
+                    <span className="pl-badge pl-badge--warn pl-chip--mini" data-testid="pl-stale">
+                      {t("pl.health.stale")}
+                      {r.stale_days !== undefined && ` · ${t("pl.health.staleDays", { n: r.stale_days })}`}
+                    </span>
+                  )}
+                </td>
+                <td className="dim">{sectorLabel(r.group)}</td>
+                <td className={`pl-num ${covTone(r.coverage_pct)}`}>{r.coverage_pct.toFixed(1)}%</td>
+                <td className={`pl-num ${r.gaps > 0 ? "pl-tone--warn" : ""}`}>{r.gaps}</td>
+                <td className="dim">{r.first ?? "—"}</td>
+                <td className={r.stale ? "pl-tone--warn" : "dim"}>{r.last ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="dim pl-hint">{t("pl.health.note")}</p>
+    </details>
+  );
+}
+
+/** V6 factor correlation heatmap (stage ②): n×n cells on a diverging scale —
+ * −1 red, 0 dark, +1 green — value printed in each, circled-digit index
+ * labels whose hover shows the expression; a null pair is a dashed slot. */
+function CorrHeatmap({ m, labels }: { m: Array<Array<number | null>>; labels: string[] }) {
+  const { t } = useT();
+  const n = m.length;
+  const name = (i: number) => labels[i] ?? `#${i + 1}`;
+  const bg = (v: number) => {
+    const a = 0.08 + 0.72 * Math.min(1, Math.abs(v));
+    return v >= 0 ? `rgba(61, 220, 132, ${a.toFixed(2)})` : `rgba(255, 92, 108, ${a.toFixed(2)})`;
+  };
+  return (
+    <div className="pl-corr" data-testid="pl-corr">
+      <div
+        className="pl-corr__grid"
+        role="table"
+        aria-label={t("pl.sig.corr")}
+        style={{ gridTemplateColumns: `28px repeat(${n}, minmax(44px, 56px))` }}
+      >
+        <span className="pl-corr__hdr" role="columnheader" />
+        {m.map((_, j) => (
+          <span key={`c${j}`} className="pl-corr__hdr" role="columnheader" title={t("pl.sig.corrFactor", { i: circled(j), e: name(j) })}>
+            {circled(j)}
+          </span>
+        ))}
+        {m.map((row, i) => (
+          <Fragment key={`r${i}`}>
+            <span className="pl-corr__hdr" role="rowheader" title={t("pl.sig.corrFactor", { i: circled(i), e: name(i) })}>
+              {circled(i)}
+            </span>
+            {Array.from({ length: n }, (_, j) => {
+              const v = row[j] ?? null;
+              const pair = { a: circled(i), b: circled(j) };
+              if (v === null) {
+                return (
+                  <span key={j} className="pl-corr__cell pl-corr__cell--none" role="cell" title={t("pl.sig.corrNone", pair)}>
+                    —
+                  </span>
+                );
+              }
+              return (
+                <span
+                  key={j}
+                  className={`pl-corr__cell${i === j ? " is-diag" : ""}`}
+                  role="cell"
+                  style={{ background: bg(v) }}
+                  title={`${t("pl.sig.corrCell", { ...pair, v: v.toFixed(2) })}\n${name(i)}\n${name(j)}`}
+                  data-corr={v.toFixed(2)}
+                >
+                  {v.toFixed(2)}
+                </span>
+              );
+            })}
+          </Fragment>
+        ))}
+      </div>
+      <ul className="pl-corr__legend">
+        {labels.slice(0, n).map((e, i) => (
+          <li key={e}>
+            <span className="pl-corr__idx">{circled(i)}</span>
+            <code className="pl-factor__expr">{e}</code>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** V6 capacity (stage ⑤): the square-root-impact curve as a four-row table
+ * plus a headline chip at the breakeven AUM. A grid that is null throughout
+ * means the panel had no volume, and the block says so instead of a number. */
+function CapacityBlock({ c }: { c: PipelineCapacity }) {
+  const { t } = useT();
+  const allNull = c.aum_grid.every((_, i) => c.net_excess_pct_ann[i] == null && c.impact_drag_pct_ann[i] == null);
+  const be = c.breakeven_aum;
+  const headTone = be === null || be < 1e7 ? "pl-tone--bad" : be < 1e8 ? "pl-tone--warn" : "pl-tone--ok";
+  return (
+    <div className="pl-cap" data-testid="pl-capacity">
+      <div className="chip-row pl-chip-row">
+        {allNull ? (
+          <span className="chip pl-tone--warn" data-testid="pl-capacity-chip">{t("pl.cap.noVolume")}</span>
+        ) : (
+          <span className={`chip ${headTone}`} title={t("pl.cap.headlineTitle")} data-testid="pl-capacity-chip">
+            {be === null ? t("pl.cap.none") : t("pl.cap.headline", { v: fmtAum(be) })}
+          </span>
+        )}
+        {c.excess_pct_ann !== null && (
+          <span className="chip">{t("pl.cap.excess", { v: signed1(c.excess_pct_ann) })}</span>
+        )}
+        {c.costed_trade_pct !== undefined && c.costed_trade_pct !== null && (
+          <span className="chip dim" title={t("pl.cap.costedTitle")} data-testid="pl-capacity-costed">
+            {t("pl.cap.costed", { v: c.costed_trade_pct.toFixed(0) })}
+          </span>
+        )}
+      </div>
+      <div className="table-scroll">
+        <table className="lab-stats pl-cap__table" data-testid="pl-capacity-table">
+          <thead>
+            <tr>
+              <th>{t("pl.cap.aum")}</th>
+              <th className="pl-num">{t("pl.cap.drag")}</th>
+              <th className="pl-num">{t("pl.cap.net")}</th>
+              <th className="pl-num" title={t("pl.cap.partTitle")}>{t("pl.cap.part")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {c.aum_grid.map((aum, i) => {
+              const net = c.net_excess_pct_ann[i] ?? null;
+              return (
+                <tr key={aum} className={net !== null && net <= 0 ? "pl-cap__row--under" : ""}>
+                  <td><b>{fmtAum(aum)}</b></td>
+                  <td className="pl-num dn">{pct2Opt(c.impact_drag_pct_ann[i])}</td>
+                  <td className={`pl-num ${net === null ? "" : tone(net)}`}>{pctOpt(net)}</td>
+                  <td className="pl-num dim">{pct2Opt(c.participation_pct[i])}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {allNull && <p className="dim pl-hint" data-testid="pl-capacity-novolume">{t("pl.cap.noVolume")}</p>}
+      <p className="dim pl-hint">{t("pl.cap.note")}</p>
+    </div>
+  );
+}
+
 /** V4 parameter-sensitivity heatmap: rows follow `top_n`, columns follow
  * `rebalance`, each cell prints its Sharpe and is shaded by it (red below zero,
  * green above, intensity relative to the grid's extremes). The chosen
@@ -2330,6 +2700,27 @@ function markdownReport(
     );
     out.push("");
     out.push(`> ${t("pl.bt.sens.note")}`);
+    out.push("");
+  }
+
+  const cap = r.capacity;
+  if (cap) {
+    out.push(`## ${t("pl.cap.title")}`);
+    out.push(cap.breakeven_aum === null ? t("pl.cap.none") : t("pl.cap.headline", { v: fmtAum(cap.breakeven_aum) }));
+    out.push("");
+    out.push(
+      table(
+        [t("pl.cap.aum"), t("pl.cap.drag"), t("pl.cap.net"), t("pl.cap.part")],
+        cap.aum_grid.map((aum, i) => [
+          fmtAum(aum),
+          pct2Opt(cap.impact_drag_pct_ann[i]),
+          pc(cap.net_excess_pct_ann[i]),
+          pct2Opt(cap.participation_pct[i]),
+        ]),
+      ),
+    );
+    out.push("");
+    out.push(`> ${t("pl.cap.note")}`);
     out.push("");
   }
 
@@ -2762,3 +3153,21 @@ const hitTone = (v: number | null) => (v === null ? "" : v >= 60 ? "pl-tone--ok"
 const spikeTone = (v: number | null) => (v === null ? "" : v <= 0.2 ? "pl-tone--ok" : v <= 0.5 ? "pl-tone--warn" : "pl-tone--bad");
 /** Up-capture above 1 and down-capture below 1 are the good directions. */
 const captureTone = (v: number | null, up: boolean) => (v === null ? "" : (up ? v >= 1 : v <= 1) ? "up" : "dn");
+/** V6 two-decimal percentages (impact drag, participation); null prints as a dash. */
+const pct2Opt = (v: number | null | undefined) => (v === null || v === undefined ? "—" : `${v.toFixed(2)}%`);
+/** V6 data coverage: ≥ 95% clean, 80–95% patchy, below that the name barely contributes. */
+const covTone = (v: number) => (v >= 95 ? "pl-tone--ok" : v >= 80 ? "pl-tone--warn" : "pl-tone--bad");
+/** V6 factor index labels ①②③…; falls back to plain numbers past ⑳. */
+const circled = (i: number) => (i < 20 ? String.fromCodePoint(0x2460 + i) : String(i + 1));
+/** V6 AUM in K / M / B with up to three significant digits and no trailing zeros: 1M, 10M, 2.65B, 43.4M. */
+function fmtAum(v: number): string {
+  const units: Array<[number, string]> = [[1e9, "B"], [1e6, "M"], [1e3, "K"]];
+  for (const [u, suffix] of units) {
+    if (Math.abs(v) >= u) return `${trimNum(v / u)}${suffix}`;
+  }
+  return trimNum(v);
+}
+function trimNum(x: number): string {
+  const s = Math.abs(x) >= 100 ? x.toFixed(0) : Math.abs(x) >= 10 ? x.toFixed(1) : x.toFixed(2);
+  return s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
+}
