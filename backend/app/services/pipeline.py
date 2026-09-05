@@ -315,13 +315,15 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
 
     n = len(ranked_list)
     max_pair_corr = 0.0
+    corr_matrix = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
     for i in range(n):
         for j in range(i + 1, n):
             pair = pd.concat([ranked_list[i].stack(), ranked_list[j].stack()], axis=1).dropna()
             if len(pair) > 200:
-                c = abs(float(pair.iloc[:, 0].corr(pair.iloc[:, 1])))
+                c = float(pair.iloc[:, 0].corr(pair.iloc[:, 1]))
                 if np.isfinite(c):
-                    max_pair_corr = max(max_pair_corr, c)
+                    corr_matrix[i][j] = corr_matrix[j][i] = round(c, 3)
+                    max_pair_corr = max(max_pair_corr, abs(c))
 
     weighting = spec["signal_weighting"]
     if weighting == "ic_expanding":
@@ -378,6 +380,7 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
 
     info = {
         "weighting": weighting, "components": components, "max_pair_corr": round(max_pair_corr, 3),
+        "corr_matrix": corr_matrix,
         "ic_by_horizon": ic_by_horizon,
         "composite_is_ic": round(composite_is_ic if np.isfinite(composite_is_ic) else 0.0, 4),
         "composite_oos_ic": _r(float(ic_main.iloc[split:].mean()), 4) if split < len(ic_main) else None,
@@ -481,6 +484,7 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
     turnover = np.zeros(T)
     exposure = np.zeros(T)
     held_hist = np.zeros((T, N))
+    trade_hist = np.zeros((T, N))  # |Δw| per name on trade days — feeds the impact model
     contrib = np.zeros(N)
     days_held = np.zeros(N)
     weight_sum = np.zeros(N)
@@ -499,7 +503,8 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
             # partial adjustment toward the aim portfolio (Gârleanu & Pedersen
             # 2013): trade only a fraction of the distance when costs matter
             target = held + spec["trade_rate"] * (target - held)
-            turnover[i] = float(np.abs(target - held).sum()) / 2
+            trade_hist[i] = np.abs(target - held)
+            turnover[i] = float(trade_hist[i].sum()) / 2
             held = target
             pending = None
         r = np.nan_to_num(ret_np[i])
@@ -558,6 +563,7 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
         "turnover": pd.Series(turnover[first:], index=index),
         "exposure": pd.Series(exposure[first:], index=index),
         "held": pd.DataFrame(held_hist[first:], index=index, columns=symbols),
+        "trades": pd.DataFrame(trade_hist[first:], index=index, columns=symbols),
         "bench_w": bench_w.shift(1).loc[index],
         "returns": ret.loc[index],
         "contrib": pd.Series(contrib, index=symbols),
@@ -777,6 +783,7 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
         "custom": bool(spec["symbols"]), "history": spec["history"],
         "requested": len(spec["symbols"]) if spec["symbols"] else None,
         "dropped": sorted(set(spec["symbols"]) - set(map(str, close.columns))) if spec["symbols"] else [],
+        "health": data_health(panel),
     }
 
     scores, signal, ranked_list = build_signal(spec, panel)
@@ -857,6 +864,9 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
 
     out = report(spec, panel, signal, sim, alternatives, universe, [t for t in trials if t is not None])
     out["sensitivity"] = sensitivity
+    out["capacity"] = capacity_curve(sim, panel, spec, out["backtest"]["stats"])
+    if out["capacity"]["breakeven_aum"] is not None and out["capacity"]["breakeven_aum"] < 1e7:
+        out["warnings"].append("low_capacity")
     if sensitivity and sensitivity["spike"] is not None and sensitivity["spike"] > 0.5:
         out["warnings"].append("parameter_spike")
     return out
@@ -977,4 +987,97 @@ def orders_blocking(raw_spec: dict, nav: float, current: dict[str, float] | None
             "cash_unknown": not cash_known,
             "target_exposure_pct": round(float(target.sum()) * 100, 1),
         },
+    }
+
+
+# ------------------------------------------------------- data & capacity
+
+
+def data_health(panel: dict[str, pd.DataFrame]) -> list[dict]:
+    """Per-symbol data quality: coverage, gaps, first/last print. Custom
+    universes bring whatever Yahoo has — the user should see it."""
+    close = panel["close"]
+    rows = []
+    for sym in close.columns:
+        col = close[sym]
+        valid = col.notna()
+        if not valid.any():
+            continue
+        first, last = col.first_valid_index(), col.last_valid_index()
+        inner = valid.loc[first:last]
+        rows.append({
+            "symbol": str(sym),
+            "group": SECTORS.get(str(sym), "other"),
+            "coverage_pct": round(float(valid.mean()) * 100, 1),
+            "gaps": int((~inner).sum()),                # missing prints between first and last
+            "first": str(pd.Timestamp(first).date()),
+            "last": str(pd.Timestamp(last).date()),
+            "stale": bool(last < close.index[-1]),      # stopped printing before the panel ends
+        })
+    rows.sort(key=lambda r: (r["coverage_pct"], r["symbol"]))
+    return rows
+
+
+AUM_GRID: tuple[float, ...] = (1e6, 1e7, 1e8, 1e9)
+IMPACT_COEF = 1.0          # square-root law: cost = coef · σ_daily · sqrt(participation)
+ADV_WINDOW = 20
+
+
+def capacity_curve(sim: dict, panel: dict[str, pd.DataFrame], spec: dict, stats: dict) -> dict:
+    """How much money can this run? Market impact per trade follows the
+    square-root law (Almgren et al. 2005; Gatheral 2010):
+
+        impact_i = IMPACT_COEF · σ_i · sqrt(Q_i / ADV_i),   Q_i = |Δw_i| · AUM
+
+    charged on the traded notional. For each AUM on the grid the annualised
+    drag is subtracted from the excess return over the benchmark; the
+    breakeven AUM is where net excess crosses zero (log-interpolated). Yahoo
+    volume is in shares for equities (× price → dollar ADV) and already in
+    quote currency for crypto."""
+    trades = sim["trades"]
+    if trades.empty or float(trades.values.sum()) <= 0:
+        return {"aum_grid": list(AUM_GRID), "impact_drag_pct_ann": [None] * len(AUM_GRID),
+                "net_excess_pct_ann": [None] * len(AUM_GRID), "participation_pct": [None] * len(AUM_GRID),
+                "breakeven_aum": None, "excess_pct_ann": None}
+    ann = sim["ann"]
+    close = panel["close"].ffill()
+    vol = panel["volume"].reindex(columns=trades.columns)
+    dollar_vol = (vol * close if spec["market"] == "us" else vol).rolling(ADV_WINDOW, min_periods=5).mean()
+    adv = dollar_vol.shift(1).reindex(index=trades.index, columns=trades.columns)   # known before the trade
+    sigma = close.pct_change().rolling(ADV_WINDOW, min_periods=5).std().shift(1).reindex(index=trades.index, columns=trades.columns)
+    mask = trades.values > 0
+    tw = trades.values[mask]
+    adv_v = np.nan_to_num(adv.values[mask], nan=np.nan)
+    sig_v = np.nan_to_num(sigma.values[mask], nan=np.nan)
+    ok = np.isfinite(adv_v) & (adv_v > 0) & np.isfinite(sig_v)
+    tw, adv_v, sig_v = tw[ok], adv_v[ok], sig_v[ok]
+    years = len(sim["net"]) / ann
+    excess_ann = None
+    if stats.get("cagr_pct") is not None and stats.get("benchmark", {}).get("cagr_pct") is not None:
+        excess_ann = float(stats["cagr_pct"] - stats["benchmark"]["cagr_pct"])
+    elif years > 0:
+        excess_ann = float(stats["excess_pct"]) / years
+    drags, nets, parts = [], [], []
+    for aum in AUM_GRID:
+        q = tw * aum                                    # traded notional per name
+        participation = q / adv_v
+        cost = IMPACT_COEF * sig_v * np.sqrt(participation) * tw   # fraction of NAV lost on each trade
+        drag_ann = float(cost.sum()) / max(years, 1e-9) * 100 if len(cost) else 0.0
+        drags.append(round(drag_ann, 3))
+        nets.append(round(excess_ann - drag_ann, 2) if excess_ann is not None else None)
+        parts.append(round(float(np.mean(participation)) * 100, 3) if len(participation) else None)
+    breakeven = None
+    if excess_ann is not None and excess_ann > 0 and drags and drags[-1] > 0:
+        # drag scales as AUM^0.5 → AUM* = AUM_ref · (excess / drag_ref)^2
+        ref_aum, ref_drag = AUM_GRID[0], drags[0]
+        if ref_drag > 0:
+            breakeven = float(ref_aum * (excess_ann / ref_drag) ** 2)
+    return {
+        "aum_grid": list(AUM_GRID),
+        "impact_drag_pct_ann": drags,
+        "net_excess_pct_ann": nets,
+        "participation_pct": parts,
+        "excess_pct_ann": _r(excess_ann, 2),
+        "breakeven_aum": _r(breakeven, 0),
+        "model": "sqrt_impact",
     }

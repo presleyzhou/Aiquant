@@ -743,3 +743,45 @@ def test_download_panel_survives_a_field_missing_a_column(monkeypatch):
     panel = factor_mine.download_panel(syms, "3y", "test")
     assert list(panel["volume"].columns) == list(panel["close"].columns)
     assert panel["volume"]["A3"].isna().all()
+
+
+# ------------------------------------------------ V6: capacity, health, corr
+
+
+def test_capacity_curve_scales_with_sqrt_aum_and_flags_small_capacity():
+    panel = _panel(500, 30, seed=5)
+    res = pipeline.run_pipeline_blocking({**SPEC, "compare": False}, panel=panel)
+    cap = res["capacity"]
+    json.dumps(res, allow_nan=False)
+    assert cap["aum_grid"] == [1e6, 1e7, 1e8, 1e9]
+    d = cap["impact_drag_pct_ann"]
+    assert all(x >= 0 for x in d) and d[0] < d[1] < d[2] < d[3]
+    # square-root law: ×10 AUM → ×√10 drag
+    assert d[1] / d[0] == pytest.approx(10 ** 0.5, rel=0.05)
+    if cap["excess_pct_ann"] is not None and cap["excess_pct_ann"] > 0:
+        assert cap["breakeven_aum"] is not None and cap["breakeven_aum"] > 0
+        assert cap["net_excess_pct_ann"][0] > cap["net_excess_pct_ann"][-1]
+
+
+def test_data_health_reports_gaps_and_stale_names():
+    panel = _panel(300, 6, seed=2)
+    close = panel["close"].copy()
+    close.iloc[100:103, 0] = np.nan       # three missing prints inside the history
+    close.iloc[-20:, 1] = np.nan          # delisted / stale
+    close.iloc[:50, 2] = np.nan           # late listing
+    panel = {**panel, "close": close}
+    rows = {r["symbol"]: r for r in pipeline.data_health(panel)}
+    assert rows["S0"]["gaps"] == 3 and rows["S0"]["stale"] is False
+    assert rows["S1"]["stale"] is True and rows["S1"]["gaps"] == 0
+    assert rows["S2"]["first"] == str(close.index[50].date()) and rows["S2"]["coverage_pct"] == pytest.approx(83.3, abs=0.1)
+
+
+def test_factor_correlation_matrix_is_symmetric_with_unit_diagonal():
+    panel = _panel(500, 20, seed=1)
+    spec = pipeline.normalize_spec({**SPEC, "factors": ["rank(delta(close, 5))", "rank(delta(close, 6))", "neg(ts_std(returns, 20))"]})
+    _, info, _ = pipeline.build_signal(spec, panel)
+    m = info["corr_matrix"]
+    assert len(m) == 3 and all(m[i][i] == 1.0 for i in range(3))
+    assert m[0][1] == m[1][0] and m[0][1] > 0.7          # near-duplicate factors
+    assert abs(m[0][2]) < 0.5
+    assert info["max_pair_corr"] == pytest.approx(max(abs(m[0][1]), abs(m[0][2]), abs(m[1][2])), abs=1e-9)
