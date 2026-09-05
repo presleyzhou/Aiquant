@@ -682,3 +682,64 @@ def test_orders_endpoint_contract(monkeypatch):
     assert client.post("/api/pipeline/orders", json={"spec": SPEC, "nav": 0}).status_code == 422
     bad = client.post("/api/pipeline/run", json={**SPEC, "symbols": ["AAPL", "MSFT"]})
     assert bad.status_code == 400  # too few custom symbols
+
+
+# ------------------------------------------------ V5.1: second review fixes
+
+
+def test_orders_reject_absurd_positions_and_flag_unknown_cash():
+    panel = _panel(500, 30, seed=5)
+    with pytest.raises(factor_dsl.FactorError):
+        pipeline.orders_blocking(SPEC, nav=1e5, current={"S1": 1e308}, panel=panel)
+    ticket = pipeline.orders_blocking(SPEC, nav=1e5, current={"NOPE": 100, "S1": 10}, panel=panel)
+    assert ticket["unpriced"] == ["NOPE"]
+    assert ticket["summary"]["cash_unknown"] is True
+    assert ticket["summary"]["cash_before"] is None and ticket["summary"]["cash_after"] is None
+    json.dumps(ticket, allow_nan=False)
+
+
+def test_nan_in_request_is_a_422_not_a_500():
+    import math
+
+    body = json.dumps({**SPEC, "max_weight": float("nan")}, allow_nan=True)
+    r = client.post("/api/pipeline/run", content=body, headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    r = client.post("/api/pipeline/orders", content=json.dumps({"spec": SPEC, "nav": math.inf}), headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    r = client.post("/api/pipeline/orders", json={"spec": SPEC, "nav": 1000, "current": {"S1": 1e300}})
+    assert r.status_code == 400
+
+
+def test_custom_cache_is_bounded(monkeypatch):
+    pipeline._CUSTOM_CACHE.clear()
+    monkeypatch.setattr(pipeline, "_CUSTOM_CACHE_MAX", 3)
+    dummy = {"close": pd.DataFrame()}
+    for i in range(10):
+        pipeline._remember_custom(f"k{i}", dummy)
+    assert len(pipeline._CUSTOM_CACHE) == 3 and "k9" in pipeline._CUSTOM_CACHE and "k0" not in pipeline._CUSTOM_CACHE
+    pipeline._CUSTOM_CACHE.clear()
+
+
+def test_symbol_regex_accepts_indices_and_rejects_unicode():
+    base = ["AAPL", "MSFT", "NVDA", "GOOG", "META", "AMZN", "TSLA"]
+    assert "^GSPC" in pipeline.parse_symbols(base + ["^gspc"])
+    with pytest.raises(factor_dsl.FactorError):
+        pipeline.parse_symbols(base + ["ıbm"])
+    with pytest.raises(factor_dsl.FactorError):
+        pipeline.parse_symbols(base + ["AAPL^"])
+
+
+def test_download_panel_survives_a_field_missing_a_column(monkeypatch):
+    from app.services import factor_mine
+
+    n, syms = 300, ["A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8"]
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    rng = np.random.default_rng(0)
+    close = pd.DataFrame(100 * np.exp(np.cumsum(rng.normal(0, 0.01, (n, 9)), axis=0)), index=idx, columns=syms)
+    vol = pd.DataFrame(1e6, index=idx, columns=syms)
+    vol["A3"] = np.nan  # a symbol with no volume at all (futures / indices)
+    raw = pd.concat({"Open": close, "High": close * 1.01, "Low": close * 0.99, "Close": close, "Volume": vol}, axis=1)
+    monkeypatch.setattr(factor_mine.yf, "download", lambda *a, **k: raw)
+    panel = factor_mine.download_panel(syms, "3y", "test")
+    assert list(panel["volume"].columns) == list(panel["close"].columns)
+    assert panel["volume"]["A3"].isna().all()

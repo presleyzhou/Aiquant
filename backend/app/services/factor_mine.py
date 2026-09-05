@@ -138,7 +138,7 @@ def download_panel(tickers: list[str], period: str, label: str, min_symbols: int
     if len(good) < min_symbols:
         raise LookupError(f"only {len(good)} usable symbols in the {label} universe (need {min_symbols})")
     for field in list(panel):
-        panel[field] = panel[field][good]
+        panel[field] = panel[field].reindex(columns=good)  # a field missing a column stays NaN, never KeyError
 
     close = panel["close"]
     panel["returns"] = close.pct_change()

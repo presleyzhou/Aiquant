@@ -1,7 +1,11 @@
 import logging
+import math
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api import ai, analytics, factors, kronos, market, marketplace, paper, payments, pipeline, wallet, ws
 from app.config import get_settings
@@ -53,6 +57,24 @@ app.include_router(factors.router)
 app.include_router(paper.router)
 app.include_router(pipeline.router)
 app.include_router(ws.router)
+
+
+# A request carrying NaN/inf (Python's json accepts them) fails validation,
+# but the default 422 body echoes the offending input and then cannot be
+# serialised — a 500 in production. Sanitise non-finite floats first.
+def _finite(obj):
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {k: _finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_finite(v) for v in obj]
+    return obj
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": _finite(jsonable_encoder(exc.errors()))})
 
 
 @app.get("/api/health")

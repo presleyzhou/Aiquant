@@ -115,7 +115,8 @@ _MIN_BARS = 60
 HISTORIES: tuple[str, ...] = ("3y", "5y")
 MAX_CUSTOM_SYMBOLS = 40
 MIN_CUSTOM_SYMBOLS = 8
-_SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-=^]{0,19}$")
+_SYMBOL_RE = re.compile(r"^[A-Z0-9^][A-Z0-9.\-=]{0,19}$")  # ^GSPC-style indices allowed
+_CUSTOM_CACHE_MAX = 8
 _CUSTOM_CACHE: dict[str, tuple[float, dict[str, pd.DataFrame]]] = {}
 _CUSTOM_TTL = 6 * 3600
 
@@ -218,8 +219,8 @@ def parse_symbols(raw: Any) -> list[str]:
         raise factor_dsl.FactorError("symbols must be a list of tickers")
     out: list[str] = []
     for item in raw:
-        if not isinstance(item, str):
-            raise factor_dsl.FactorError("symbols must be strings")
+        if not isinstance(item, str) or not item.isascii():
+            raise factor_dsl.FactorError("symbols must be plain ASCII tickers")
         sym = item.strip().upper()
         if not sym:
             continue
@@ -248,13 +249,25 @@ def load_panel(spec: dict) -> dict[str, pd.DataFrame]:
         return hit[1]
     disk = disk_cache.load(key, _CUSTOM_TTL)
     if isinstance(disk, dict) and "close" in disk:
-        _CUSTOM_CACHE[key] = (time.time(), disk)
+        _remember_custom(key, disk)
         return disk
     label = "custom" if spec["symbols"] else spec["market"]
     panel = download_panel(tickers, spec["history"], label, min_symbols=MIN_CUSTOM_SYMBOLS)
-    _CUSTOM_CACHE[key] = (time.time(), panel)
+    _remember_custom(key, panel)
     disk_cache.store(key, panel)
     return panel
+
+
+def _remember_custom(key: str, panel: dict[str, pd.DataFrame]) -> None:
+    """Bounded in-memory cache: expired entries go first, then the oldest, so
+    an anonymous client permuting ticker lists cannot grow the process."""
+    now = time.time()
+    for k in [k for k, (ts, _) in _CUSTOM_CACHE.items() if now - ts >= _CUSTOM_TTL]:
+        _CUSTOM_CACHE.pop(k, None)
+    while len(_CUSTOM_CACHE) >= _CUSTOM_CACHE_MAX:
+        oldest = min(_CUSTOM_CACHE, key=lambda k: _CUSTOM_CACHE[k][0])
+        _CUSTOM_CACHE.pop(oldest, None)
+    _CUSTOM_CACHE[key] = (now, panel)
 
 
 # --------------------------------------------------------------- signal
@@ -895,8 +908,10 @@ def orders_blocking(raw_spec: dict, nav: float, current: dict[str, float] | None
             q = float(shares)
         except (TypeError, ValueError):
             raise factor_dsl.FactorError(f"invalid share count for {sym!r}") from None
-        if q < 0 or not np.isfinite(q):
-            raise factor_dsl.FactorError(f"share count for {s_} must be a non-negative number")
+        if q < 0 or not np.isfinite(q) or q > 1e12:
+            raise factor_dsl.FactorError(f"share count for {s_} must be a non-negative number below 1e12")
+        if len(s_) > 32:
+            raise factor_dsl.FactorError("symbol too long")
         if q > 0:
             holdings[s_] = holdings.get(s_, 0.0) + q
 
@@ -912,6 +927,8 @@ def orders_blocking(raw_spec: dict, nav: float, current: dict[str, float] | None
             continue
         cur_sh = holdings.get(sym, 0.0)
         cur_val = cur_sh * px
+        if not np.isfinite(cur_val) or cur_val > 1e15:
+            raise factor_dsl.FactorError(f"position in {sym} is implausibly large")
         invested_now += cur_val
         tgt_w = float(target.get(sym, 0.0))
         tgt_val = tgt_w * nav
@@ -939,7 +956,10 @@ def orders_blocking(raw_spec: dict, nav: float, current: dict[str, float] | None
         })
     orders.sort(key=lambda o: (o["side"] != "sell", -o["notional"]))  # sells first (they fund the buys)
     cost = (buy_total + sell_total) * spec["cost_bps"] / 10_000
-    cash_now = nav - invested_now
+    # with an unpriceable holding the cash split of NAV is unknown — say so
+    # rather than report the unpriced position as cash
+    cash_known = not unpriced
+    cash_now = nav - invested_now if cash_known else None
     return {
         "as_of": str(pd.Timestamp(ts).date()),
         "price_date": str(prices.name.date()) if hasattr(prices.name, "date") else None,
@@ -952,8 +972,9 @@ def orders_blocking(raw_spec: dict, nav: float, current: dict[str, float] | None
             "buy_notional": round(buy_total, 2), "sell_notional": round(sell_total, 2),
             "turnover_pct": round((buy_total + sell_total) / 2 / nav * 100, 2),
             "est_cost": round(cost, 2),
-            "cash_before": round(cash_now, 2),
-            "cash_after": round(cash_now + sell_total - buy_total - cost, 2),
+            "cash_before": round(cash_now, 2) if cash_known else None,
+            "cash_after": round(cash_now + sell_total - buy_total - cost, 2) if cash_known else None,
+            "cash_unknown": not cash_known,
             "target_exposure_pct": round(float(target.sum()) * 100, 1),
         },
     }

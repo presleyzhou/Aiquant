@@ -35,13 +35,13 @@ class PipelineRequest(BaseModel):
     scheme: str = Field("inverse_vol", pattern="^(equal|score|inverse_vol|min_variance|risk_parity|hrp|mean_variance)$")
     top_n: int = Field(8, ge=2, le=20)
     rebalance: int = Field(10, ge=1, le=30)
-    max_weight: float = Field(0.25, ge=0.05, le=1.0)
-    cost_bps: float = Field(7.0, ge=0, le=50)
-    target_vol_pct: float | None = Field(None, ge=0, le=40, description="annualised %; null or 0 = off")
+    max_weight: float = Field(0.25, ge=0.05, le=1.0, allow_inf_nan=False)
+    cost_bps: float = Field(7.0, ge=0, le=50, allow_inf_nan=False)
+    target_vol_pct: float | None = Field(None, ge=0, le=40, allow_inf_nan=False, description="annualised %; null or 0 = off")
     vol_lookback: int = Field(60, ge=20, le=120)
     hold_buffer: int = Field(4, ge=0, le=20, description="a held name stays while ranked within top_n + buffer")
-    trade_rate: float = Field(1.0, ge=0.1, le=1.0, description="fraction of the distance to the target traded per rebalance")
-    shrink_to_equal: float = Field(0.0, ge=0.0, le=1.0, description="blend optimised weights toward 1/N (DeMiguel et al. 2009)")
+    trade_rate: float = Field(1.0, ge=0.1, le=1.0, allow_inf_nan=False, description="fraction of the distance to the target traded per rebalance")
+    shrink_to_equal: float = Field(0.0, ge=0.0, le=1.0, allow_inf_nan=False, description="blend optimised weights toward 1/N (DeMiguel et al. 2009)")
     prior_trials: int = Field(0, ge=0, le=10_000, description="configurations already tried by this user; inflates the DSR's N")
     compare: bool = True
 
@@ -51,7 +51,7 @@ async def get_config() -> dict:
     return pipeline_config()
 
 
-@router.post("/run")
+@router.post("/run", dependencies=[Depends(limiter("pipeline", "rl_pipeline_per_hour", 3600))])
 async def run(req: PipelineRequest) -> dict:
     try:
         return await asyncio.to_thread(run_pipeline_blocking, req.model_dump())
@@ -63,16 +63,19 @@ async def run(req: PipelineRequest) -> dict:
 
 class OrdersRequest(BaseModel):
     spec: PipelineRequest
-    nav: float = Field(gt=0, le=1e12, description="portfolio value incl. cash, account currency")
+    nav: float = Field(gt=0, le=1e12, allow_inf_nan=False, description="portfolio value incl. cash, account currency")
     current: dict[str, float] = Field(default_factory=dict, description="{symbol: shares} currently held")
-    min_trade_pct: float = Field(0.25, ge=0, le=5, description="suppress trades below this % of NAV")
+    min_trade_pct: float = Field(0.25, ge=0, le=5, allow_inf_nan=False, description="suppress trades below this % of NAV")
 
 
-@router.post("/orders")
+@router.post("/orders", dependencies=[Depends(limiter("pipeline", "rl_pipeline_per_hour", 3600))])
 async def orders(req: OrdersRequest) -> dict:
     """Rebalance ticket from the current book to the latest target weights."""
     if len(req.current) > 200:
         raise HTTPException(status_code=400, detail="at most 200 current positions")
+    for sym, q in req.current.items():
+        if len(sym) > 32 or not (0 <= q <= 1e12) or q != q:
+            raise HTTPException(status_code=400, detail=f"invalid holding {sym[:32]!r}: shares must be 0–1e12")
     try:
         return await asyncio.to_thread(
             orders_blocking, req.spec.model_dump(), req.nav, req.current, req.min_trade_pct
