@@ -195,7 +195,7 @@ def _benchmark_curve(df: pd.DataFrame, cfg: BacktestConfig, times: list[int]) ->
     shares = (cfg.initial_capital / (1 + cost_rate)) / float(df["Open"].iloc[0])
     closes = df["Close"].to_numpy(dtype=float)
     return [
-        {"time": t, "value": round(shares * float(c), 2)} for t, c in zip(times, closes)
+        {"time": t, "value": round(shares * float(c), 2)} for t, c in zip(times, closes, strict=False)
     ]
 
 

@@ -53,7 +53,7 @@ def test_demo_confirm_issues_demo_token_and_ledger_entry():
     assert body and body["demo"] is True and body["order"] == "demo_abc123"
     # wrong item → invalid; tampered → invalid
     assert listings.verify_entitlement(out["token"], "golden-cross") is None
-    assert listings.verify_entitlement(out["token"][:-1] + "0", "trend-sniper-pro") is None
+    assert listings.verify_entitlement(out["token"][:-1] + "x", "trend-sniper-pro") is None  # 'x' is never a hex digit
     assert listings.sales_count("trend-sniper-pro") == 0  # demo sales never count
 
 
@@ -269,7 +269,8 @@ def test_admin_endpoints_require_token_and_recheck_writes_health(monkeypatch):
     assert client.get("/api/admin/withdrawals?status=rejected", headers=hdr).json()["withdrawals"][0]["id"] == wd["id"]
 
     # recheck sweeps a listed factor with a synthetic panel and exposes health publicly
-    import numpy as np, pandas as pd
+    import numpy as np
+    import pandas as pd
     idx = pd.date_range("2024-01-01", periods=420, freq="B", tz="UTC"); rng = np.random.default_rng(1)
     close = pd.DataFrame(100 * np.exp(np.cumsum(rng.normal(0, 0.01, (420, 12)), axis=0)), index=idx, columns=[f"S{i}" for i in range(12)])
     panel = {"close": close, "open": close, "high": close * 1.01, "low": close * 0.99, "volume": close * 1000}

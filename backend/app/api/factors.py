@@ -19,9 +19,9 @@ from app.services.factor_mine import (
     check_factor_blocking,
     composite_backtest_blocking,
     marginal_contribution_blocking,
-    prune_library_blocking,
     mine_stream,
     portfolio_backtest_blocking,
+    prune_library_blocking,
 )
 from app.services.ratelimit import limiter
 
@@ -284,7 +284,7 @@ async def factor_analyze(req: AnalyzeRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 - surface the reason instead of a bare 500
+    except Exception as exc:
         log.exception("factor report failed")
         raise HTTPException(status_code=500, detail=f"report failed: {type(exc).__name__}: {exc}") from exc
 

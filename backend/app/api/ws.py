@@ -46,7 +46,7 @@ async def quotes_socket(websocket: WebSocket):
     receiver = asyncio.create_task(receive_loop())
     pusher = asyncio.create_task(push_loop())
     try:
-        done, pending = await asyncio.wait(
+        done, _pending = await asyncio.wait(
             {receiver, pusher}, return_when=asyncio.FIRST_EXCEPTION
         )
         for task in done:

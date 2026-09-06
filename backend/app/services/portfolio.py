@@ -656,7 +656,7 @@ def quantile_returns(scores: pd.DataFrame, returns: pd.DataFrame, ann: int, buck
         "buckets": out,
         "spread_ann_pct": round(float(spread.mean() * ann) * 100, 2) if len(spread) else None,
         "spread_sharpe": round(float(spread.mean() / sd * np.sqrt(ann)), 2) if sd > _EPS else None,
-        "monotonic": bool(all(b >= a for a, b in zip(vals, vals[1:]))) if len(vals) == buckets else None,
+        "monotonic": bool(all(b >= a for a, b in zip(vals, vals[1:], strict=False))) if len(vals) == buckets else None,
     }
 
 

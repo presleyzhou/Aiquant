@@ -1,7 +1,6 @@
+import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-
-import pandas as pd
 
 from app.api.kronos import signal_points
 from app.api.market import _clean_symbol

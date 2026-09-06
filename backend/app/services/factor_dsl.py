@@ -74,7 +74,7 @@ def _tokenize(text: str) -> list[tuple[str, str]]:
 class Node:
     kind: str  # "field" | "num" | "call" | "bin" | "neg"
     value: str | float = ""
-    args: tuple["Node | int", ...] = ()
+    args: tuple[Node | int, ...] = ()
 
     def depth(self) -> int:
         child = [a.depth() for a in self.args if isinstance(a, Node)]

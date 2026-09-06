@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -74,7 +75,7 @@ async def orders(req: OrdersRequest) -> dict:
     if len(req.current) > 200:
         raise HTTPException(status_code=400, detail="at most 200 current positions")
     for sym, q in req.current.items():
-        if len(sym) > 32 or not (0 <= q <= 1e12) or q != q:
+        if len(sym) > 32 or math.isnan(q) or not (0 <= q <= 1e12):
             raise HTTPException(status_code=400, detail=f"invalid holding {sym[:32]!r}: shares must be 0–1e12")
     try:
         return await asyncio.to_thread(

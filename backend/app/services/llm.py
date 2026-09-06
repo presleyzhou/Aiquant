@@ -15,7 +15,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from app.config import get_settings
 from app.services import backtest as bt
@@ -336,8 +337,8 @@ class QuantAnalyst:
         """Precompute the kronos_signal series (None for classical strategies)."""
         if cfg.strategy != "kronos_signal":
             return None
-        from app.api.kronos import signal_points
         from app.api.analytics import kronos_points_to_series
+        from app.api.kronos import signal_points
 
         points = await signal_points(symbol.upper(), period, cfg.kronos_horizon, df=df)
         return kronos_points_to_series(df, points)

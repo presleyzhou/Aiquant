@@ -4503,3 +4503,13 @@ tbody tr:hover td {
 .acct__form input { font: inherit; padding: 7px 9px; border-radius: 6px; border: 1px solid rgba(59,224,255,0.25); background: rgba(255,255,255,0.03); color: var(--fg); }
 .acct__form .dim { font-size: 11.5px; line-height: 1.45; margin: 0; }
 .acct__msg { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); }
+
+/* ---- lecture mode ---------------------------------------------------------- */
+.lt-launch { margin-left: 12px; vertical-align: middle; font-size: 11px; }
+.lt-card { position: fixed; right: 18px; bottom: 18px; z-index: 60; width: 340px; max-width: calc(100vw - 36px); padding: 14px 16px; border-radius: 12px; background: rgba(11,16,32,0.97); border: 1px solid rgba(59,224,255,0.4); box-shadow: 0 16px 40px rgba(0,0,0,0.55); }
+.lt-card__head { display: flex; align-items: center; justify-content: space-between; }
+.lt-card__step { font-size: 11px; color: var(--accent); font-family: var(--mono, ui-monospace, monospace); }
+.lt-card__title { margin: 8px 0 6px; font-size: 15px; }
+.lt-card__body { margin: 0 0 10px; font-size: 12.5px; line-height: 1.55; color: var(--fg); }
+.lt-card__foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.lt-highlight { outline: 2px solid var(--accent) !important; outline-offset: 4px; border-radius: 10px; box-shadow: 0 0 0 6px rgba(59,224,255,0.15), 0 0 24px rgba(59,224,255,0.35) !important; transition: box-shadow 0.3s; }

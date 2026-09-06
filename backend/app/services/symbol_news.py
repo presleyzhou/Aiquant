@@ -4,7 +4,7 @@ repeat visitors don't hammer Yahoo."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import yfinance as yf
 
@@ -44,7 +44,7 @@ def fetch_symbol_news(symbol: str, limit: int = 8) -> list[dict]:
         published = content.get("pubDate") or ""
         if not published and item.get("providerPublishTime"):
             published = datetime.fromtimestamp(
-                int(item["providerPublishTime"]), tz=timezone.utc
+                int(item["providerPublishTime"]), tz=UTC
             ).isoformat()
         articles.append(
             {"title": str(title)[:200], "url": url, "publisher": publisher, "published": published}

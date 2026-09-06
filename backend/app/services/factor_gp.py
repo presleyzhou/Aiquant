@@ -24,7 +24,8 @@ import logging
 import random
 import time
 import warnings
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pandas as pd
 
@@ -111,7 +112,7 @@ def _subtrees(node: Node, path: tuple[int, ...] = ()) -> list[tuple[tuple[int, .
     out = [(path, node)]
     for i, a in enumerate(node.args):
         if isinstance(a, Node):
-            out.extend(_subtrees(a, path + (i,)))
+            out.extend(_subtrees(a, (*path, i)))
     return out
 
 
@@ -138,7 +139,7 @@ def mutate(rng: random.Random, node: Node) -> Node:
     roll = rng.random()
     if roll < 0.4:
         return _replace(node, path, random_tree(rng, 2))
-    if roll < 0.65 and target.kind == "call" and str(target.value) in TS_UNARY + ["ts_corr"]:
+    if roll < 0.65 and target.kind == "call" and str(target.value) in [*TS_UNARY, "ts_corr"]:
         args = list(target.args)
         args[-1] = rng.choice(WINDOWS)
         return _replace(node, path, Node("call", target.value, tuple(args)))
@@ -301,7 +302,7 @@ def evolve_blocking(
             break
 
         eligible = [s for s in scored if s[3] is not None and has_transform(s[1])] or scored
-        best_fit, best_tree, best_text, best_m = eligible[0]
+        best_fit, _best_tree, best_text, best_m = eligible[0]
         valid = [s for s in scored if s[3] is not None]
         mean_fit = sum(s[0] for s in valid) / len(valid) if valid else 0.0
 
@@ -374,9 +375,9 @@ def evolve_blocking(
         next_pop: list[Node] = [s[1] for s in scored[:elite_n]]
         pool = [s for s in scored if s[3] is not None] or scored
 
-        def tournament() -> Node:
-            picks = [rng.choice(pool) for _ in range(3)]
-            return max(picks, key=lambda s: s[0])[1]
+        def tournament(pool_=pool) -> Node:  # bound now: the closure must not see a later generation's pool
+            picks = [rng.choice(pool_) for _ in range(3)]
+            return max(picks, key=lambda cand: cand[0])[1]
 
         guard = 0
         while len(next_pop) < population_size and guard < population_size * 30:
@@ -410,7 +411,7 @@ def evolve_blocking(
                 if marginal_delta < MIN_MARGINAL_SHARPE:
                     accepted = False
                     reasons = [*reasons, f"no portfolio increment: blend Sharpe {mg['without']['sharpe']:.2f} → {mg['with']['sharpe']:.2f}"]
-            except Exception as exc:  # noqa: BLE001 - advisory gate
+            except Exception as exc:
                 log.warning("gp marginal check failed: %s", exc)
         if accepted:
             accepted_so_far.append({"expr": h["expr"], "is_ic": m["is_ic"]})

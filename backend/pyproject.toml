@@ -42,3 +42,14 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF", "DTZ", "S110", "PLR0124"]
+# Consciously accepted: blind excepts are logged and guard data-provider
+# edges; naive date.today() is what the product means; the remaining RUF
+# nits are style-only.
+ignore = ["E501", "E702", "BLE001", "DTZ011", "RUF046", "RUF007", "RUF012", "UP031", "B008", "RUF001", "RUF002", "RUF003"]

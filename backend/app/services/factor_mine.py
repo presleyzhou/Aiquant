@@ -26,14 +26,15 @@ to CONFIRM the in-sample sign, and factors that fail are shown failing.
 from __future__ import annotations
 
 import asyncio
-import math
 import logging
+import math
 import time
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+import yfinance as yf  # noqa: F401 - re-exported for tests that patch factor_mine.yf
 
 from app.config import get_settings
 from app.services import disk_cache, factor_dsl
@@ -596,7 +597,7 @@ async def mine_stream(
                         [{"expression": z["expression"], "invert": z["is_ic"] < 0, "horizon": horizon} for z in zoo[-7:]],
                         market, 5, horizon,
                     )
-                except Exception as exc:  # noqa: BLE001 - the gate is advisory if the blend cannot be computed
+                except Exception as exc:
                     log.warning("marginal check failed for %s: %s", expr, exc)
                 if marginal and marginal["sharpe_delta"] < MIN_MARGINAL_SHARPE:
                     accepted = False
@@ -822,7 +823,7 @@ def composite_backtest_blocking(
         # equal weight on days where no component has a positive trailing IC.
         idx = ranked_list[0].index
         w_frames = []
-        for ic, h in zip(ic_list, horizons):
+        for ic, h in zip(ic_list, horizons, strict=False):
             w = ic.shift(h).rolling(ROLLING_IC_WINDOW, min_periods=ROLLING_IC_WINDOW // 2).mean()
             w_frames.append(w.clip(lower=0).reindex(idx).ffill())
         w_df = pd.concat(w_frames, axis=1)
@@ -839,8 +840,8 @@ def composite_backtest_blocking(
             weights = [r / total if total > 1e-9 else 1 / n for r in raw]
         else:
             weights = [1 / n] * n
-        combined = sum(r * w for r, w in zip(ranked_list, weights))
-    for c, w in zip(components, weights):
+        combined = sum(r * w for r, w in zip(ranked_list, weights, strict=False))
+    for c, w in zip(components, weights, strict=False):
         c["weight"] = round(w, 3)
 
     result = _portfolio_from_values(combined, panel, market, top_n, rebalance)
@@ -1164,7 +1165,7 @@ def prune_library_blocking(factors: list[dict], market: str, top_n: int = 5, reb
         try:
             without = sharpe_of(rest)
             loo = round(full - without, 3)  # > 0: removing it hurts → it adds value
-        except Exception:  # noqa: BLE001
+        except Exception:
             without, loo = None, None
         # decay: recent 60-day IC in the accepted direction vs full-sample IC
         try:
@@ -1176,7 +1177,7 @@ def prune_library_blocking(factors: list[dict], market: str, top_n: int = 5, reb
             full_ic = float(ic.mean()) * sign
             recent_ic = float(ic.iloc[-60:].mean()) * sign
             decayed = recent_ic < 0.005 and full_ic > 0
-        except Exception:  # noqa: BLE001
+        except Exception:
             full_ic, recent_ic, decayed = None, None, False
         if loo is not None and loo < -0.05:
             verdict, reason = "retire", "removing it raises the blend's Sharpe"

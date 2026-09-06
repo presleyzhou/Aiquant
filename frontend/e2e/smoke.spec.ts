@@ -377,6 +377,21 @@ async function mockApi(page: Page) {
     if (path === "/api/wallet/purchase")
       return json({ order_id: "wal_1", provider: "wallet", status: "confirmed", demo: true, item_id: "trend-sniper-pro", token: "tok.sig",
         wallet: { balance_usd: 0, demo_usd: 20.01, entries: [] } });
+    if (path === "/api/account/config") return json({ enabled: false, provider: null, persistence: "file", sync_keys: [] });
+    if (path === "/api/factors/health")
+      return json({ health: { "rank(delta(close, 5))": { market: "us", expression: "rank(delta(close, 5))", horizon: 10, source: "account", checked_at: 1_700_000_000, as_of: "2024-06-01",
+        is_ic: 0.02, oos_ic: 0.015, recent_ic: 0.001, grades: { predictive: "B", stability: "B", robustness: "A", tradability: "C", significance: "B" }, best_horizon: 20, spread_after_cost_ann_pct: -1.2, decayed: true } }, meta: { last_run: 1_700_000_000, done: 1, failed: 0 } });
+    if (path === "/api/factors/prune")
+      return json({ market: "us", blend_sharpe: 0.9, n: 2, members: [
+        { expression: "rank(delta(close, 5))", loo_sharpe_delta: 0.3, sharpe_without: 0.6, full_ic: 0.02, recent_ic: 0.01, decayed: false, verdict: "keep", reason: "adds value" },
+        { expression: "rank(ts_std(close, 10))", loo_sharpe_delta: -0.2, sharpe_without: 1.1, full_ic: 0.01, recent_ic: -0.001, decayed: true, verdict: "retire", reason: "removing it raises Sharpe" } ] });
+    if (path === "/api/admin/overview") {
+      if (route.request().headers()["x-admin-token"] !== "e2e-token") return route.fulfill({ status: 403, json: { detail: "admin token required" } });
+      return json({ persistence: "file", counts: { listings: 2, active_listings: 1, orders: 5, real_orders: 1, wallets: 3, accounts_synced: 1, withdrawals_pending: 1 }, gross_usd: 12.5, wallet_liabilities_usd: 30, health_runs: { last_run: 1_700_000_000, done: 4, failed: 0 } });
+    }
+    if (path === "/api/admin/withdrawals") return json({ withdrawals: [{ id: "wd_1", account: "abcdef123456", amount: 4, method: "crypto", address: "0xabc", status: "pending", at: 1_700_000_000 }] });
+    if (path === "/api/admin/orders") return json({ orders: [] });
+    if (path === "/api/admin/listings") return json({ listings: [] });
     // anything unmocked answers empty-but-valid, never hangs
     return json({});
   });
@@ -942,4 +957,43 @@ test("pipeline: a ?pl= link pre-fills the form (hrp, custom factor) without runn
   await page.goto("/?pl=not-base64url-json");
   await expect(page.locator(".nav-tab.is-on")).toHaveText("美股");
   await expect(page.getByTestId("pl-share-loaded")).toHaveCount(0);
+});
+
+test("factor library: server health badge, prune check strikes, lecture mode", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("aiquant.factors.zoo", JSON.stringify([
+      { expression: "rank(delta(close, 5))", market: "us", horizon: 10, is_ic: 0.02, is_icir: 0.2, oos_ic: 0.015, savedAt: "2024-01-01" },
+      { expression: "rank(ts_std(close, 10))", market: "us", horizon: 10, is_ic: 0.01, is_icir: 0.1, oos_ic: 0.005, savedAt: "2024-01-02", prune_strikes: 1, prune_verdict: "watch" },
+    ]));
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "因子挖掘" }).click();
+  // daily server recheck badge (mocked) on the first factor, flagged decayed
+  await expect(page.getByText(/服务器体检 .* · BBACB · 衰减/).first()).toBeVisible();
+  // prune: second factor already had one strike → retire after this report
+  await page.getByRole("button", { name: "瘦身检查" }).click();
+  await expect(page.getByText(/建议下线（连续两次）/)).toBeVisible();
+  await expect(page.getByText(/已检查 2 个因子/)).toBeVisible();
+  // lecture mode walks 8 steps and highlights anchors
+  await page.getByRole("button", { name: /课堂演示/ }).click();
+  await expect(page.getByRole("dialog", { name: "课堂演示模式" })).toBeVisible();
+  await expect(page.locator("[data-tour=engine].lt-highlight")).toHaveCount(1);
+  for (let i = 0; i < 7; i++) await page.getByRole("button", { name: "下一步" }).click();
+  await expect(page.getByText(/第 8 \/ 8 步/)).toBeVisible();
+  await page.getByRole("button", { name: "完成" }).click();
+  await expect(page.getByRole("dialog", { name: "课堂演示模式" })).toHaveCount(0);
+});
+
+test("admin console: token gate, overview stats and pending withdrawal", async ({ page }) => {
+  await page.goto("/?admin=1");
+  await expect(page.getByRole("heading", { name: "站长后台" })).toBeVisible();
+  await page.locator("input[type=password]").fill("wrong");
+  await page.getByRole("button", { name: "进入" }).click();
+  await expect(page.getByText(/admin token required/)).toBeVisible();
+  await page.locator("input[type=password]").fill("e2e-token");
+  await page.getByRole("button", { name: "进入" }).click();
+  await expect(page.getByText("上架（有效 / 全部）")).toBeVisible();
+  await expect(page.getByText("1 / 2")).toBeVisible();
+  await expect(page.getByText("$30.00")).toBeVisible();
+  await expect(page.getByRole("button", { name: "标记已付" })).toBeVisible();
 });

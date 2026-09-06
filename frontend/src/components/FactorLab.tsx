@@ -24,6 +24,7 @@ import { EquityChart } from "./EquityChart";
 import { EvolveLab } from "./EvolveLab";
 import { ExplainButton } from "./ExplainButton";
 import { FactorReportButton } from "./FactorReport";
+import { LectureTour } from "./LectureTour";
 import { ShareButton } from "./ShareButton";
 
 /** One evaluated candidate (or a failed parse). */
@@ -79,6 +80,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   const [weighting, setWeighting] = useState("ic");
   const [marginal, setMarginal] = useState<Record<string, MarginalResult | "pending" | "failed">>({});
   const [pruning, setPruning] = useState(false);
+  const [lecture, setLecture] = useState(false);
   const [serverHealth, setServerHealth] = useState<Record<string, FactorHealth>>({});
 
   // Server-side recheck results (daily GitHub Action) for the library.
@@ -407,15 +409,19 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
     <div className="lab" style={hidden ? { display: "none" } : undefined}>
       <div className="lab__inner">
         <section className="lab-hero">
-          <h1 className="lab-hero__title">{t("fl.title")}</h1>
+          <h1 className="lab-hero__title">
+            {t("fl.title")}
+            <button className="btn btn--mini lt-launch" onClick={() => setLecture(true)} title={t("lt.launchTitle")}>{t("lt.launch")}</button>
+          </h1>
           <p className="lab-hero__sub">
             {t("fl.sub1")}
             <b>{t("fl.sub.b")}</b>
             {t("fl.sub2")}
           </p>
         </section>
+        {lecture && <LectureTour onClose={() => setLecture(false)} />}
 
-        <div className="engine-toggle" role="tablist">
+        <div className="engine-toggle" role="tablist" data-tour="engine">
           <button
             role="tab"
             className={`chip${engine === "llm" ? " is-on" : ""}`}
@@ -437,13 +443,11 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
 
         {engine === "gp" ? (
           <EvolveLab aiEnabled={aiEnabled} />
-        ) : !aiEnabled ? (
-          <div className="notice" style={{ maxWidth: 560 }}>
-            {t("lab.aiOff")}
-          </div>
         ) : (
           <>
-            <div className="lab-form panel">
+            {!aiEnabled && <div className="notice" style={{ maxWidth: 560 }}>{t("lab.aiOff")}</div>}
+            {aiEnabled && (
+            <div className="lab-form panel" data-tour="form">
               <div className="control-grid" style={{ borderBottom: "none" }}>
                 <label className="field">
                   <span className="field__label">{t("fl.market")}</span>
@@ -533,10 +537,12 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                 {mode === "loose" && <span className="dn"> {t("fl.mode.warn")}</span>}
               </div>
             </div>
+            )}
 
             <div className="lab-grid">
               {/* --------------------------------------------- loop log */}
-              <div className="panel lab-panel">
+              {aiEnabled && (
+              <div className="panel lab-panel" data-tour="loop">
                 <div className="panel__head">
                   <span className="panel__title">{t("fl.loop")}</span>
                   <span className="panel__meta">
@@ -607,6 +613,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                   {error && <div className="err">{error}</div>}
                 </div>
               </div>
+              )}
 
               {/* ---------------------------------------------- factor zoo */}
               <div className="lab-side">
@@ -658,7 +665,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
 
                 <div className="panel">
                   <div className="panel__head">
-                    <span className="panel__title">{t("fl.mine.title")}</span>
+                    <span className="panel__title" data-tour="library">{t("fl.mine.title")}</span>
                     <span className="panel__meta">
                       {saved.length > 0 && (
                         <>
@@ -731,6 +738,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                               )}
                               {tr === "pending" && <div className="fl-badge dim">⇄ …</div>}
                               <ExplainButton expression={f.expression} market={f.market} enabled={aiEnabled} />
+                              <span data-tour="report" style={{ display: "contents" }}>
                               <FactorReportButton
                                 expression={f.expression}
                                 market={f.market}
@@ -739,6 +747,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                                   if (h !== (f.best_horizon ?? f.horizon)) setSaved(updateFactor(f.market, f.expression, { best_horizon: h }));
                                 }}
                               />
+                              </span>
                               {serverHealth[key(f)] && (() => {
                                 const sh = serverHealth[key(f)];
                                 const g = sh.grades;
@@ -770,7 +779,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                                 );
                               })()}
                             </div>
-                            <div className="lab-saved__actions">
+                            <div className="lab-saved__actions" data-tour="deploy">
                               <button
                                 className="btn btn--mini"
                                 disabled={btFor === f.expression}
@@ -821,7 +830,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                     </>
                   )}
                   {saved.length >= 2 && (
-                    <div className="fl-composite-bar">
+                    <div className="fl-composite-bar" data-tour="composite">
                       <select
                         className="select"
                         value={weighting}

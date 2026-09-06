@@ -78,7 +78,7 @@ class _FakePredictor:
 
     def predict_batch(self, df_list, x_timestamp_list, y_timestamp_list, pred_len, **kwargs):
         return [
-            self._one(df, y, pred_len) for df, y in zip(df_list, y_timestamp_list)
+            self._one(df, y, pred_len) for df, y in zip(df_list, y_timestamp_list, strict=False)
         ]
 
 
@@ -101,7 +101,7 @@ def test_forecast_us_uses_business_days(fake_service):
 def test_forecast_crypto_uses_calendar_days(fake_service):
     out = fake_service.forecast_blocking(_history(), "BTC-USD", "crypto", 14)
     times = [p["time"] for p in out["forecast"]]
-    deltas = {b - a for a, b in zip(times, times[1:])}
+    deltas = {b - a for a, b in zip(times, times[1:], strict=False)}
     assert deltas == {86400}  # strictly consecutive days, weekends included
     assert out["preset"]["calendar"] == "days"
 

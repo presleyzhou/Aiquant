@@ -220,7 +220,7 @@ def _confirm_topup(order_id: str, provider: str, account: str, amount: str | Non
     try:
         listings.record_order({"order_id": order_id, "provider": provider, "item_id": None, "kind": "topup",
                                "account": account, "amount": amount, "currency": "USD", "status": "confirmed", "demo": demo})
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("order ledger write failed: %s", exc)
     return {"order_id": order_id, "provider": provider, "status": "confirmed", "demo": demo, "kind": "topup",
             "amount": amount, "wallet": w}
@@ -331,7 +331,7 @@ def purchase_with_wallet(item_id: str, account_hash: str) -> dict:
     if row is not None and not demo:
         try:
             wallet.seller_credit_for_sale(row["seller"], amount, ref=order_id, item_name=item["name"])
-        except Exception as exc:  # noqa: BLE001 - never fail the buyer for a seller-ledger hiccup
+        except Exception as exc:
             log.warning("seller credit failed: %s", exc)
     return {**out, "wallet": w}
 
