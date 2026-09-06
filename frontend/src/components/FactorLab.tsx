@@ -44,6 +44,7 @@ interface FactorRow {
   turnover?: number;
   spread_after_cost_pct?: number;
   t_stat?: number;
+  marginal_sharpe_delta?: number | null;
 }
 
 interface LoopItem {
@@ -524,6 +525,9 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                               {row.turnover !== undefined && <Chip label={t("fl.m.turnover")} v={row.turnover} />}
                               {row.spread_after_cost_pct !== undefined && (
                                 <Chip label={t("fl.m.cost")} v={row.spread_after_cost_pct} signed />
+                              )}
+                              {row.marginal_sharpe_delta !== undefined && row.marginal_sharpe_delta !== null && (
+                                <Chip label={t("fl.m.marginal")} v={row.marginal_sharpe_delta} signed />
                               )}
                               <span className={`fl-verdict ${row.accepted ? "up" : "dn"}`}>
                                 {row.accepted ? t("fl.accepted") : t("fl.rejected")}

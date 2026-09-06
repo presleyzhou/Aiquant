@@ -73,6 +73,7 @@ MAX_COMPLEXITY = 24         # AST nodes — AlphaAgent-style regularizer
 BOOK_TOP_N = 5              # tradability proxy: Top-5 book at the rebalance horizon
 COST_BPS = 10.0             # one-way cost assumption for the tradability gate
 T_BAR_BASE, T_BAR_CAP = 2.0, 3.0  # trials-aware significance bar (Harvey–Liu–Zhu spirit)
+MIN_MARGINAL_SHARPE = -0.05  # a new factor may not drag the blend's Sharpe below this delta
 MIN_COVERAGE = 0.55         # fraction of days with a computable cross-section
 
 # Acceptance tiers: (min |in-sample IC|, min |in-sample ICIR|). The holdout
@@ -348,7 +349,16 @@ def _round_feedback(results: list[dict]) -> str:
         unstable = sum(abs(r.get("is_icir", 0)) < 0.15 for r in evaluated)
         redundant = sum(r["max_zoo_corr"] > MAX_ZOO_CORR for r in evaluated)
         costly = sum((r.get("spread_after_cost_pct") or 0) < 0 for r in evaluated)
+        no_increment = sum(
+            1 for r in evaluated if any(str(x).startswith("no portfolio increment") for x in (r.get("reasons") or []))
+        )
         directives = []
+        if no_increment:
+            directives.append(
+                f"{no_increment} candidate(s) passed every single-factor test but did not improve the blend — "
+                "they repeat information the accepted factors already carry; look for orthogonal sources "
+                "(different data field, different time scale, or an interaction term)"
+            )
         if costly >= len(evaluated) / 2:
             directives.append(
                 "most candidates do not survive transaction costs — lower turnover: smooth the "
@@ -588,9 +598,28 @@ async def mine_stream(
 
             trials += 1
             accepted, reasons = _verdict(metrics, mode, trials)
+            marginal = None
+            if accepted and zoo:
+                # Portfolio-level increment: does the blend get better with it?
+                try:
+                    marginal = await asyncio.to_thread(
+                        marginal_contribution_blocking,
+                        {"expression": expr, "invert": metrics["is_ic"] < 0, "horizon": horizon},
+                        [{"expression": z["expression"], "invert": z["is_ic"] < 0, "horizon": horizon} for z in zoo[-7:]],
+                        market, 5, horizon,
+                    )
+                except Exception as exc:  # noqa: BLE001 - the gate is advisory if the blend cannot be computed
+                    log.warning("marginal check failed for %s: %s", expr, exc)
+                if marginal and marginal["sharpe_delta"] < MIN_MARGINAL_SHARPE:
+                    accepted = False
+                    reasons.append(
+                        f"no portfolio increment: blend Sharpe {marginal['without']['sharpe']:.2f} → "
+                        f"{marginal['with']['sharpe']:.2f} with it (corr with blend {marginal['corr_with_blend']})"
+                    )
             values = metrics.pop("_values")
             row = {**metrics, "hypothesis": cand["hypothesis"], "accepted": accepted,
-                   "reasons": reasons, "round": round_no}
+                   "reasons": reasons, "round": round_no,
+                   "marginal_sharpe_delta": marginal["sharpe_delta"] if marginal else None}
             results.append(row)
             if accepted:
                 zoo.append(row)

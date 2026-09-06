@@ -651,3 +651,39 @@ def test_strict_mode_requires_robustness_and_marginal_endpoint(monkeypatch):
     assert body["verdict"] in {"adds", "neutral", "hurts"}
     assert abs(body["sharpe_delta"] - (body["with"]["sharpe"] - body["without"]["sharpe"])) < 1e-6
     assert client.post("/api/factors/marginal", json={"candidate": {"expression": "rank(close)"}, "others": [], "market": "us"}).status_code == 422
+
+
+async def test_mining_loop_applies_portfolio_increment_gate(monkeypatch):
+    from app.services import factor_mine
+
+    panel = _panel(n_days=500, n_syms=12)
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    monkeypatch.setattr(type(factor_mine.analyst), "enabled", property(lambda self: True))
+
+    async def fake_round(market, horizon, per_round, history, round_no, rounds):
+        return [
+            {"expression": "rank(delta(close, 5))", "hypothesis": "momentum"},
+            {"expression": "rank(delta(close, 6))", "hypothesis": "near-duplicate momentum"},
+        ]
+
+    monkeypatch.setattr(factor_mine, "_generate_round", fake_round)
+    # every single-factor test passes, so force the outcome through the gate itself
+    monkeypatch.setattr(factor_mine, "_verdict", lambda m, mode="standard", trials=0: (True, []))
+
+    def fake_marginal(candidate, others, market, top_n=5, rebalance=10):
+        return {"sharpe_delta": -0.4, "without": {"sharpe": 1.0}, "with": {"sharpe": 0.6}, "corr_with_blend": 0.97}
+
+    monkeypatch.setattr(factor_mine, "marginal_contribution_blocking", fake_marginal)
+
+    events = [e async for e in factor_mine.mine_stream("us", 10, 1, 2, "standard", {})]
+    evals = [e for e in events if e["type"] == "eval" and not e.get("error")]
+    assert len(evals) == 2
+    first, second = evals
+    assert first["accepted"] is True and first["marginal_sharpe_delta"] is None  # zoo was empty → no gate
+    assert second["accepted"] is False and second["marginal_sharpe_delta"] == -0.4
+    assert any(r.startswith("no portfolio increment") for r in second["reasons"])
+    done = next(e for e in events if e["type"] == "done")
+    assert len(done["zoo"]) == 1
+    # the feedback the next round would see names the failure mode
+    feedback = factor_mine._round_feedback(evals)
+    assert "did not improve the blend" in feedback
