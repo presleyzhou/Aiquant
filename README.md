@@ -99,6 +99,9 @@ vercel --prod   # 生产环境
 | `CLAUDE_CHAT_MAX_TOKENS` | `8000` | AI 分析对话的单次输出上限（策略工坊仍用 `CLAUDE_MAX_TOKENS`） |
 | `RL_CHAT_PER_HOUR` / `RL_STRATEGY_PER_DAY` / `RL_MINING_PER_DAY` / `RL_EVOLVE_PER_DAY` / `RL_MEMO_PER_DAY` | 20 / 5 / 5 / 20 / 20 | 每 IP 限流；`RL_GLOBAL_AI_PER_DAY`（500）为实例级每日 AI 调用熔断 |
 | `ALPHA_VANTAGE_KEY` | 空 | 仅供内嵌的 Alpha Vantage provider 使用；yfinance 无需 key |
+| `PANEL_PROVIDER_CRYPTO` | `binance` | 因子挖掘 / 流水线的数字货币日线面板：`binance` = Binance 公开 K 线为主源，Binance 未上币由 CoinGecko 补齐，Yahoo 兜底；`yahoo` 强制 Yahoo |
+| `PANEL_PROVIDER_US` | `auto` | 美股日线面板：`auto` = 装了 AkShare（新浪财经前复权数据）就用 AkShare，否则 Yahoo；`akshare` / `yahoo` 强制。AkShare 约 100MB 依赖，不进 Vercel 包，本地 / Docker 用 `uv pip install -e '.[akshare]'` |
+| `COINGECKO_FILL` / `COINGECKO_API_KEY` | `true` / 空 | 是否用 CoinGecko 补齐 Binance 未上的币；demo/pro key 可提高限额与历史长度（免费接口约 365 天） |
 | `CORS_ORIGINS` | localhost | 仅当前后端不同源时才需要 |
 | `KRONOS_ENABLED` | `auto` | Kronos K线预测；`auto` = 装了 torch 就启用，`0` 强制关闭 |
 | `KRONOS_MODEL` | `NeoQuasar/Kronos-small` | 也可换 `NeoQuasar/Kronos-mini`（更快）或 `-base`（更准） |
@@ -197,7 +200,8 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
 
 1. **标的池与数据**：默认复用因子挖掘的 60 只美股 / 24 个币对日线面板（磁盘缓存 + 数据源回退），每只标的带行业 / 板块标签；
    也可**自定义标的池**（8–40 只，可一键导入自选列表）并选 3 年或 5 年历史，自定义面板服务端缓存 6 小时；
-   附**数据健康表**（每只标的覆盖率、缺口、起止日期、是否失效）；
+   附**数据健康表**（每只标的覆盖率、缺口、起止日期、是否失效）；数据源可切换：数字货币默认 Binance 公开 K 线 + CoinGecko 补齐，
+   美股装了 AkShare 时走新浪前复权数据，Yahoo 始终作为兜底（`backend/app/services/panel_providers.py`）；
 2. **Alpha 信号**：从因子库勾选 1–8 个因子（或内置的反转 / 动量 / 低波 / 量能起步因子，或手输 DSL），逐因子截面排名后合成。
    默认**滚动 IC 加权**：t 日的权重只用 t 日之前已经"揭晓"的 IC（扩展窗均值、滞后一个预测期），整段回测对合成权重都是样本外；
    期间 IC 与零无法区分（|IC| < 0.005）的因子会被动态关闭而非翻转（AlphaForge 式动态选择）；也可选静态 IC（前 80%）或等权。给出复合信号的 **IC 衰减曲线**（1–20 日，Grinold-Kahn 信息期限）和 **分位数收益**（Qlib 式五分组、

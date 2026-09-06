@@ -39,6 +39,16 @@ class Settings(BaseSettings):
 
     # --- data sources (optional; yfinance needs no key) ---
     alpha_vantage_key: str | None = None
+    # Daily-panel providers for factor mining / the pipeline.
+    #   us:     "auto" = AkShare (Sina, forward-adjusted) when the library is
+    #           installed, else Yahoo; "akshare" | "yahoo" force one.
+    #   crypto: "binance" (public klines, CoinGecko fills unlisted coins,
+    #           Yahoo as last resort) | "yahoo".
+    panel_provider_us: str = "auto"
+    panel_provider_crypto: str = "binance"
+    coingecko_fill: bool = True
+    # Optional CoinGecko demo/pro key → higher rate limits and longer history.
+    coingecko_api_key: str | None = None
 
     # --- marketplace payments (optional) ---
     # Two independent rails, each real only when its key is present:

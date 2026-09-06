@@ -661,6 +661,7 @@ export interface PipelineResult {
     requested?: number | null;
     /** V5: requested tickers Yahoo could not deliver or that failed the sanity filter. */
     dropped?: string[];
+    provider?: string;
     /** V6: per-symbol coverage, worst first; absent on a pre-V6 server. */
     health?: PipelineHealthRow[];
   };

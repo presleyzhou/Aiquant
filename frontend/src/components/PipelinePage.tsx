@@ -964,6 +964,11 @@ export function PipelinePage({ hidden }: Props) {
                           <span className="chip">{t("pl.uni.builtinSummary", { h: result.universe.history })}</span>
                         )
                       )}
+                      {result.universe.provider && (
+                        <span className="chip dim" title={t("pl.uni.providerHint")}>
+                          {t("pl.uni.provider", { p: result.universe.provider })}
+                        </span>
+                      )}
                       {result.universe.dropped && result.universe.dropped.length > 0 && (
                         <span
                           className="pl-badge pl-badge--warn pl-dropped"
