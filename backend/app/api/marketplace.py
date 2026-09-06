@@ -1,9 +1,9 @@
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app.services import kvstore, listings, marketplace
+from app.services import auth, kvstore, listings, marketplace
 from app.services.ratelimit import limiter
 
 router = APIRouter(prefix="/api/marketplace", tags=["marketplace"])
@@ -51,7 +51,7 @@ async def get_item(item_id: str, token: str | None = None):
 
 
 class ListingCreate(BaseModel):
-    seller_secret: str = Field(min_length=16, max_length=128)
+    seller_secret: str | None = Field(default=None, min_length=16, max_length=128)
     type: str = Field(pattern="^(strategy|factor)$")
     name: str = Field(min_length=2, max_length=60)
     tagline: str = Field(default="", max_length=120)
@@ -65,9 +65,10 @@ class ListingCreate(BaseModel):
 
 
 @router.post("/listings", dependencies=[Depends(limiter("listings", "rl_listings_per_day", 86_400))])
-async def create_listing(req: ListingCreate):
+async def create_listing(req: ListingCreate, request: Request):
+    seller, _ = await auth.resolve_account(request, req.seller_secret)
     try:
-        row = await asyncio.to_thread(listings.create, req.model_dump())
+        row = await asyncio.to_thread(listings.create, req.model_dump(), seller)
     except listings.ListingError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -76,22 +77,24 @@ async def create_listing(req: ListingCreate):
 
 
 class SellerAuth(BaseModel):
-    seller_secret: str = Field(min_length=16, max_length=128)
+    seller_secret: str | None = Field(default=None, min_length=16, max_length=128)
 
 
 @router.post("/listings/mine")
-async def my_listings(req: SellerAuth):
+async def my_listings(req: SellerAuth, request: Request):
+    seller, _ = await auth.resolve_account(request, req.seller_secret)
     try:
-        rows = await asyncio.to_thread(listings.seller_summary, req.seller_secret)
+        rows = await asyncio.to_thread(listings.seller_summary, seller)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"listing store unavailable: {exc}") from exc
     return {"listings": rows, "persistence": kvstore.mode()}
 
 
 @router.post("/listings/{listing_id}/remove")
-async def remove_listing(listing_id: str, req: SellerAuth):
+async def remove_listing(listing_id: str, req: SellerAuth, request: Request):
+    seller, _ = await auth.resolve_account(request, req.seller_secret)
     try:
-        ok = await asyncio.to_thread(listings.remove, listing_id, req.seller_secret)
+        ok = await asyncio.to_thread(listings.remove, listing_id, seller)
     except listings.ListingError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     if not ok:

@@ -68,6 +68,17 @@ class Settings(BaseSettings):
     rl_listings_per_day: int = 5
     rl_checkout_per_hour: int = 30
 
+    # --- accounts (optional) ---
+    # Supabase Auth: the frontend signs users in (magic link); the backend
+    # verifies the bearer token against the project's /auth/v1/user endpoint
+    # and derives a stable account id from the user id. Unset → identities
+    # stay browser-held secrets (the current behaviour).
+    supabase_url: str | None = None
+    supabase_anon_key: str | None = None
+    # Operator token for /api/admin/* (withdrawals, ledger, rechecks).
+    admin_token: str | None = None
+    rl_account_per_hour: int = 120
+
     # --- market data ---
     quote_cache_seconds: int = 15
     ws_poll_seconds: float = 5.0

@@ -902,6 +902,13 @@ export type AIEvent =
   | { type: "error"; message: string }
   | { type: "done"; stop_reason: string };
 
+import { authHeaders } from "./auth";
+
+/** fetch() with the account bearer token attached — for wallet, listings, account. */
+function authFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...authHeaders() } });
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -1072,56 +1079,56 @@ export const api = {
     }).then(json<{ account_id: string; url: string }>),
 
   createListing: (body: ListingCreate) =>
-    fetch("/api/marketplace/listings", {
+    authFetch("/api/marketplace/listings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(json<{ item: MarketItem; persistence: string }>),
 
   myListings: (seller_secret: string) =>
-    fetch("/api/marketplace/listings/mine", {
+    authFetch("/api/marketplace/listings/mine", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ seller_secret }),
     }).then(json<{ listings: MyListing[]; persistence: string }>),
 
   removeListing: (id: string, seller_secret: string) =>
-    fetch(`/api/marketplace/listings/${encodeURIComponent(id)}/remove`, {
+    authFetch(`/api/marketplace/listings/${encodeURIComponent(id)}/remove`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ seller_secret }),
     }).then(json<{ removed: string }>),
 
   wallet: (account_secret: string) =>
-    fetch("/api/wallet", {
+    authFetch("/api/wallet", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ account_secret }),
     }).then(json<Wallet>),
 
   walletTopUp: (account_secret: string, amount_usd: number, method: PayMethod, return_url: string) =>
-    fetch("/api/wallet/topup", {
+    authFetch("/api/wallet/topup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ account_secret, amount_usd, method, return_url }),
     }).then(json<TopUpCheckout>),
 
   walletTopUpDemoConfirm: (order_id: string, account_secret: string, amount_usd: number) =>
-    fetch(`/api/wallet/topup/demo/${encodeURIComponent(order_id)}/confirm`, {
+    authFetch(`/api/wallet/topup/demo/${encodeURIComponent(order_id)}/confirm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ account_secret, amount_usd }),
     }).then(json<OrderStatus & { wallet: Wallet }>),
 
   walletPurchase: (account_secret: string, item_id: string) =>
-    fetch("/api/wallet/purchase", {
+    authFetch("/api/wallet/purchase", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ account_secret, item_id }),
     }).then(json<OrderStatus & { wallet: Wallet }>),
 
   walletWithdraw: (account_secret: string, amount_usd: number, method: "crypto" | "bank", address: string) =>
-    fetch("/api/wallet/withdraw", {
+    authFetch("/api/wallet/withdraw", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ account_secret, amount_usd, method, address }),
@@ -1151,6 +1158,18 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(json<PipelineMemo>),
+
+  accountConfig: () => fetch("/api/account/config").then(json<{ enabled: boolean; provider: string | null; persistence: string; sync_keys: string[] }>),
+  accountMe: () => authFetch("/api/account/me").then(json<{ signed_in: boolean; email?: string; account?: string; state_updated_at?: number | null }>),
+  accountState: () => authFetch("/api/account/state").then(json<{ data: Record<string, unknown>; updated_at: number | null }>),
+  accountPutState: (data: Record<string, unknown>) =>
+    authFetch("/api/account/state", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data }) }).then(
+      json<{ saved: number; updated_at: number; bytes: number }>,
+    ),
+  accountClaim: (account_secret: string) =>
+    authFetch("/api/account/claim", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account_secret }) }).then(
+      json<{ wallet: Wallet; listings_moved: number }>,
+    ),
 
   listingPayload: (id: string, token: string) =>
     fetch(`/api/marketplace/listings/${encodeURIComponent(id)}/payload?token=${encodeURIComponent(token)}`).then(

@@ -129,3 +129,21 @@ def seller_credit_for_sale(seller_hash: str, gross: float, *, ref: str, item_nam
     net = round(gross * (1 - fee), 2)
     if net > 0:
         credit(seller_hash, net, demo=False, ref=ref, kind="sale", note=item_name[:60])
+
+
+def merge_into(old: str, new: str) -> dict:
+    """Fold the browser-secret wallet `old` into the user wallet `new`
+    (balances add, ledgers concatenate); `old` is emptied. Idempotent."""
+    if old == new:
+        return view(new)
+    src = kvstore.get(_key(old))
+    if not src:
+        return view(new)
+    dst = _load(new)
+    dst["balance_usd"] += src.get("balance_usd", 0.0)
+    dst["demo_usd"] += src.get("demo_usd", 0.0)
+    dst["entries"] = sorted(dst["entries"] + src.get("entries", []), key=lambda e: e.get("at", 0))
+    dst["entries"].append(_entry("topup", 0.0, demo=False, ref=f"claim:{old[:12]}", note="merged browser wallet"))
+    _save(dst)
+    kvstore.delete(_key(old))
+    return view(new)

@@ -152,7 +152,7 @@ def test_wallet_topup_purchase_and_seller_credit():
     client = TestClient(app)
     # empty wallet
     w = client.post("/api/wallet", json={"account_secret": BUYER}).json()
-    assert w == {"balance_usd": 0.0, "demo_usd": 0.0, "entries": []}
+    assert (w["balance_usd"], w["demo_usd"], w["entries"], w["identity"]) == (0.0, 0.0, [], "browser")
 
     # demo top-up (no rails configured) lands in the DEMO balance only
     t = client.post("/api/wallet/topup", json={"account_secret": BUYER, "amount_usd": 20, "method": "card"}).json()
@@ -204,3 +204,45 @@ def test_settle_routes_topup_metadata_to_wallet():
     # item metadata still confirms an item
     out = payments._settle({"item_id": "trend-sniper-pro"}, "cs_item_1", "stripe", "4.99", None)
     assert out["status"] == "confirmed" and "token" in out
+
+
+# ----------------------------------------------------------------- accounts
+
+
+def test_account_endpoints_without_login_and_claim(monkeypatch):
+    from app.services import auth, wallet
+
+    client = TestClient(app)
+    cfg = client.get("/api/account/config").json()
+    assert cfg["enabled"] is False and "aiquant.factors.zoo" in cfg["sync_keys"]
+    assert client.get("/api/account/me").json() == {"signed_in": False}
+    assert client.get("/api/account/state").status_code == 401
+    assert client.post("/api/wallet", json={}).status_code == 401  # no token, no secret
+
+    # simulate a signed-in user: bearer tokens resolve to a fixed user
+    async def fake_verify(token):
+        return {"id": "user-123", "email": "a@b.c"} if token == "good" else None
+
+    monkeypatch.setattr(auth, "verify", fake_verify)
+    monkeypatch.setattr(auth, "enabled", lambda: True)
+    hdr = {"Authorization": "Bearer good"}
+    me = client.get("/api/account/me", headers=hdr).json()
+    assert me["signed_in"] is True and me["email"] == "a@b.c"
+
+    # state round-trip keeps only whitelisted keys
+    put = client.put("/api/account/state", headers=hdr, json={"data": {"aiquant.factors.zoo": [{"expression": "rank(close)"}], "evil": 1}})
+    assert put.status_code == 200 and put.json()["saved"] == 1
+    got = client.get("/api/account/state", headers=hdr).json()
+    assert got["data"] == {"aiquant.factors.zoo": [{"expression": "rank(close)"}]}
+
+    # browser wallet + listing get claimed into the user account
+    wallet.credit(wallet.account_hash(BUYER), 7.5, demo=False, ref="cs_x")
+    lid = client.post("/api/marketplace/listings", json=_listing(seller_secret=BUYER)).json()["item"]["id"]
+    res = client.post("/api/account/claim", headers=hdr, json={"account_secret": BUYER}).json()
+    assert res["wallet"]["balance_usd"] == 7.5 and res["listings_moved"] == 1
+    # the user now sees the wallet and owns the listing; the browser wallet is empty
+    assert client.post("/api/wallet", headers=hdr, json={}).json()["balance_usd"] == 7.5
+    assert client.post("/api/wallet", json={"account_secret": BUYER}).json()["balance_usd"] == 0.0
+    assert client.post(f"/api/marketplace/listings/{lid}/remove", headers=hdr, json={}).status_code == 200
+    # bad token with no secret → 401
+    assert client.post("/api/wallet", headers={"Authorization": "Bearer bad"}, json={}).status_code == 401

@@ -4,6 +4,7 @@ import { AIPanel } from "./components/AIPanel";
 import { BacktestPanel } from "./components/BacktestPanel";
 import { Tour } from "./components/Tour";
 import { UsagePopover } from "./components/UsagePopover";
+import { AccountMenu } from "./components/AccountMenu";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // Code-split the heavy views: each loads on first visit and then stays
@@ -220,6 +221,7 @@ export default function App() {
                   : t("status.closed")}
           </span>
           <UsagePopover model={ai.enabled ? (ai.model ?? "on") : null} />
+          <AccountMenu />
           {activeQuote?.as_of && (
             <span className="status dim">
               {t("status.updated")} {new Date(activeQuote.as_of).toLocaleTimeString()}

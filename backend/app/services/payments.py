@@ -124,14 +124,14 @@ async def create_checkout(item_id: str, method: str, return_url: str | None) -> 
     return {**base, "order_id": f"demo_{uuid.uuid4().hex[:16]}", "provider": "demo", "demo": True, "hosted_url": None}
 
 
-async def create_topup(amount_usd: float, method: str, account_secret: str, return_url: str | None) -> dict[str, Any]:
+async def create_topup(amount_usd: float, method: str, account_hash: str, return_url: str | None) -> dict[str, Any]:
     """Fund the site wallet. Same rails as an item purchase; the order's
     metadata says it is a top-up for a given account hash."""
     if not wallet.MIN_TOPUP_USD <= amount_usd <= wallet.MAX_TOPUP_USD:
         raise PaymentError(f"top-up must be ${wallet.MIN_TOPUP_USD:.0f}–${wallet.MAX_TOPUP_USD:.0f}")
     if method not in {"card", "crypto"}:
         raise PaymentError("method must be card or crypto")
-    h = wallet.account_hash(account_secret)
+    h = account_hash
     amount = f"{amount_usd:.2f}"
     product = {"id": f"topup_{h[:8]}", "name": f"AIQUANT 钱包充值 ${amount}", "tagline": "Wallet top-up",
                "price": {"amount": amount, "currency": "USD"}}
@@ -301,24 +301,24 @@ def confirm_demo(order_id: str, item_id: str) -> dict:
     return _confirm(order_id, "demo", item_id, (item.get("price") or {}).get("amount"), demo=True)
 
 
-def confirm_demo_topup(order_id: str, account_secret: str, amount_usd: float) -> dict:
+def confirm_demo_topup(order_id: str, account_hash: str, amount_usd: float) -> dict:
     if card_enabled() or crypto_enabled():
         raise PaymentError("demo top-ups are disabled when a real payment rail is configured")
     if not order_id.startswith("demo_"):
         raise PaymentError("not a demo order")
     if not wallet.MIN_TOPUP_USD <= amount_usd <= wallet.MAX_TOPUP_USD:
         raise PaymentError("amount out of range")
-    return _confirm_topup(order_id, "demo", wallet.account_hash(account_secret), f"{amount_usd:.2f}", demo=True)
+    return _confirm_topup(order_id, "demo", account_hash, f"{amount_usd:.2f}", demo=True)
 
 
-def purchase_with_wallet(item_id: str, account_secret: str) -> dict:
+def purchase_with_wallet(item_id: str, account_hash: str) -> dict:
     """Pay for an item from the site balance. Real balance → real
     entitlement + seller credit; demo balance → demo entitlement only."""
     item, row = _resolve_item(item_id)
     price = item.get("price")
     if not price:
         raise PaymentError(f"item {item_id!r} is free — nothing to charge")
-    h = wallet.account_hash(account_secret)
+    h = account_hash
     if row is not None and row["seller"] == h:
         raise PaymentError("you cannot buy your own listing")
     amount = float(price["amount"])
