@@ -515,6 +515,9 @@ test("paper page shows position, decay verdict and backtest-vs-live table", asyn
   await expect(page.getByText("边际保持", { exact: false }).first()).toBeVisible();
   await expect(page.getByText("回测期（上线前）").first()).toBeVisible();
   await expect(page.getByText("对照组")).toBeVisible();
+  // signed out (account/me is unmocked → {}): only the monitor's dim note, never the card body
+  await expect(page.locator(".pp-mon__note")).toHaveText("登录后可开启每日自动监控与提醒");
+  await expect(page.locator(".pp-mon")).toHaveCount(0);
   // remove needs a confirm click; a single click must NOT delete
   const cards = page.locator(".pp-card");
   await expect(cards).toHaveCount(2);
@@ -522,6 +525,88 @@ test("paper page shows position, decay verdict and backtest-vs-live table", asyn
   await expect(cards).toHaveCount(2);
   await cards.first().getByTitle("移除").click();
   await expect(cards).toHaveCount(1);
+});
+
+test("paper page daily monitor", async ({ page }) => {
+  // Signed in ONLY here — every other test keeps the unmocked {} (signed out).
+  await page.route("**/api/account/me", (route) => route.fulfill({ json: { signed_in: true, email: "u@x.io", account: "ab12cd34" } }));
+  const report = {
+    account: "ab12cd34", generated_at: 1_757_110_000, generated_on: "2026-09-05", alerts_total: 2, new_alerts: 1, notified: true,
+    items: [
+      {
+        id: "pp_mon1", name: "波动率倒数 · 2 因子", kind: "pipeline", started_at: "2026-08-24", as_of: "2026-09-05", days_live: 12,
+        return_pct: 1.8, excess_pct: -0.4, current_drawdown_pct: -11.2, sharpe: 0.6, decay: "holding",
+        position: { state: "holdings", symbols: ["AAPL", "MSFT"], weights_pct: [12.5, 11.0], since: "2026-09-04" },
+        alerts: [{ code: "drawdown", detail: "-11.2%" }, { code: "rebalance", detail: "+NVDA -INTC" }],
+      },
+    ],
+  };
+  const calls: string[] = [];
+  await page.route("**/api/paper/monitor", (route) => { calls.push("GET"); return route.fulfill({ json: report }); });
+  await page.route("**/api/paper/monitor/refresh", (route) => { calls.push("REFRESH"); return route.fulfill({ json: report }); });
+  await page.route("**/api/paper/monitor/test-webhook", async (route) => {
+    calls.push(`TEST ${(route.request().postDataJSON() as { webhook_url: string }).webhook_url}`);
+    await route.fulfill({ json: { delivered: true } });
+  });
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      "aiquant.paper",
+      JSON.stringify([
+        { id: "pp_mon1", kind: "pipeline", name: "波动率倒数 · 2 因子", config: { market: "us" }, startedAt: "2026-08-24" },
+        { id: "p_other", kind: "strategy", name: "MSFT · RSI", config: { symbol: "MSFT", strategy: "rsi_reversion" }, startedAt: "2024-02-01" },
+      ]),
+    );
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "模拟持仓" }).click();
+
+  // card body with header chips (no signed-out note)
+  const card = page.locator(".pp-mon");
+  await expect(card).toBeVisible();
+  await expect(page.locator(".pp-mon__note")).toHaveCount(0);
+  await expect(card.locator(".pp-mon__chips")).toContainText("上次检查 2026-09-05");
+  await expect(card.locator(".pp-mon__chips")).toContainText("2 条提醒");
+  await expect(card.locator(".pp-mon__chips")).toContainText("已推送");
+
+  // one row per item×alert, tone by code
+  const rows = card.locator(".pp-mon-row");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0).locator(".pp-mon-badge")).toHaveClass(/pp-mon-badge--red/);
+  await expect(rows.nth(0)).toContainText("回撤超限");
+  await expect(rows.nth(0)).toContainText("-11.2%");
+  await expect(rows.nth(1).locator(".pp-mon-badge")).toHaveClass(/pp-mon-badge--amber/);
+  await expect(rows.nth(1)).toContainText("需调仓");
+  await expect(rows.nth(1)).toContainText("+NVDA -INTC");
+
+  // the matching deployment card carries the server's badges; the other card none
+  const depCards = page.locator(".pp-card");
+  await expect(depCards).toHaveCount(2);
+  const monCard = depCards.filter({ hasText: "波动率倒数" });
+  await expect(monCard.locator(".pp-mon-badge--red")).toContainText("回撤超限");
+  await expect(monCard.locator(".pp-mon-badge--amber")).toContainText("需调仓");
+  await expect(depCards.filter({ hasText: "MSFT · RSI" }).locator(".pp-mon-badge")).toHaveCount(0);
+
+  // check now → POST refresh with a spinner, report replaced
+  await card.getByRole("button", { name: "立即检查" }).click();
+  await expect.poll(() => calls.filter((c) => c === "REFRESH").length).toBe(1);
+  await expect(rows).toHaveCount(2);
+
+  // notifications: URL persists on blur, test posts it and shows ✓
+  await card.getByRole("button", { name: "提醒设置" }).click();
+  const input = card.locator("#pp-mon-webhook");
+  await expect(input).toBeVisible();
+  await expect(card.getByText("提醒只在首次出现时推送一次", { exact: false })).toBeVisible();
+  await expect(card.getByText("Slack incoming webhook", { exact: false })).toBeVisible();
+  await input.fill("https://hooks.slack.com/services/T000/B000/XXXX");
+  await input.blur();
+  await expect
+    .poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("aiquant.notify") ?? "null")))
+    .toEqual({ webhook_url: "https://hooks.slack.com/services/T000/B000/XXXX" });
+  await card.getByRole("button", { name: "发送测试" }).click();
+  await expect(card.locator(".pp-mon__result")).toHaveText("✓ 已送达");
+  await expect(card.locator(".pp-mon__result")).toHaveClass(/pp-mon__result--ok/);
+  expect(calls).toContain("TEST https://hooks.slack.com/services/T000/B000/XXXX");
+  expect(calls.filter((c) => c === "GET").length).toBe(1);
 });
 
 test("marketplace: list a paid strategy, buy it in demo mode, payload unlocks", async ({ page }) => {

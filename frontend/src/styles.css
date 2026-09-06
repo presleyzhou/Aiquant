@@ -3167,6 +3167,59 @@ tbody tr:hover td {
 .pp-compare td.up { color: var(--up, #3be0a0); }
 .pp-compare td.dn { color: var(--dn, #ff6384); }
 
+/* ---- paper page: server-side daily monitor card ------------------------- */
+.pp-mon { margin-bottom: 14px; }
+.pp-mon__note { margin: 0 0 14px; font-size: 12.5px; }
+.pp-mon .panel__head { flex-wrap: wrap; row-gap: 6px; }
+.pp-mon__lead { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 10px; min-width: 0; }
+.pp-mon__chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.pp-mon__actions { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pp-mon__actions .ghost { display: inline-flex; align-items: center; gap: 6px; }
+.pp-mon__actions .ghost.is-on { color: var(--accent); }
+.pp-mon__actions .spinner { width: 12px; height: 12px; border-width: 2px; }
+.pp-mon__desc { margin: 0 0 8px; font-size: 12px; }
+.pp-mon__settings {
+  display: flex; flex-direction: column; gap: 8px; margin: 0 0 12px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: rgba(255, 255, 255, 0.02);
+}
+.pp-mon__row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.pp-mon__row label { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.pp-mon__row input {
+  flex: 1 1 260px; min-width: 0; font: inherit; font-size: 12.5px; color: var(--text);
+  background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 9px;
+}
+.pp-mon__row input:focus { outline: none; border-color: var(--accent); }
+.pp-mon__result { font-size: 12px; white-space: nowrap; }
+.pp-mon__result--ok { color: var(--green); }
+.pp-mon__result--fail { color: var(--red); }
+.pp-mon__result small { color: var(--text-faint); margin-left: 6px; white-space: normal; }
+.pp-mon__hint { margin: 0; font-size: 11.5px; line-height: 1.5; word-break: break-all; }
+.pp-mon__list { display: flex; flex-direction: column; gap: 4px; }
+.pp-mon-row {
+  display: grid; grid-template-columns: minmax(120px, 1.4fr) auto minmax(80px, 1fr); gap: 10px; align-items: center;
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12.5px;
+}
+.pp-mon-row__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pp-mon-row__detail { font-family: var(--mono); font-size: 12px; color: var(--text-dim); text-align: right; word-break: break-word; }
+.pp-mon-badge {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border-bright); color: var(--text-dim); white-space: nowrap;
+}
+.pp-mon-badge--red { color: var(--red); border-color: rgba(255, 92, 108, 0.5); background: rgba(255, 92, 108, 0.08); }
+.pp-mon-badge--amber { color: var(--amber); border-color: rgba(255, 176, 0, 0.5); background: rgba(255, 176, 0, 0.08); }
+.pp-mon-badge--dim { color: var(--text-faint); border-style: dashed; }
+.pp-mon__empty { font-size: 12.5px; padding: 6px 0; }
+.pp-mon-badges { margin: 0 0 8px; }
+
+@media (max-width: 820px) {
+  .pp-mon .panel__head { flex-direction: column; align-items: flex-start; }
+  .pp-mon__chips { display: flex; }
+  .pp-mon__actions { width: 100%; }
+  .pp-mon-row { grid-template-columns: 1fr auto; }
+  .pp-mon-row__detail { grid-column: 1 / -1; text-align: left; }
+  .pp-mon__row input { flex-basis: 100%; }
+}
+
 /* ---- marketplace: buy/sell ---------------------------------------------- */
 .mk-hero__actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; position: relative; z-index: 1; }
 .mk-paybadges { display: inline-flex; gap: 6px; margin-left: auto; }

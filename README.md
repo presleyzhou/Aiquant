@@ -98,6 +98,7 @@ vercel --prod   # 生产环境
 | `CLAUDE_MODEL_LIGHT` | `claude-sonnet-5` | 轻任务模型（新闻情绪、因子表达式生成），成本约为 Opus 的 1/5 |
 | `CLAUDE_CHAT_MAX_TOKENS` | `8000` | AI 分析对话的单次输出上限（策略工坊仍用 `CLAUDE_MAX_TOKENS`） |
 | `RL_CHAT_PER_HOUR` / `RL_STRATEGY_PER_DAY` / `RL_MINING_PER_DAY` / `RL_EVOLVE_PER_DAY` / `RL_MEMO_PER_DAY` | 20 / 5 / 5 / 20 / 20 | 每 IP 限流；`RL_GLOBAL_AI_PER_DAY`（500）为实例级每日 AI 调用熔断 |
+| `MONITOR_DRAWDOWN_PCT` / `RL_MONITOR_PER_HOUR` | `10` / `12` | 每日监控的回撤告警阈值（百分比）；「立即检查」与「测试推送」的每 IP 每小时限流 |
 | `ALPHA_VANTAGE_KEY` | 空 | 仅供内嵌的 Alpha Vantage provider 使用；yfinance 无需 key |
 | `PANEL_PROVIDER_CRYPTO` | `binance` | 因子挖掘 / 流水线的数字货币日线面板：`binance` = Binance 公开 K 线为主源，Binance 未上币由 CoinGecko 补齐，Yahoo 兜底；`yahoo` 强制 Yahoo |
 | `PANEL_PROVIDER_US` | `auto` | 美股日线面板：`auto` = 装了 AkShare（新浪财经前复权数据）就用 AkShare，否则 Yahoo；`akshare` / `yahoo` 强制。AkShare 约 100MB 依赖，不进 Vercel 包，本地 / Docker 用 `uv pip install -e '.[akshare]'` |
@@ -157,6 +158,8 @@ Vercel 后端会把 `/api/kronos/*` 服务器侧转发过去（无 CORS、前端
 | POST | `/api/pipeline/orders` | 调仓指令单：由组合规模与当前持仓生成到目标权重的买卖清单（整数股、不做空、含预估成本） |
 | POST | `/api/pipeline/memo` | 投委会备忘录：轻量模型基于本次运行的数字给出 deploy / paper_first / iterate / reject 结构化结论（需 AI key） |
 | POST | `/api/paper/track` | 模拟持仓前向跟踪（`kind` = strategy / factor / pipeline） |
+| GET / POST | `/api/paper/monitor`、`/api/paper/monitor/refresh`、`/api/paper/monitor/test-webhook` | 登录用户的每日自动监控报告 / 立即重算 / 测试提醒 webhook |
+| POST | `/api/paper/monitor/run` | 定时入口（需 `x-admin-token`）：重放所有云端账户的模拟持仓，规则触发即存报告并推送 webhook |
 | GET | `/api/ai/status` | AI 是否可用、模型/轻量模型、当日 token 用量与限流配置 |
 | POST | `/api/ai/analyze` | 流式分析（NDJSON） |
 | WS | `/ws/quotes` | 实时报价推送 |
@@ -248,6 +251,11 @@ DeMiguel-Garlappi-Uppal (2009)、Ledoit & Wolf (2008)、Harvey-Liu-Zhu (2016)、
 **行情条是真正的跑马灯。** 列表复制两份做无缝循环滚动，悬停暂停（保持可点击），`prefers-reduced-motion` 下退化为普通滚动条。报价变动时价格闪烁提示，闪烁颜色同样遵循所在市场的涨跌配色。
 
 **市场支持买卖双边，支付走托管供应商，且诚实分层。** 买方：`STRIPE_SECRET_KEY` 开启银行卡 / Apple Pay / Google Pay（Stripe Checkout，`STRIPE_PAYMENT_METHODS` 可追加 `alipay,wechat_pay`），`COINBASE_COMMERCE_API_KEY` 开启数字货币（Coinbase Commerce 托管页，BTC / ETH / USDC…）；两条通道各自独立，卡号与私钥都不经过本站。支付确认后服务器签发 HMAC 权益凭证（`MARKETPLACE_SECRET`），付费社区内容的策略参数 / 因子表达式只凭凭证释放；`STRIPE_WEBHOOK_SECRET` / `COINBASE_WEBHOOK_SECRET` 启用签名校验的 webhook 入账。卖方：任何人可把自己的策略或因子库里的因子上架（免费或付费），收款选数字货币钱包（平台代收、扣 `PLATFORM_FEE_PCT` 后按周结算）或 Stripe Connect Express（开户链接一键跳转，成交时 Stripe 自动分账）。上架与订单账本存 Upstash / Vercel KV（`KV_REST_API_URL` + `KV_REST_API_TOKEN`），未配置时落到临时文件并在界面明示。两条通道都未配置时进入**明确标注的演示模式** —— 不展示收款地址、服务端永不伪造「已支付」、演示凭证永久带 demo 标记、演示成交不计入卖家销量。
+
+**每日自动监控（登录后）。** `.github/workflows/monitor.yml` 每个交易日收盘后（周末各一次覆盖加密货币）调用 `POST /api/paper/monitor/run`，
+服务端重放每个账户云端同步的模拟持仓，按五条规则告警：回撤超过 `MONITOR_DRAWDOWN_PCT`（默认 10%）、边际衰减判定为 degraded、
+目标持仓较上次变化（需调仓）、数据超过 5 天未更新、无法重算。报告存 KV 供「模拟持仓」页展示；用户在页内填写 Slack / Discord /
+Telegram webhook 后，**新出现**的提醒会推送一次（同一提醒不重复打扰）。webhook 仅接受 https 公网地址。需在 GitHub Secrets 配置与后端一致的 `ADMIN_TOKEN`。
 
 **课堂演示模式与质量门禁。** 因子挖掘页标题旁的「📚 课堂演示」按 15 分钟讲义顺序走 8 步，每步高亮对应控件并标出幻灯片页码；因子库与合成、体检、上线等功能不再依赖 AI key（仅挖掘表单与循环日志需要）。模拟持仓中的因子部署显示服务器体检徽标。后端接入 ruff 规则集并进入 CI（E/F/I/B/UP/RUF/DTZ 等，风格类规则显式豁免），Playwright 冒烟测试扩展到 13 条，覆盖体检徽标、瘦身检查、课堂模式与站长后台。
 

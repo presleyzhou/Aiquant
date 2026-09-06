@@ -1,0 +1,36 @@
+name: Deployment monitor
+
+# Replays every signed-in user's paper deployments once a day, stores the
+# per-account report and posts webhook notices for NEW alerts (drawdown,
+# decay, rebalance, stale data). Requires the ADMIN_TOKEN secret matching the
+# backend's ADMIN_TOKEN. The endpoint processes 20 accounts per call; the
+# loop keeps calling until it reports zero remaining.
+on:
+  schedule:
+    - cron: "45 21 * * 1-5"   # 21:45 UTC on weekdays — after the US close
+    - cron: "15 0 * * 0,6"    # crypto never sleeps: one weekend pass too
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run monitor until no accounts remain
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          SITE: https://aiquant-rust.vercel.app
+        run: |
+          if [ -z "$ADMIN_TOKEN" ]; then echo "ADMIN_TOKEN secret not set; skipping"; exit 0; fi
+          failures=0
+          for i in $(seq 1 12); do
+            body=$(curl -sS --max-time 290 -X POST "$SITE/api/paper/monitor/run?limit=10" -H "x-admin-token: $ADMIN_TOKEN") || body=""
+            echo "pass $i: ${body:0:300}"
+            # a timeout / gateway page is not "done": retry up to 3 times, then fail loudly
+            remaining=$(echo "$body" | python3 -c 'import sys,json; print(int(json.load(sys.stdin)["remaining"]))' 2>/dev/null || echo "ERR")
+            if [ "$remaining" = "ERR" ]; then
+              failures=$((failures+1)); [ "$failures" -ge 3 ] && { echo "monitor endpoint kept failing"; exit 1; }
+              sleep 20; continue
+            fi
+            [ "$remaining" = "0" ] && exit 0
+          done
+          echo "accounts still remaining after 12 passes"; exit 1

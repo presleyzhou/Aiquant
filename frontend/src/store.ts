@@ -414,3 +414,28 @@ export function updateFactor(market: string, expression: string, patch: Partial<
   localStorage.setItem(FACTORS_KEY, JSON.stringify(next));
   return next;
 }
+
+// ------------------------------------------------------------ notifications
+
+/** Webhook the server-side daily monitor posts new alerts to. Synced to the
+ * account (key is in sync.ts KEYS) so every device shares one target. */
+const NOTIFY_KEY = "aiquant.notify";
+
+export interface NotifySettings {
+  webhook_url: string;
+}
+
+export function notifySettings(): NotifySettings {
+  const v = read<Partial<NotifySettings> | null>(NOTIFY_KEY, null);
+  return { webhook_url: typeof v?.webhook_url === "string" ? v.webhook_url : "" };
+}
+
+export function saveNotifySettings(settings: NotifySettings): NotifySettings {
+  const next = { webhook_url: settings.webhook_url.trim() };
+  try {
+    localStorage.setItem(NOTIFY_KEY, JSON.stringify(next));
+  } catch {
+    /* storage full or blocked — keep the in-memory value */
+  }
+  return next;
+}

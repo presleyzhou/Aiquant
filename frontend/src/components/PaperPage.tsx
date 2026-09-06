@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type FactorHealth, type PaperTrack, type Point } from "../api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ApiError, api, type FactorHealth, type PaperMonitorAlert, type PaperMonitorAlertCode, type PaperMonitorReport, type PaperTrack, type Point,
+} from "../api";
+import { onAuth } from "../auth";
 import { useT } from "../i18n";
-import { deletePaper, savedPaper, updatePaperNote, type PaperDeployment } from "../store";
+import { deletePaper, notifySettings, saveNotifySettings, savedPaper, updatePaperNote, type PaperDeployment } from "../store";
 import { EquityChart } from "./EquityChart";
 
 interface Props {
@@ -24,6 +27,7 @@ export function PaperPage({ hidden }: Props) {
   const [sort, setSort] = useState<SortKey>("recent");
   const [overlay, setOverlay] = useState(true);
   const [confirmId, setConfirmId] = useState<string | null>(null);
+  const monitor = useMonitor(hidden);
   const [health, setHealth] = useState<Record<string, FactorHealth>>({});
 
   // Server-side recheck verdicts for factor deployments (daily job).
@@ -154,6 +158,8 @@ export function PaperPage({ hidden }: Props) {
           </p>
         </section>
 
+        <MonitorCard monitor={monitor} />
+
         {deployments.length === 0 ? (
           <div className="notice" style={{ maxWidth: 620 }}>{t("pp.empty")}</div>
         ) : (
@@ -212,6 +218,8 @@ export function PaperPage({ hidden }: Props) {
                   key={dep.id}
                   dep={dep}
                   track={tracks[dep.id]}
+                  monitorAlerts={monitor.byId.get(dep.id)}
+                  monitorDate={monitor.report?.generated_on ?? null}
                   confirming={confirmId === dep.id}
                   onRemove={() => remove(dep.id)}
                   onRefresh={() => load(dep)}
@@ -229,11 +237,249 @@ export function PaperPage({ hidden }: Props) {
   );
 }
 
+// --------------------------------------------------------------- monitor
+
+interface MonitorState {
+  /** null until /api/account/me has answered once. */
+  signedIn: boolean | null;
+  report: PaperMonitorReport | null;
+  busy: boolean;
+  error: string | null;
+  byId: Map<string, PaperMonitorAlert[]>;
+  refresh: () => void;
+}
+
+/** Server-side daily monitor: fetched once the page is visible AND the account
+ * says signed in; 401 anywhere flips back to the signed-out note. A session
+ * change (magic-link landing, sign-out) re-runs the check. */
+function useMonitor(hidden: boolean): MonitorState {
+  const [signedIn, setSignedIn] = useState<boolean | null>(null);
+  const [report, setReport] = useState<PaperMonitorReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [authTick, setAuthTick] = useState(0);
+  const checked = useRef(false);
+
+  const fail = useCallback((err: unknown) => {
+    if (err instanceof ApiError && err.status === 401) {
+      setSignedIn(false);
+      setReport(null);
+      setError(null);
+      return;
+    }
+    setError((err as Error).message);
+  }, []);
+
+  const check = useCallback(async () => {
+    setError(null);
+    let me: { signed_in?: boolean };
+    try {
+      me = await api.accountMe();
+    } catch {
+      setSignedIn(false); // no account service at all → same as signed out
+      return;
+    }
+    if (!me.signed_in) {
+      setSignedIn(false);
+      setReport(null);
+      return;
+    }
+    setSignedIn(true);
+    setBusy(true);
+    try {
+      setReport(await api.paperMonitor());
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }, [fail]);
+
+  useEffect(() => {
+    if (hidden || checked.current) return;
+    checked.current = true;
+    void check();
+  }, [hidden, authTick, check]);
+
+  useEffect(() => {
+    let prev: string | null | undefined; // undefined = the immediate replay call
+    return onAuth((s) => {
+      const tok = s?.access_token ?? null;
+      if (prev !== undefined && tok !== prev) {
+        checked.current = false;
+        setAuthTick((n) => n + 1);
+      }
+      prev = tok;
+    });
+  }, []);
+
+  const refresh = useCallback(() => {
+    setBusy(true);
+    setError(null);
+    api
+      .paperMonitorRefresh()
+      .then(setReport)
+      .catch(fail)
+      .finally(() => setBusy(false));
+  }, [fail]);
+
+  const byId = useMemo(() => {
+    const m = new Map<string, PaperMonitorAlert[]>();
+    for (const it of report?.items ?? []) if (it.alerts.length > 0) m.set(it.id, it.alerts);
+    return m;
+  }, [report]);
+
+  return { signedIn, report, busy, error, byId, refresh };
+}
+
+function MonitorCard({ monitor }: { monitor: MonitorState }) {
+  const { t } = useT();
+  const { signedIn, report, busy, error, refresh } = monitor;
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  if (signedIn === null) return null; // account check still in flight — no flash of the wrong state
+  if (!signedIn) return <p className="pp-mon__note dim">{t("pp.mon.signedOut")}</p>;
+
+  const rows = (report?.items ?? []).flatMap((it) => it.alerts.map((a) => ({ it, a })));
+
+  return (
+    <section className="panel pp-mon">
+      <div className="panel__head">
+        <span className="pp-mon__lead">
+          <span className="panel__title">{t("pp.mon.title")}</span>
+          <span className="pp-mon__chips">
+            <span className="pp-chip">{t("pp.mon.last", { d: report?.generated_on ?? t("pp.mon.never") })}</span>
+            <span className={`pp-chip ${(report?.alerts_total ?? 0) > 0 ? "pp-chip--warn" : "pp-chip--ok"}`}>
+              {t("pp.mon.count", { n: String(report?.alerts_total ?? 0) })}
+            </span>
+            {report?.notified && <span className="pp-chip pp-chip--long">{t("pp.mon.notified")}</span>}
+          </span>
+        </span>
+        <span className="pp-mon__actions">
+          <button className="ghost" onClick={refresh} disabled={busy}>
+            {busy && <span className="spinner" aria-hidden="true" />}
+            {busy ? t("pp.mon.checking") : t("pp.mon.check")}
+          </button>
+          <button className={`ghost ${settingsOpen ? "is-on" : ""}`} onClick={() => setSettingsOpen((v) => !v)} aria-expanded={settingsOpen}>
+            {settingsOpen ? "▾" : "▸"} {t("pp.mon.settings")}
+          </button>
+        </span>
+      </div>
+
+      <p className="pp-mon__desc dim">{t("pp.mon.desc")}</p>
+
+      {settingsOpen && <NotifySettings />}
+
+      {error && <div className="err">{t("pp.mon.error", { e: error })}</div>}
+
+      {!report && busy ? (
+        <div className="pp-mon__empty dim">{t("pp.mon.loading")}</div>
+      ) : rows.length === 0 ? (
+        <div className="pp-mon__empty dim">{t("pp.mon.empty")}</div>
+      ) : (
+        <div className="pp-mon__list">
+          {rows.map(({ it, a }) => (
+            <div className="pp-mon-row" key={`${it.id}:${a.code}`}>
+              <span className="pp-mon-row__name" title={it.name}>
+                {it.kind === "factor" ? "⛏" : it.kind === "pipeline" ? "⚙" : "📈"} {it.name}
+              </span>
+              <AlertBadge alert={a} date={null} />
+              <span className="pp-mon-row__detail">{a.detail}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Webhook target for pushed alerts — saved on blur into aiquant.notify, which
+ * sync.ts carries to the account so the server's daily run can use it. */
+function NotifySettings() {
+  const { t } = useT();
+  const [url, setUrl] = useState(() => notifySettings().webhook_url);
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; detail?: string } | null>(null);
+
+  const save = () => {
+    const next = saveNotifySettings({ webhook_url: url });
+    setUrl(next.webhook_url);
+  };
+
+  const test = async () => {
+    save();
+    setTesting(true);
+    setResult(null);
+    try {
+      const res = await api.paperMonitorTestWebhook(url.trim());
+      setResult({ ok: res.delivered });
+    } catch (err) {
+      setResult({ ok: false, detail: (err as Error).message });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div className="pp-mon__settings">
+      <div className="pp-mon__row">
+        <label htmlFor="pp-mon-webhook">{t("pp.mon.webhook")}</label>
+        <input
+          id="pp-mon-webhook"
+          type="url"
+          inputMode="url"
+          spellCheck={false}
+          value={url}
+          placeholder={t("pp.mon.webhookPh")}
+          onChange={(e) => {
+            setUrl(e.target.value);
+            setResult(null);
+          }}
+          onBlur={save}
+        />
+        <button className="ghost" onClick={test} disabled={testing || !url.trim()}>
+          {testing ? t("pp.mon.testing") : t("pp.mon.test")}
+        </button>
+        {result && (
+          <span className={`pp-mon__result ${result.ok ? "pp-mon__result--ok" : "pp-mon__result--fail"}`}>
+            {result.ok ? t("pp.mon.testOk") : t("pp.mon.testFail")}
+            {result.detail && <small>{result.detail}</small>}
+          </span>
+        )}
+      </div>
+      <p className="pp-mon__hint dim">{t("pp.mon.targets")}</p>
+      <p className="pp-mon__hint dim">{t("pp.mon.once")}</p>
+    </div>
+  );
+}
+
+const ALERT_TONE: Record<PaperMonitorAlertCode, "red" | "amber" | "dim"> = {
+  drawdown: "red", decay: "red", rebalance: "amber", stale: "dim", error: "dim",
+};
+
+function AlertBadge({ alert, date }: { alert: PaperMonitorAlert; date: string | null }) {
+  const { t } = useT();
+  const tone = ALERT_TONE[alert.code] ?? "dim";
+  const label = t(`pp.mon.alert.${alert.code}` as "pp.mon.alert.drawdown");
+  const title = date
+    ? t("pp.mon.badgeTitle", { d: date, l: label, v: alert.detail })
+    : alert.code === "rebalance" ? t("pp.mon.alert.rebalanceTitle") : label;
+  return (
+    <span className={`pp-mon-badge pp-mon-badge--${tone}`} title={title}>
+      {label}
+      {date && alert.detail ? ` ${alert.detail}` : ""}
+    </span>
+  );
+}
+
 // ------------------------------------------------------------------ card
 
 interface CardProps {
   dep: PaperDeployment;
   track: TrackState;
+  /** Alerts the server-side daily monitor raised for this deployment id. */
+  monitorAlerts?: PaperMonitorAlert[];
+  monitorDate: string | null;
   confirming: boolean;
   onRemove: () => void;
   onRefresh: () => void;
@@ -241,7 +487,7 @@ interface CardProps {
   health?: FactorHealth;
 }
 
-function Card({ dep, track, confirming, onRemove, onRefresh, onNote, health }: CardProps) {
+function Card({ dep, track, monitorAlerts, monitorDate, confirming, onRemove, onRefresh, onNote, health }: CardProps) {
   const { t } = useT();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(dep.note ?? "");
@@ -293,6 +539,14 @@ function Card({ dep, track, confirming, onRemove, onRefresh, onNote, health }: C
         <button className="pp-note" onClick={() => setEditing(true)} title={t("pp.noteEdit")}>
           {dep.note ? dep.note : <span className="dim">{t("pp.notePh")}</span>}
         </button>
+      )}
+
+      {monitorAlerts && monitorAlerts.length > 0 && (
+        <div className="pp-badges pp-mon-badges">
+          {monitorAlerts.map((a) => (
+            <AlertBadge key={a.code} alert={a} date={monitorDate} />
+          ))}
+        </div>
       )}
 
       {track === "loading" || track === undefined ? (

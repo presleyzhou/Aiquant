@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.api.analytics import kronos_points_to_series
@@ -31,6 +31,7 @@ from app.services.factor_mine import (
     portfolio_backtest_blocking,
 )
 from app.services.pipeline import current_holdings_blocking, run_pipeline_blocking
+from app.services.ratelimit import limiter
 
 router = APIRouter(prefix="/api/paper", tags=["paper"])
 
@@ -136,16 +137,23 @@ def _factor_holdings(expression: str, market: str, top_n: int, invert: bool) -> 
 
 @router.post("/track")
 async def track(req: TrackRequest) -> dict:
+    return await compute_track(req.kind, req.started_at, req.config)
+
+
+async def compute_track(kind: str, started_at: date, config: dict) -> dict:
+    """Replay one deployment and slice it at its start date. Shared by the
+    /track endpoint and the server-side daily monitor."""
     start_epoch = int(datetime(
-        req.started_at.year, req.started_at.month, req.started_at.day, tzinfo=UTC
+        started_at.year, started_at.month, started_at.day, tzinfo=UTC
     ).timestamp())
-    if req.started_at > date.today():
+    # the client stamps its LOCAL date; the server clock is UTC — allow one day of skew
+    if started_at > date.today() + timedelta(days=1):
         raise HTTPException(status_code=400, detail="deployment date is in the future")
 
     position: dict = {"state": "unknown"}
 
-    if req.kind == "strategy":
-        symbol = str(req.config.get("symbol", "")).upper().strip()
+    if kind == "strategy":
+        symbol = str(config.get("symbol", "")).upper().strip()
         if not symbol:
             raise HTTPException(status_code=400, detail="strategy config needs a symbol")
         try:
@@ -154,13 +162,13 @@ async def track(req: TrackRequest) -> dict:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
         cfg = bt.BacktestConfig(
-            strategy=str(req.config.get("strategy", "sma_cross")),
-            fast=int(req.config.get("fast", 20)),
-            slow=int(req.config.get("slow", 50)),
-            rsi_period=int(req.config.get("rsi_period", 14)),
-            rsi_oversold=float(req.config.get("rsi_oversold", 30)),
-            rsi_overbought=float(req.config.get("rsi_overbought", 70)),
-            kronos_horizon=int(req.config.get("kronos_horizon", 14)),
+            strategy=str(config.get("strategy", "sma_cross")),
+            fast=int(config.get("fast", 20)),
+            slow=int(config.get("slow", 50)),
+            rsi_period=int(config.get("rsi_period", 14)),
+            rsi_oversold=float(config.get("rsi_oversold", 30)),
+            rsi_overbought=float(config.get("rsi_overbought", 70)),
+            kronos_horizon=int(config.get("kronos_horizon", 14)),
         )
         want_long = None
         if cfg.strategy == "kronos_signal":
@@ -184,11 +192,11 @@ async def track(req: TrackRequest) -> dict:
             position = {"state": "unknown"}
         trades_live = sum(1 for t in result.trades if (t.get("entry_time") or 0) >= start_epoch)
 
-    elif req.kind == "pipeline":
+    elif kind == "pipeline":
         # the whole signal → portfolio → backtest chain, frozen as a spec
         try:
             result = await asyncio.to_thread(
-                run_pipeline_blocking, {**req.config, "compare": False}
+                run_pipeline_blocking, {**config, "compare": False}
             )
         except factor_dsl.FactorError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -198,19 +206,19 @@ async def track(req: TrackRequest) -> dict:
         ann = 252 if result["spec"]["market"] == "us" else 365
         trades_live = None
         try:
-            position = await asyncio.to_thread(current_holdings_blocking, req.config)
+            position = await asyncio.to_thread(current_holdings_blocking, config)
         except Exception:
             position = {"state": "unknown"}
 
     else:  # factor
-        expression = str(req.config.get("expression", ""))
-        market = str(req.config.get("market", "us"))
-        top_n = int(req.config.get("top_n", 5))
-        invert = bool(req.config.get("invert", False))
+        expression = str(config.get("expression", ""))
+        market = str(config.get("market", "us"))
+        top_n = int(config.get("top_n", 5))
+        invert = bool(config.get("invert", False))
         try:
             result = await asyncio.to_thread(
                 portfolio_backtest_blocking,
-                expression, market, top_n, int(req.config.get("rebalance", 10)), invert,
+                expression, market, top_n, int(config.get("rebalance", 10)), invert,
             )
         except factor_dsl.FactorError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -243,10 +251,10 @@ async def track(req: TrackRequest) -> dict:
 
     as_of = pd.Timestamp(post_eq[-1]["time"], unit="s").date()
     return {
-        "kind": req.kind,
-        "started_at": str(req.started_at),
+        "kind": kind,
+        "started_at": str(started_at),
         "as_of": str(as_of),
-        "days_live": (date.today() - req.started_at).days,
+        "days_live": (date.today() - started_at).days,
         "equity_curve": post_eq,
         "benchmark_curve": post_bench,
         "stats": post,
@@ -256,3 +264,63 @@ async def track(req: TrackRequest) -> dict:
         "trades_live": trades_live,
         "daily_returns": _daily_returns(post_eq),
     }
+
+
+# ------------------------------------------------------------- monitor
+
+
+@router.get("/monitor")
+async def monitor_report(request: Request) -> dict:
+    """The signed-in user's latest server-side monitor report."""
+    from app.services import auth, kvstore
+
+    user = await auth.current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="sign in required")
+    report = await asyncio.to_thread(kvstore.get, f"monitor:{auth.user_hash(user['id'])}")
+    return report or {"items": [], "alerts_total": 0, "generated_at": None, "generated_on": None}
+
+
+@router.post("/monitor/refresh", dependencies=[Depends(limiter("monitor", "rl_monitor_per_hour", 3600))])
+async def monitor_refresh(request: Request) -> dict:
+    """Re-evaluate the signed-in user's own deployments now (rate-limited by
+    the account limiter upstream of this router's cost: at most one replay
+    per deployment)."""
+    from app.services import auth, kvstore, monitor
+
+    user = await auth.current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="sign in required")
+    key = f"state:{auth.user_hash(user['id'])}"
+    doc = await asyncio.to_thread(kvstore.get, key)
+    if not doc:
+        return {"items": [], "alerts_total": 0, "generated_at": None, "generated_on": None}
+    report = await monitor.run_account(key, doc, force=True)
+    return report or {"items": [], "alerts_total": 0, "generated_at": None, "generated_on": None}
+
+
+class WebhookTest(BaseModel):
+    webhook_url: str = Field(min_length=12, max_length=500)
+
+
+@router.post("/monitor/test-webhook", dependencies=[Depends(limiter("monitor", "rl_monitor_per_hour", 3600))])
+async def monitor_test_webhook(req: WebhookTest, request: Request) -> dict:
+    from app.services import auth, monitor
+
+    user = await auth.current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="sign in required")
+    if not monitor.webhook_ok(req.webhook_url):
+        raise HTTPException(status_code=400, detail="webhook must be an https URL to a public host")
+    ok = await asyncio.to_thread(monitor.post_webhook, req.webhook_url, "AIQUANT 模拟持仓提醒：测试消息 ✓")
+    return {"delivered": ok}
+
+
+@router.post("/monitor/run")
+async def monitor_run(request: Request, force: bool = False, limit: int = 20) -> dict:
+    """Scheduled entry point (GitHub Action / cron) — admin token required.
+    Processes up to `limit` accounts per call and reports how many remain."""
+    from app.services import auth, monitor
+
+    auth.require_admin(request)
+    return await monitor.run_all(force=force, limit=max(1, min(limit, 100)))

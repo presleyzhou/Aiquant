@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/account", tags=["account"])
 STATE_KEYS = {
     "aiquant.factors.zoo", "aiquant.factors.lessons", "aiquant.factors.trials", "aiquant.paper",
     "aiquant.alerts", "aiquant.purchases", "aiquant.mystrategies", "aiquant.installed",
-    "aiquant.watchlist.us", "aiquant.watchlist.crypto", "aiquant.stripe_account",
+    "aiquant.watchlist.us", "aiquant.watchlist.crypto", "aiquant.stripe_account", "aiquant.notify",
 }
 MAX_STATE_BYTES = 400_000
 

@@ -11,6 +11,7 @@ nothing but httpx — and cached briefly.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import time
 
@@ -88,6 +89,6 @@ async def resolve_account(request: Request, secret: str | None) -> tuple[str, di
 
 def require_admin(request: Request) -> None:
     s = get_settings()
-    tok = request.headers.get("x-admin-token") or bearer(request)
-    if not s.admin_token or tok != s.admin_token:
+    tok = request.headers.get("x-admin-token") or bearer(request) or ""
+    if not s.admin_token or not hmac.compare_digest(tok, s.admin_token):
         raise HTTPException(status_code=403, detail="admin token required")
