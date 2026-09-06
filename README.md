@@ -98,7 +98,7 @@ vercel --prod   # 生产环境
 | `CLAUDE_MODEL_LIGHT` | `claude-sonnet-5` | 轻任务模型（新闻情绪、因子表达式生成），成本约为 Opus 的 1/5 |
 | `CLAUDE_CHAT_MAX_TOKENS` | `8000` | AI 分析对话的单次输出上限（策略工坊仍用 `CLAUDE_MAX_TOKENS`） |
 | `RL_CHAT_PER_HOUR` / `RL_STRATEGY_PER_DAY` / `RL_MINING_PER_DAY` / `RL_EVOLVE_PER_DAY` / `RL_MEMO_PER_DAY` | 20 / 5 / 5 / 20 / 20 | 每 IP 限流；`RL_GLOBAL_AI_PER_DAY`（500）为实例级每日 AI 调用熔断 |
-| `MONITOR_DRAWDOWN_PCT` | `10` | 每日监控的回撤告警阈值（百分比） |
+| `MONITOR_DRAWDOWN_PCT` / `RL_MONITOR_PER_HOUR` | `10` / `12` | 每日监控的回撤告警阈值（百分比）；「立即检查」与「测试推送」的每 IP 每小时限流 |
 | `ALPHA_VANTAGE_KEY` | 空 | 仅供内嵌的 Alpha Vantage provider 使用；yfinance 无需 key |
 | `PANEL_PROVIDER_CRYPTO` | `binance` | 因子挖掘 / 流水线的数字货币日线面板：`binance` = Binance 公开 K 线为主源，Binance 未上币由 CoinGecko 补齐，Yahoo 兜底；`yahoo` 强制 Yahoo |
 | `PANEL_PROVIDER_US` | `auto` | 美股日线面板：`auto` = 装了 AkShare（新浪财经前复权数据）就用 AkShare，否则 Yahoo；`akshare` / `yahoo` 强制。AkShare 约 100MB 依赖，不进 Vercel 包，本地 / Docker 用 `uv pip install -e '.[akshare]'` |

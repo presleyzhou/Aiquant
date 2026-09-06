@@ -12,13 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+
+from app.services.ratelimit import limiter
 
 from app.api.analytics import kronos_points_to_series
 from app.api.kronos import signal_points
@@ -145,7 +147,8 @@ async def compute_track(kind: str, started_at: date, config: dict) -> dict:
     start_epoch = int(datetime(
         started_at.year, started_at.month, started_at.day, tzinfo=UTC
     ).timestamp())
-    if started_at > date.today():
+    # the client stamps its LOCAL date; the server clock is UTC — allow one day of skew
+    if started_at > date.today() + timedelta(days=1):
         raise HTTPException(status_code=400, detail="deployment date is in the future")
 
     position: dict = {"state": "unknown"}
@@ -279,7 +282,7 @@ async def monitor_report(request: Request) -> dict:
     return report or {"items": [], "alerts_total": 0, "generated_at": None, "generated_on": None}
 
 
-@router.post("/monitor/refresh")
+@router.post("/monitor/refresh", dependencies=[Depends(limiter("monitor", "rl_monitor_per_hour", 3600))])
 async def monitor_refresh(request: Request) -> dict:
     """Re-evaluate the signed-in user's own deployments now (rate-limited by
     the account limiter upstream of this router's cost: at most one replay
@@ -301,7 +304,7 @@ class WebhookTest(BaseModel):
     webhook_url: str = Field(min_length=12, max_length=500)
 
 
-@router.post("/monitor/test-webhook")
+@router.post("/monitor/test-webhook", dependencies=[Depends(limiter("monitor", "rl_monitor_per_hour", 3600))])
 async def monitor_test_webhook(req: WebhookTest, request: Request) -> dict:
     from app.services import auth, monitor
 

@@ -21,9 +21,16 @@ jobs:
           SITE: https://aiquant-rust.vercel.app
         run: |
           if [ -z "$ADMIN_TOKEN" ]; then echo "ADMIN_TOKEN secret not set; skipping"; exit 0; fi
+          failures=0
           for i in $(seq 1 12); do
-            body=$(curl -s --max-time 280 -X POST "$SITE/api/paper/monitor/run?limit=20" -H "x-admin-token: $ADMIN_TOKEN")
-            echo "pass $i: $body"
-            remaining=$(echo "$body" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("remaining", 0))' 2>/dev/null || echo 0)
-            [ "$remaining" = "0" ] && break
+            body=$(curl -sS --max-time 290 -X POST "$SITE/api/paper/monitor/run?limit=10" -H "x-admin-token: $ADMIN_TOKEN") || body=""
+            echo "pass $i: ${body:0:300}"
+            # a timeout / gateway page is not "done": retry up to 3 times, then fail loudly
+            remaining=$(echo "$body" | python3 -c 'import sys,json; print(int(json.load(sys.stdin)["remaining"]))' 2>/dev/null || echo "ERR")
+            if [ "$remaining" = "ERR" ]; then
+              failures=$((failures+1)); [ "$failures" -ge 3 ] && { echo "monitor endpoint kept failing"; exit 1; }
+              sleep 20; continue
+            fi
+            [ "$remaining" = "0" ] && exit 0
           done
+          echo "accounts still remaining after 12 passes"; exit 1

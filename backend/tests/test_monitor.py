@@ -58,6 +58,15 @@ def test_new_alerts_only_reports_changes():
     ("https://10.0.0.5/x", False),
     ("https://169.254.169.254/latest", False),
     ("https://metadata.google.internal/x", False),
+    ("https://metadata.google.internal./x", False),
+    ("https://localhost./x", False),
+    ("https://foo.localhost/x", False),
+    ("https://127.1/x", False),
+    ("https://2130706433/x", False),
+    ("https://0x7f000001/x", False),
+    ("https://100.64.0.1/x", False),
+    ("https://user@hooks.slack.com/x", False),
+    ("https://[::1]/x", False),
     ("not a url", False),
 ])
 def test_webhook_hygiene(url, ok):
@@ -98,3 +107,53 @@ def test_monitor_endpoints_require_credentials(monkeypatch):
     monkeypatch.setattr(kvstore, "list_prefix_items", lambda ns: [])
     r = client.post("/api/paper/monitor/run", headers={"x-admin-token": "s3cret"})
     assert r.status_code == 200 and r.json()["processed"] == 0
+
+
+def test_webhook_resolution_rejects_private_records(monkeypatch):
+    monkeypatch.setattr(monitor.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("10.0.0.7", 443))])
+    assert monitor.webhook_ok("https://internal.example.com/x", resolve=True) is False
+    monkeypatch.setattr(monitor.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))])
+    assert monitor.webhook_ok("https://hooks.example.com/x", resolve=True) is True
+    monkeypatch.setattr(monitor.socket, "getaddrinfo", lambda *a, **k: (_ for _ in ()).throw(OSError("no dns")))
+    assert monitor.webhook_ok("https://hooks.example.com/x", resolve=True) is False
+
+
+def test_undelivered_alerts_are_retried_and_rebalance_is_keyed_by_detail():
+    prev = {"items": [{"id": "pp_1", "alerts": [{"code": "rebalance", "detail": "+A -B"}]}],
+            "pending_alerts": [{"id": "pp_1", "name": "x", "code": "rebalance", "detail": "+A -B"}]}
+    cur = {"items": [{"id": "pp_1", "name": "x", "alerts": [{"code": "rebalance", "detail": "+A -B"}]}]}
+    # same rebalance still standing, delivery failed last time → resend
+    assert [a["detail"] for a in monitor.new_alerts(cur, prev)] == ["+A -B"]
+    cur2 = {"items": [{"id": "pp_1", "name": "x", "alerts": [{"code": "rebalance", "detail": "+C -A"}]}]}
+    # a second rebalance is a new event even though the code repeats
+    assert [a["detail"] for a in monitor.new_alerts(cur2, {"items": prev["items"]})] == ["+C -A"]
+
+
+def test_failed_webhook_keeps_alerts_pending(monkeypatch, tmp_path):
+    monkeypatch.setenv("AIQUANT_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(kvstore, "_file_path", lambda: tmp_path / "store.json")
+    monkeypatch.setattr(kvstore, "mode", lambda: "file")
+    kvstore.put("state:acct9", {"data": {"aiquant.paper": [DEP], "aiquant.notify": {"webhook_url": "https://hooks.example.com/x"}}})
+    monkeypatch.setattr(monitor, "post_webhook", lambda url, text: False)
+
+    async def fake_track(kind, started, config):
+        return _track(dd=float("nan"), decay="degraded")
+
+    import app.api.paper as paper_api
+    monkeypatch.setattr(paper_api, "compute_track", fake_track)
+    asyncio.run(monitor.run_all(force=True))
+    report = kvstore.get("monitor:acct9")
+    assert report["notified"] is False and len(report["pending_alerts"]) == 1
+    assert report["items"][0]["current_drawdown_pct"] is None  # NaN sanitised
+    import json
+    json.dumps(report, allow_nan=False)
+
+
+def test_run_all_respects_deadline(monkeypatch, tmp_path):
+    monkeypatch.setattr(kvstore, "_file_path", lambda: tmp_path / "store.json")
+    monkeypatch.setattr(kvstore, "mode", lambda: "file")
+    for i in range(3):
+        kvstore.put(f"state:d{i}", {"data": {"aiquant.paper": [DEP]}})
+    monkeypatch.setattr(monitor, "RUN_DEADLINE_SECONDS", -1)  # budget already spent
+    out = asyncio.run(monitor.run_all(force=True))
+    assert out["processed"] == 0 and out["remaining"] == 3

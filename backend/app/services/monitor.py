@@ -20,6 +20,9 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import math
+import re
+import socket
 import time
 from datetime import date, datetime, timezone
 from urllib.parse import urlparse
@@ -35,6 +38,7 @@ MAX_DEPLOYMENTS_PER_ACCOUNT = 12
 STALE_DAYS = 5
 REFRESH_SECONDS = 20 * 3600          # an account checked less than 20h ago is skipped
 ACCOUNTS_PER_RUN = 20                 # keeps one run well inside the serverless time limit
+RUN_DEADLINE_SECONDS = 200            # Vercel maxDuration is 300 s; leave room for the response
 _BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
 
 
@@ -83,41 +87,73 @@ def evaluate(dep: dict, track: dict | None, previous: dict | None, error: str | 
     return row
 
 
+def _alert_key(item_id, alert: dict) -> tuple:
+    # a rebalance is a new event every time the holdings change again, so its
+    # detail is part of the identity; the other rules are states
+    code = alert.get("code")
+    return (item_id, code, alert.get("detail")) if code == "rebalance" else (item_id, code)
+
+
 def new_alerts(report: dict, previous: dict | None) -> list[dict]:
-    """Alerts that were not already present in the previous report — the
-    ones worth a notification."""
+    """Alerts that were not already present in the previous report, plus any
+    the previous run failed to deliver — the ones worth a notification."""
     seen = set()
     for item in (previous or {}).get("items", []):
         for a in item.get("alerts", []):
-            seen.add((item.get("id"), a.get("code")))
+            seen.add(_alert_key(item.get("id"), a))
     fresh = []
     for item in report.get("items", []):
         for a in item.get("alerts", []):
-            if (item.get("id"), a.get("code")) not in seen:
+            if _alert_key(item.get("id"), a) not in seen:
                 fresh.append({"id": item.get("id"), "name": item.get("name"), **a})
+    current = {_alert_key(i.get("id"), a) for i in report.get("items", []) for a in i.get("alerts", [])}
+    fresh_keys = {_alert_key(f["id"], f) for f in fresh}
+    for p in (previous or {}).get("pending_alerts", []):
+        k = _alert_key(p.get("id"), p)
+        if k in current and k not in fresh_keys:
+            fresh.append(p)
     return fresh
 
 
 # ---------------------------------------------------------------- webhook
 
 
-def webhook_ok(url: str) -> bool:
-    """https only, no loopback / private / link-local literals, no known
-    metadata hosts — the cheap half of SSRF hygiene."""
+_NUMERIC_HOST = re.compile(r"^[0-9a-fx.]+$")   # 127.1, 2130706433, 0x7f000001 … — literals ip_address rejects
+
+
+def _ip_ok(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return ip.is_global and not (ip.is_private or ip.is_loopback or ip.is_link_local
+                                 or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
+def webhook_ok(url: str, resolve: bool = False) -> bool:
+    """https only, public hosts only: no loopback / private / link-local /
+    CGNAT literals in any spelling, no localhost or metadata names, and —
+    with `resolve=True`, used right before posting — every address the name
+    resolves to must be global too."""
     try:
         u = urlparse(url)
     except ValueError:
         return False
-    if u.scheme != "https" or not u.hostname or len(url) > 500:
+    if u.scheme != "https" or not u.hostname or len(url) > 500 or u.username or u.password:
         return False
-    host = u.hostname.lower()
-    if host in _BLOCKED_HOSTS or host.endswith(".local") or host.endswith(".internal"):
+    host = u.hostname.lower().rstrip(".")
+    if (host in _BLOCKED_HOSTS or host == "localhost" or host.endswith((".localhost", ".local", ".internal"))):
         return False
     try:
-        ip = ipaddress.ip_address(host)
-        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
+        return _ip_ok(ipaddress.ip_address(host))
     except ValueError:
-        return True
+        pass
+    if _NUMERIC_HOST.match(host):        # a numeric spelling the parser did not accept — never trust it
+        return False
+    if resolve:
+        try:
+            infos = socket.getaddrinfo(host, u.port or 443, proto=socket.IPPROTO_TCP)
+        except OSError:
+            return False
+        addrs = {ipaddress.ip_address(i[4][0]) for i in infos}
+        return bool(addrs) and all(_ip_ok(a) for a in addrs)
+    return True
 
 
 def format_message(account_label: str, alerts: list[dict], site_url: str) -> str:
@@ -134,7 +170,7 @@ def format_message(account_label: str, alerts: list[dict], site_url: str) -> str
 def post_webhook(url: str, text: str) -> bool:
     """One POST carrying the message under the keys Slack, Discord and
     Telegram each read; failures are logged, never raised."""
-    if not webhook_ok(url):
+    if not webhook_ok(url, resolve=True):
         return False
     try:
         resp = httpx.post(url, json={"text": text, "content": text}, timeout=10.0, follow_redirects=False)
@@ -158,7 +194,7 @@ async def run_account(key: str, doc: dict, force: bool = False) -> dict | None:
     deployments = [d for d in (data.get("aiquant.paper") or []) if isinstance(d, dict)][:MAX_DEPLOYMENTS_PER_ACCOUNT]
     if not deployments:
         return None
-    previous = kvstore.get(f"monitor:{account}") or {}
+    previous = await asyncio.to_thread(kvstore.get, f"monitor:{account}") or {}
     if not force and previous.get("generated_at") and time.time() - previous["generated_at"] < REFRESH_SECONDS:
         return None
     prev_rows = {r.get("id"): r for r in previous.get("items", [])}
@@ -183,12 +219,26 @@ async def run_account(key: str, doc: dict, force: bool = False) -> dict | None:
     notify = data.get("aiquant.notify") or {}
     url = str(notify.get("webhook_url") or "").strip()
     report["notified"] = False
+    report["pending_alerts"] = []
     if fresh and url:
         report["notified"] = await asyncio.to_thread(
             post_webhook, url, format_message(account[:8], fresh, settings.site_url)
         )
-    kvstore.put(f"monitor:{account}", report)
+        if not report["notified"]:
+            report["pending_alerts"] = fresh[:20]   # retry with the next run instead of forgetting
+    await asyncio.to_thread(kvstore.put, f"monitor:{account}", _finite(report))
     return report
+
+
+def _finite(obj):
+    """NaN/inf → None so the stored report is always valid JSON for Starlette."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _finite(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_finite(v) for v in obj]
+    return obj
 
 
 async def run_all(force: bool = False, limit: int = ACCOUNTS_PER_RUN) -> dict:
@@ -197,16 +247,18 @@ async def run_all(force: bool = False, limit: int = ACCOUNTS_PER_RUN) -> dict:
     accounts still need a pass (the caller loops until zero)."""
     processed = skipped = alerts = notified = remaining = 0
     now = time.time()
-    for key, doc in kvstore.list_prefix_items("state"):
+    for key, doc in await asyncio.to_thread(kvstore.list_prefix_items, "state"):
         data = (doc or {}).get("data") or {}
         if not data.get("aiquant.paper"):
             continue
         acct = key.split(":", 1)[1]
-        prev = kvstore.get(f"monitor:{acct}") or {}
+        prev = await asyncio.to_thread(kvstore.get, f"monitor:{acct}") or {}
         if not force and prev.get("generated_at") and now - prev["generated_at"] < REFRESH_SECONDS:
             skipped += 1
             continue
-        if processed >= limit:
+        # stay inside the serverless time budget: whatever is left is reported
+        # as remaining and the scheduler calls again
+        if processed >= limit or time.time() - now > RUN_DEADLINE_SECONDS:
             remaining += 1
             continue
         report = await run_account(key, doc, force=True)
