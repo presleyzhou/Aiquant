@@ -99,51 +99,29 @@ def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
 
     # Disk layer: survives process restarts and serverless instance churn,
     # and cuts the 40-ticker × 3y Yahoo download to one fetch per TTL window.
-    cache_key = f"panel-{market}-{len(UNIVERSES[market])}"  # universe size in the key: expansions refresh
+    settings = get_settings()
+    provider = settings.panel_provider_crypto if market == "crypto" else settings.panel_provider_us
+    # universe size and provider in the key: expansions or a source switch refresh
+    cache_key = f"panel-{market}-{len(UNIVERSES[market])}-{provider}"
     disk = disk_cache.load(cache_key, _PANEL_TTL)
     if isinstance(disk, dict) and "close" in disk:
         _PANEL_CACHE[market] = (time.time(), disk)
         return disk
 
-    panel = download_panel(UNIVERSES[market], "3y", market)
+    panel = download_panel(UNIVERSES[market], "3y", market, market=market)
     _PANEL_CACHE[market] = (time.time(), panel)
     disk_cache.store(cache_key, panel)
     return panel
 
 
-def download_panel(tickers: list[str], period: str, label: str, min_symbols: int = 8) -> dict[str, pd.DataFrame]:
-    """Download and clean an OHLCV panel for `tickers` (blocking, one Yahoo
-    batch call). Shared by the built-in universes and user-supplied ones."""
-    raw = yf.download(
-        list(tickers), period=period, interval="1d", auto_adjust=True,
-        progress=False, group_by="column", threads=True,
-    )
-    if raw is None or raw.empty:
-        raise LookupError(f"could not download the {label} universe")
+def download_panel(tickers: list[str], period: str, label: str, min_symbols: int = 8,
+                   market: str | None = None) -> dict[str, pd.DataFrame]:
+    """Download and clean an OHLCV panel for `tickers` (blocking). Routed
+    through `panel_providers`: Binance (+CoinGecko) for crypto, AkShare when
+    installed for US equities, Yahoo as the universal fallback."""
+    from app.services import panel_providers
 
-    panel: dict[str, pd.DataFrame] = {}
-    for field, source in (("open", "Open"), ("high", "High"), ("low", "Low"),
-                          ("close", "Close"), ("volume", "Volume")):
-        frame = raw[source].copy()
-        if isinstance(frame, pd.Series):  # a single ticker comes back flat
-            frame = frame.to_frame(list(tickers)[0])
-        frame = frame.dropna(axis=1, how="all")
-        panel[field] = frame
-
-    # Keep only symbols with a usable close history AND sane daily moves —
-    # a >400% day in daily bars is a data feed error, not a market event.
-    close_ok = panel["close"].notna().mean() > 0.7
-    sane = panel["close"].pct_change().abs().max() < 4.0
-    good = panel["close"].columns[close_ok & sane]
-    if len(good) < min_symbols:
-        raise LookupError(f"only {len(good)} usable symbols in the {label} universe (need {min_symbols})")
-    for field in list(panel):
-        panel[field] = panel[field].reindex(columns=good)  # a field missing a column stays NaN, never KeyError
-
-    close = panel["close"]
-    panel["returns"] = close.pct_change()
-    panel["vwap"] = (panel["high"] + panel["low"] + close) / 3
-    return panel
+    return panel_providers.download_panel(tickers, period, label, min_symbols=min_symbols, market=market)
 
 
 # ---------------------------------------------------------------- metrics

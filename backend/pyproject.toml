@@ -31,6 +31,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# AkShare (Sina Finance US daily bars, forward-adjusted). Optional: ~100 MB of
+# extra wheels, so it stays out of the Vercel bundle; local/Docker only.
+akshare = ["akshare>=1.14"]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

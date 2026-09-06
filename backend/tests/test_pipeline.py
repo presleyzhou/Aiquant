@@ -619,7 +619,7 @@ def test_custom_universe_uses_downloader_and_caches(monkeypatch):
     names = ["AAPL", "MSFT", "NVDA", "GOOG", "META", "AMZN", "TSLA", "JPM", "V", "MA"]
     synthetic = {k: v.set_axis(names, axis=1) for k, v in synthetic.items()}
 
-    def fake_download(tickers, period, label, min_symbols=8):
+    def fake_download(tickers, period, label, min_symbols=8, market=None):
         calls.append((tuple(tickers), period, label))
         return synthetic
 

@@ -29,7 +29,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from app.services import disk_cache, factor_dsl, portfolio
+from app.services import disk_cache, factor_dsl, panel_providers, portfolio
 from app.services.factor_mine import (
     HOLDOUT_FRACTION,
     UNIVERSES,
@@ -242,8 +242,11 @@ def load_panel(spec: dict) -> dict[str, pd.DataFrame]:
     if not spec["symbols"] and spec["history"] == "3y":
         return _load_panel_blocking(spec["market"])
     tickers = spec["symbols"] or list(UNIVERSES[spec["market"]])
+    from app.config import get_settings
+
+    st = get_settings()
     digest = hashlib.sha1(",".join(sorted(tickers)).encode()).hexdigest()[:12]
-    key = f"panel-custom-{spec['history']}-{digest}"
+    key = f"panel-custom-{spec['history']}-{digest}-{st.panel_provider_us}-{st.panel_provider_crypto}"
     hit = _CUSTOM_CACHE.get(key)
     if hit and time.time() - hit[0] < _CUSTOM_TTL:
         return hit[1]
@@ -252,7 +255,8 @@ def load_panel(spec: dict) -> dict[str, pd.DataFrame]:
         _remember_custom(key, disk)
         return disk
     label = "custom" if spec["symbols"] else spec["market"]
-    panel = download_panel(tickers, spec["history"], label, min_symbols=MIN_CUSTOM_SYMBOLS)
+    panel = download_panel(tickers, spec["history"], label, min_symbols=MIN_CUSTOM_SYMBOLS,
+                           market=None if spec["symbols"] else spec["market"])
     _remember_custom(key, panel)
     disk_cache.store(key, panel)
     return panel
@@ -784,6 +788,7 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
         "requested": len(spec["symbols"]) if spec["symbols"] else None,
         "dropped": sorted(set(spec["symbols"]) - set(map(str, close.columns))) if spec["symbols"] else [],
         "health": data_health(panel),
+        "provider": panel_providers.provider_of(panel),
     }
 
     scores, signal, ranked_list = build_signal(spec, panel)
