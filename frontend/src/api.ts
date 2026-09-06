@@ -903,6 +903,43 @@ export type AIEvent =
   | { type: "error"; message: string }
   | { type: "done"; stop_reason: string };
 
+// ------------------------------------------------------- deployment monitor
+
+export type PaperMonitorAlertCode = "drawdown" | "decay" | "rebalance" | "stale" | "error";
+
+export interface PaperMonitorAlert {
+  code: PaperMonitorAlertCode;
+  detail: string;
+}
+
+/** One deployment as the server replayed it on its last daily run. */
+export interface PaperMonitorItem {
+  id: string;
+  name: string;
+  kind: "strategy" | "factor" | "pipeline";
+  started_at: string;
+  as_of: string | null;
+  days_live: number;
+  return_pct: number | null;
+  excess_pct: number | null;
+  current_drawdown_pct: number | null;
+  sharpe: number | null;
+  decay: string | null;
+  position: { state: string; symbols?: string[]; weights_pct?: number[]; since?: string | null } | null;
+  alerts: PaperMonitorAlert[];
+}
+
+/** GET /api/paper/monitor — `generated_at` / `generated_on` are null before the first run. */
+export interface PaperMonitorReport {
+  account?: string;
+  generated_at: number | null;
+  generated_on: string | null;
+  alerts_total: number;
+  new_alerts?: number;
+  notified?: boolean;
+  items: PaperMonitorItem[];
+}
+
 import { authHeaders } from "./auth";
 
 /** fetch() with the account bearer token attached — for wallet, listings, account. */
@@ -910,10 +947,19 @@ function authFetch(url: string, init: RequestInit = {}): Promise<Response> {
   return fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...authHeaders() } });
 }
 
+/** Non-2xx reply — carries the HTTP status so callers can tell 401 (signed
+ * out) from a real failure without parsing the message. */
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail ?? `${res.status} ${res.statusText}`);
+    throw new ApiError(res.status, body.detail ?? `${res.status} ${res.statusText}`);
   }
   return res.json() as Promise<T>;
 }
@@ -1171,6 +1217,17 @@ export const api = {
     authFetch("/api/account/claim", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account_secret }) }).then(
       json<{ wallet: Wallet; listings_moved: number }>,
     ),
+
+  /** Server-side daily monitor of the signed-in user's deployments. All three
+   * answer 401 when signed out — callers show the sign-in note instead. */
+  paperMonitor: () => authFetch("/api/paper/monitor").then(json<PaperMonitorReport>),
+  paperMonitorRefresh: () => authFetch("/api/paper/monitor/refresh", { method: "POST" }).then(json<PaperMonitorReport>),
+  paperMonitorTestWebhook: (webhook_url: string) =>
+    authFetch("/api/paper/monitor/test-webhook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ webhook_url }),
+    }).then(json<{ delivered: boolean }>),
 
   listingPayload: (id: string, token: string) =>
     fetch(`/api/marketplace/listings/${encodeURIComponent(id)}/payload?token=${encodeURIComponent(token)}`).then(

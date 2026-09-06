@@ -11,7 +11,7 @@ import { accessToken } from "./auth";
 const KEYS = [
   "aiquant.factors.zoo", "aiquant.factors.lessons", "aiquant.factors.trials", "aiquant.paper", "aiquant.alerts",
   "aiquant.purchases", "aiquant.mystrategies", "aiquant.installed", "aiquant.watchlist.us", "aiquant.watchlist.crypto",
-  "aiquant.stripe_account",
+  "aiquant.stripe_account", "aiquant.notify",
 ];
 
 const read = (k: string): unknown => {
@@ -34,6 +34,7 @@ function unionBy<T>(a: T[] | undefined, b: T[] | undefined, key: (x: T) => strin
 }
 
 export function mergeState(local: Record<string, unknown>, remote: Record<string, unknown>): Record<string, unknown> {
+  // Plain-object keys (e.g. "aiquant.notify" webhook settings) resolve here: local wins.
   const out: Record<string, unknown> = { ...remote, ...local };
   type F = { market: string; expression: string };
   type Id = { id: string };
