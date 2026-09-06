@@ -205,6 +205,7 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
    也可**自定义标的池**（8–40 只，可一键导入自选列表）并选 3 年或 5 年历史，自定义面板服务端缓存 6 小时；
    附**数据健康表**（每只标的覆盖率、缺口、起止日期、是否失效）；数据源可切换：数字货币默认 Binance 公开 K 线 + CoinGecko 补齐，
    美股装了 AkShare 时走新浪前复权数据，Yahoo 始终作为兜底（`backend/app/services/panel_providers.py`）；
+   配置了 KV 时清洗后的面板还会压缩分片共享到 KV（`panel_cache.py`），任一 Vercel 实例首跑直接命中，定时任务每日先调 `POST /api/admin/warm` 预热；
 2. **Alpha 信号**：从因子库勾选 1–8 个因子（或内置的反转 / 动量 / 低波 / 量能起步因子，或手输 DSL），逐因子截面排名后合成。
    默认**滚动 IC 加权**：t 日的权重只用 t 日之前已经"揭晓"的 IC（扩展窗均值、滞后一个预测期），整段回测对合成权重都是样本外；
    期间 IC 与零无法区分（|IC| < 0.005）的因子会被动态关闭而非翻转（AlphaForge 式动态选择）；也可选静态 IC（前 80%）或等权。给出复合信号的 **IC 衰减曲线**（1–20 日，Grinold-Kahn 信息期限）和 **分位数收益**（Qlib 式五分组、

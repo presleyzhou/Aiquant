@@ -120,9 +120,20 @@ def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
         _PANEL_CACHE[market] = (time.time(), disk)
         return disk
 
+    # Shared layer (KV): another serverless instance may already have paid
+    # for today's download.
+    from app.services import panel_cache
+
+    shared = panel_cache.load(cache_key)
+    if shared is not None:
+        _PANEL_CACHE[market] = (time.time(), shared)
+        disk_cache.store(cache_key, shared)
+        return shared
+
     panel = download_panel(UNIVERSES[market], "3y", market, market=market)
     _PANEL_CACHE[market] = (time.time(), panel)
     disk_cache.store(cache_key, panel)
+    panel_cache.store(cache_key, panel, _PANEL_TTL)
     return panel
 
 

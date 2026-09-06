@@ -133,3 +133,29 @@ def _recheck_blocking(max_factors: int) -> dict:
 @router.post("/recheck")
 async def recheck(max_factors: int = 60):
     return await asyncio.to_thread(_recheck_blocking, max(1, min(max_factors, 200)))
+
+
+@router.post("/warm")
+async def warm(markets: str = "us,crypto"):
+    """Pre-load the built-in daily panels so the shared KV layer is populated
+    before users arrive (run by the scheduled workflows). Reports provider,
+    size and timing per market."""
+    from app.services import panel_cache, panel_providers
+    from app.services.factor_mine import _load_panel_blocking
+
+    out: dict[str, dict] = {}
+    for market in [m.strip() for m in markets.split(",") if m.strip()]:
+        if market not in UNIVERSES:
+            out[market] = {"error": "unknown market"}
+            continue
+        t0 = time.time()
+        try:
+            panel = await asyncio.to_thread(_load_panel_blocking, market)
+            out[market] = {
+                "symbols": int(panel["close"].shape[1]), "bars": int(len(panel["close"])),
+                "provider": panel_providers.provider_of(panel), "seconds": round(time.time() - t0, 2),
+                "shared": panel_cache.enabled(),
+            }
+        except Exception as exc:
+            out[market] = {"error": str(exc)[:200], "seconds": round(time.time() - t0, 2)}
+    return {"warmed": out, "kv": kvstore.mode()}

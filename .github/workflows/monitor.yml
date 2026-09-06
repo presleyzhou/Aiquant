@@ -15,6 +15,13 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
     steps:
+      - name: Warm the shared data panels
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          SITE: https://aiquant-rust.vercel.app
+        run: |
+          [ -z "$ADMIN_TOKEN" ] && exit 0
+          curl -sS --max-time 290 -X POST "$SITE/api/admin/warm" -H "x-admin-token: $ADMIN_TOKEN" | head -c 600 || true
       - name: Run monitor until no accounts remain
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
