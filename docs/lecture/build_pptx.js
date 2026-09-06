@@ -13,6 +13,21 @@ async function icon(name, color, size = 256) {
   return "image/png;base64," + buf.toString("base64");
 }
 
+const SHOTS = __dirname + "/shots";
+/** Load a screenshot (optionally cropped to a fraction of its height/width), downscale, return {data, aspect}. */
+async function shot(file, crop) {
+  let img = sharp(`${SHOTS}/${file}`);
+  const meta = await img.metadata();
+  let w = meta.width, h = meta.height;
+  if (crop) {
+    const left = Math.round((crop.x0 ?? 0) * w), top = Math.round((crop.y0 ?? 0) * h);
+    const width = Math.round(((crop.x1 ?? 1) - (crop.x0 ?? 0)) * w), height = Math.round(((crop.y1 ?? 1) - (crop.y0 ?? 0)) * h);
+    img = img.extract({ left, top, width, height }); w = width; h = height;
+  }
+  const buf = await img.resize({ width: Math.min(w, 1600) }).png({ compressionLevel: 9 }).toBuffer();
+  return { data: "image/png;base64," + buf.toString("base64"), aspect: w / h };
+}
+
 (async () => {
   const pres = new pptxgen();
   pres.layout = "LAYOUT_16x9";
@@ -23,6 +38,16 @@ async function icon(name, color, size = 256) {
   const names = ["FiCpu", "FiHelpCircle", "FiRefreshCw", "FiBriefcase", "FiDatabase", "FiClock", "FiBarChart2", "FiTool", "FiEdit3", "FiCheckSquare", "FiBookOpen", "FiCheck", "FiX", "FiGitBranch", "FiLock", "FiInbox", "FiTrendingUp", "FiFileText", "FiEye", "FiTarget", "FiActivity", "FiShield", "FiAlertTriangle", "FiLayers", "FiSliders", "FiAward", "FiRepeat", "FiGlobe", "FiPlayCircle"];
   const ICON = {};
   for (const n of names) { ICON[n + ":cyan"] = await icon(n, CYAN); ICON[n + ":light"] = await icon(n, CYAN_L); ICON[n + ":violet"] = await icon(n, VIOLET); ICON[n + ":white"] = await icon(n, WHITE); ICON[n + ":amber"] = await icon(n, AMBER); ICON[n + ":green"] = await icon(n, GREEN); ICON[n + ":red"] = await icon(n, RED); }
+
+  const SH = {
+    terminal: await shot("terminal.png"),
+    mining: await shot("mining.png", { y1: 0.5 }),
+    gp: await shot("gp-progress.png", { y1: 0.7 }),
+    portfolio: await shot("portfolio.png", { y0: 0.545, y1: 0.985 }),
+    report: await shot("report.png", { y1: 0.37 }),
+    paper: await shot("paper.png", { y1: 0.66 }),
+    library: await shot("library.png", { y1: 0.38 }),
+  };
 
   const darkBg = (s) => {
     s.background = { color: NAVY };
@@ -38,12 +63,27 @@ async function icon(name, color, size = 256) {
     s.addShape(pres.shapes.OVAL, { x, y, w: d, h: d, fill: { color: bg }, line: { color: bg, width: 0 } });
     s.addImage({ data: ICON[`${name}:${tone}`], x: x + d * 0.22, y: y + d * 0.22, w: d * 0.56, h: d * 0.56 });
   };
+  /** Screenshot in a rounded dark frame, sized by width (height follows aspect) unless h is given (then width follows). */
+  const frame = (s, sh, x, y, { w, h, caption } = {}) => {
+    if (w === undefined) w = h * sh.aspect; else if (h === undefined) h = w / sh.aspect;
+    s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: x - 0.06, y: y - 0.06, w: w + 0.12, h: h + 0.12, rectRadius: 0.08, fill: { color: INK }, line: { color: "2A3F5F", width: 0.75 }, shadow: { type: "outer", blur: 6, offset: 2, angle: 90, color: "000000", opacity: 0.35 } });
+    s.addImage({ data: sh.data, x, y, w, h, rounding: false });
+    if (caption) s.addText(caption, { x, y: y + h + 0.07, w, h: 0.3, fontFace: F, fontSize: 8.5, color: GREY, isTextBox: true, margin: 0, italic: true });
+    return { w, h };
+  };
   const card = (s, x, y, w, h, head, body, color = CYAN, iconName) => {
     s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x, y, w, h, rectRadius: 0.12, fill: { color: LIGHT }, line: { color: "D6E4EC", width: 0.75 } });
     let tx = x + 0.2;
     if (iconName) { circleIcon(s, iconName, x + 0.18, y + 0.16, 0.5, color); tx = x + 0.8; }
     s.addText(head, { x: tx, y: y + 0.18, w: w - (tx - x) - 0.2, h: 0.42, fontFace: F, fontSize: 14, bold: true, color, isTextBox: true, margin: 0, valign: "middle" });
     s.addText(body, { x: x + 0.2, y: y + 0.7, w: w - 0.4, h: Math.max(0.3, h - 0.8), fontFace: F, fontSize: 11, color: INK, isTextBox: true, margin: 0, valign: "top" });
+  };
+  const cardSm = (s, x, y, w, h, head, body, color = CYAN, iconName) => {
+    s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x, y, w, h, rectRadius: 0.12, fill: { color: LIGHT }, line: { color: "D6E4EC", width: 0.75 } });
+    let tx = x + 0.15;
+    if (iconName) { circleIcon(s, iconName, x + 0.12, y + 0.1, 0.36, color); tx = x + 0.56; }
+    s.addText(head, { x: tx, y: y + 0.1, w: w - (tx - x) - 0.1, h: 0.36, fontFace: F, fontSize: 12, bold: true, color, isTextBox: true, margin: 0, valign: "middle" });
+    s.addText(body, { x: x + 0.15, y: y + 0.5, w: w - 0.3, h: h - 0.58, fontFace: F, fontSize: 10, color: INK, isTextBox: true, margin: 0, valign: "top" });
   };
   const code = (s, text, x, y, w, h) => {
     s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x, y, w, h, rectRadius: 0.08, fill: { color: INK }, line: { color: INK, width: 0 } });
@@ -54,10 +94,11 @@ async function icon(name, color, size = 256) {
   let s;
   // ---------------------------------------------------------------- 1 cover
   s = pres.addSlide(); darkBg(s);
-  s.addImage({ data: ICON["FiCpu:light"], x: 0.7, y: 0.9, w: 0.9, h: 0.9 });
-  s.addText("因子挖掘", { x: 0.7, y: 1.9, w: 8.6, h: 1.0, fontFace: F, fontSize: 46, bold: true, color: WHITE, isTextBox: true, margin: 0 });
-  s.addText("让机器找信号，让规则守底线 —— 15 分钟", { x: 0.7, y: 2.9, w: 8.6, h: 0.5, fontFace: F, fontSize: 20, color: CYAN_L, isTextBox: true, margin: 0 });
-  s.addText("以 AIQUANT TERMINAL 的「因子挖掘」板块为例：Loop Engineering 闭环挖掘 + 遗传进化，全程样本外验证", { x: 0.7, y: 3.55, w: 8.4, h: 0.6, fontFace: F, fontSize: 12.5, color: "AFC3DA", isTextBox: true, margin: 0 });
+  s.addImage({ data: ICON["FiCpu:light"], x: 0.6, y: 0.8, w: 0.8, h: 0.8 });
+  s.addText("因子挖掘", { x: 0.6, y: 1.7, w: 4.4, h: 0.9, fontFace: F, fontSize: 42, bold: true, color: WHITE, isTextBox: true, margin: 0 });
+  s.addText("让机器找信号，让规则守底线 —— 15 分钟", { x: 0.6, y: 2.6, w: 4.4, h: 0.8, fontFace: F, fontSize: 17, color: CYAN_L, isTextBox: true, margin: 0 });
+  s.addText("以 AIQUANT TERMINAL 的「因子挖掘」板块为例：Loop Engineering 闭环挖掘 + 遗传进化，全程样本外验证", { x: 0.6, y: 3.5, w: 4.3, h: 0.9, fontFace: F, fontSize: 11.5, color: "AFC3DA", isTextBox: true, margin: 0 });
+  frame(s, SH.terminal, 5.2, 1.05, { w: 4.4, caption: "AIQUANT TERMINAL 主界面（真实截图）" });
   s.addText("aiquant-rust.vercel.app · 因子挖掘", { x: 0.7, y: 4.75, w: 6, h: 0.3, fontFace: F, fontSize: 11, color: GREY, isTextBox: true, margin: 0 });
   s.addNotes("讲义：开讲之前。30 秒：机器很会找规律，也很会找假规律；整套方法就是放开找、用规则挡假规律。");
 
@@ -145,8 +186,8 @@ async function icon(name, color, size = 256) {
     s.addText([{ text: h, options: { bold: true, color: c, breakLine: true } }, { text: b, options: { color: GREY } }], { x: lx, y: ly, w: 1.2, h: 0.55, fontFace: F, fontSize: 11, isTextBox: true, margin: 0, align: deg === 180 ? "right" : deg === 0 ? "left" : "center" });
   });
   s.addText("→ 顺时针循环 →", { x: cx - 0.8, y: cy - 0.15, w: 1.6, h: 0.3, fontFace: F, fontSize: 9.5, color: GREY, isTextBox: true, margin: 0, align: "center" });
-  card(s, 5.1, 1.6, 4.4, 1.55, "它不是「多聊几轮」", "每一轮结束后，成绩单和错题本原样进入下一轮题目。AI 变强不是因为想得更久，而是因为看到了上一轮哪些被接受、哪些被拒、为什么。", CYAN);
-  card(s, 5.1, 3.3, 4.4, 1.75, "打分的是程序，不是 AI", "评估器是确定性代码：校验语法 → 算 IC → 样本内、留出、重复度、成本逐项检查。AI 不能给自己的作业打分，这是整个循环可信的前提。", VIOLET);
+  frame(s, SH.mining, 5.1, 1.55, { w: 4.4, caption: "网站「因子挖掘」板块：选市场、门槛、轮数后开始循环（真实截图）" });
+  card(s, 5.1, 3.55, 4.4, 1.55, "两句话", "① 不是多聊几轮：成绩单和错题本原样进入下一轮。\n② 打分的是程序：语法→IC→留出→重复→成本逐项检查，AI 不给自己打分。", VIOLET);
   s.addNotes("讲义 4.1–4.3。教练带学生的比喻；四步各自谁在做、产出什么。");
 
   // ---------------------------------------------------------------- 8 three rounds
@@ -195,37 +236,28 @@ async function icon(name, color, size = 256) {
   edge(1.42, 3.36, 0.9, 3.7); edge(1.42, 3.36, 1.95, 3.7); edge(3.62, 3.36, 3.1, 3.7); edge(3.62, 3.36, 4.15, 3.7);
   tnode("volume", 0.4, 3.7, GREEN, 1.0); tnode("10", 1.5, 3.7, AMBER, 0.85); tnode("close", 2.6, 3.7, GREEN, 1.0); tnode("10", 3.7, 3.7, AMBER, 0.85);
   s.addText("rank(ts_rank(volume,10) − ts_rank(close,10))\n进化 30 代后名人堂里的一条：量在涨、价还没跟上。人未必先想到，但拿到后解释得通。", { x: 0.5, y: 4.25, w: 4.4, h: 0.85, fontFace: F, fontSize: 10, color: GREY, isTextBox: true, margin: 0 });
-  card(s, 5.1, 1.55, 4.4, 1.6, "适应度里的三条修正", "稳定的因子加分；每多一块积木扣一点分（防止越拼越长）；和已发现因子太像的直接打对折（逼着去别处找）。每代前 8 名进名人堂。", VIOLET, "FiAward");
-  s.addTable([
-    [H(""), H("Loop Engineering"), H("遗传编程")],
-    ["候选从哪来", "AI，自带金融常识", "随机组合、变异"],
-    ["怎么用反馈", "理由写成文字放回题目", "只看一个适应度数字"],
-    ["长处", "能解释、能听懂换方向", "便宜、可并行、不受 AI 知识局限"],
-    ["判卷", { text: "同一条评估流水线、同一个留出集", options: { bold: true, color: CYAN } }, { text: "同左", options: { color: CYAN } }],
-  ], { x: 5.1, y: 3.3, w: 4.4, colW: [1.1, 1.65, 1.65], fontFace: F, fontSize: 8.5, color: INK, border: { type: "solid", pt: 0.5, color: "D6E4EC" }, fill: { color: WHITE }, rowH: 0.34, valign: "middle" });
+  frame(s, SH.gp, 5.1, 1.55, { w: 4.4, caption: "进化实验室：冠军演化与名人堂实时刷新（真实截图）" });
+  cardSm(s, 5.1, 4.0, 4.4, 1.1, "适应度里的三条修正", "稳定加分 · 每多一块积木扣一点分 · 和已发现因子太像的打对折。每代前 8 名进名人堂。", VIOLET, "FiAward");
   s.addNotes("讲义 5。两条路找法不同、判卷一样，产出进同一个因子库。");
 
   // ---------------------------------------------------------------- 11 portfolio
   s = pres.addSlide(); title(s, "从因子到组合：IC 好只是门票", "每 10 根 K 线按因子排序，买前 5 名等权，扣手续费与滑点，永远对比买入持有"); footer(s, 11);
-  const days = Array.from({ length: 60 }, (_, i) => `${i + 1}`);
-  let eq = 100, bh = 100; const eqV = [], bhV = [];
-  for (let i = 0; i < 60; i++) { eq *= 1 + 0.0055 * Math.sin(i / 5) + 0.0028; bh *= 1 + 0.004 * Math.cos(i / 7) + 0.0031; eqV.push(Math.round(eq * 10) / 10); bhV.push(Math.round(bh * 10) / 10); }
-  s.addChart(pres.charts.LINE, [{ name: "因子组合（Top-5）", labels: days, values: eqV }, { name: "等权买入持有（基准）", labels: days, values: bhV }], { x: 0.5, y: 1.55, w: 5.6, h: 3.4, chartColors: [CYAN, GREY], lineSize: 1.8, lineDataSymbol: "none", showTitle: true, title: "示意：IC 0.03 的因子做成 Top-5 组合，两年 +38% vs 基准 +41%", showLegend: true, legendPos: "b", catAxisLabelFrequency: 10, valAxisLabelFormatCode: "0", ...chartFrame });
+  frame(s, SH.portfolio, 0.5, 1.55, { h: 3.35, caption: "真实回测：Top-5 组合 +69% vs 基准 +90%，夏普 1.03" });
   [["累计收益", "一定和基准放在一起看"], ["年化收益", "便于跨不同长度比较"], ["夏普比率", "1 以上不错，2 以上警惕过拟合"], ["最大回撤", "决定你能不能拿得住"]].forEach(([h, b], i) => {
-    const x = 6.4 + (i % 2) * 1.6, y = 1.55 + Math.floor(i / 2) * 1.7;
-    s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x, y, w: 1.5, h: 1.55, rectRadius: 0.12, fill: { color: INK }, line: { color: INK, width: 0 } });
-    s.addText(h, { x: x + 0.12, y: y + 0.15, w: 1.3, h: 0.45, fontFace: F, fontSize: 13, bold: true, color: CYAN_L, isTextBox: true, margin: 0 });
-    s.addText(b, { x: x + 0.12, y: y + 0.62, w: 1.3, h: 0.85, fontFace: F, fontSize: 9.5, color: MIST, isTextBox: true, margin: 0 });
+    const x = 5.35 + (i % 2) * 2.15, y = 1.55 + Math.floor(i / 2) * 1.7;
+    s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x, y, w: 2.0, h: 1.55, rectRadius: 0.12, fill: { color: INK }, line: { color: INK, width: 0 } });
+    s.addText(h, { x: x + 0.15, y: y + 0.15, w: 1.75, h: 0.45, fontFace: F, fontSize: 14, bold: true, color: CYAN_L, isTextBox: true, margin: 0 });
+    s.addText(b, { x: x + 0.15, y: y + 0.62, w: 1.75, h: 0.85, fontFace: F, fontSize: 10, color: MIST, isTextBox: true, margin: 0 });
   });
   s.addNotes("讲义 6。为什么跑输：只买 5 只放大波动、每 10 天换仓吃收益、再平衡时点未必合适。IC 是门票，组合回测是成绩单。");
 
   // ---------------------------------------------------------------- 12 after go-live
   s = pres.addSlide(); title(s, "上线之后：因子会钝，要持续检查", "回测回答「过去行不行」，前向跟踪回答「你上线之后行不行」"); footer(s, 12);
-  s.addChart(pres.charts.LINE, [{ name: "IC", labels: ["1", "3", "5", "10", "20", "40"], values: [-0.004, 0.001, 0.002, 0.003, 0.007, -0.018] }], { x: 0.5, y: 1.55, w: 4.3, h: 2.6, chartColors: [CYAN], lineSize: 1.8, lineDataSymbol: "circle", lineDataSymbolSize: 6, showTitle: true, title: "体检报告：IC 随持有期（天）变化 —— 20 天最高", showLegend: false, valAxisLabelFormatCode: "0.000", showValue: true, dataLabelFontSize: 8, dataLabelFormatCode: "0.000", dataLabelPosition: "t", ...chartFrame });
-  s.addText("网站「体检」还给出：五分层收益、换手与扣成本价差、4 段滚动 IC、牛熊分段、t 统计量，五项 A/B/C 评级。", { x: 0.5, y: 4.25, w: 4.3, h: 0.7, fontFace: F, fontSize: 10, color: GREY, isTextBox: true, margin: 0 });
-  card(s, 5.1, 1.55, 4.4, 1.1, "衰减检测", "近 60 / 120 天 IC 明显低于全样本 = 钝了", AMBER, "FiTrendingUp");
-  card(s, 5.1, 2.75, 4.4, 1.1, "跨市场移植", "美股因子放到加密重算：两边都成立更像真规律", GREEN, "FiGlobe");
-  card(s, 5.1, 3.95, 4.4, 1.1, "前向跟踪（模拟持仓）", "上线前后夏普并排：保持 / 衰减 / 增强", CYAN, "FiPlayCircle");
+  frame(s, SH.report, 0.5, 1.55, { h: 3.3, caption: "「体检」报告：五项评级 + 分层 + IC 衰减" });
+  frame(s, SH.paper, 3.55, 1.55, { h: 3.3, caption: "模拟持仓：上线后 vs 回测期，判定「边际增强」" });
+  cardSm(s, 6.55, 1.55, 2.95, 1.1, "衰减检测", "近 60 / 120 天 IC 明显低于全样本 = 钝了", AMBER, "FiTrendingUp");
+  cardSm(s, 6.55, 2.75, 2.95, 1.1, "跨市场移植", "美股因子放到加密重算：两边都成立更像真规律", GREEN, "FiGlobe");
+  cardSm(s, 6.55, 3.95, 2.95, 1.1, "前向跟踪", "上线前后夏普并排：保持 / 衰减 / 增强", CYAN, "FiPlayCircle");
   s.addNotes("讲义 7。这是真正的考试，回测错不了，是市场变了；及时降权或下线。");
 
   // ---------------------------------------------------------------- 13 rules

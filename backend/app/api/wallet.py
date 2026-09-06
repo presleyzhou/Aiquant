@@ -1,22 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.services import payments, wallet
+from app.services import auth, payments, wallet
 from app.services.ratelimit import limiter
 
 router = APIRouter(prefix="/api/wallet", tags=["wallet"])
 
 
 class Account(BaseModel):
-    account_secret: str = Field(min_length=16, max_length=128)
+    # Legacy browser identity; ignored when a Supabase bearer token is present.
+    account_secret: str | None = Field(default=None, min_length=16, max_length=128)
 
 
 @router.post("")
-async def balance(req: Account):
-    try:
-        return wallet.view(wallet.account_hash(req.account_secret))
-    except wallet.WalletError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+async def balance(req: Account, request: Request):
+    h, who = await auth.resolve_account(request, req.account_secret)
+    return {**wallet.view(h), "identity": who["kind"]}
 
 
 class TopUp(Account):
@@ -26,9 +25,10 @@ class TopUp(Account):
 
 
 @router.post("/topup", dependencies=[Depends(limiter("checkout", "rl_checkout_per_hour", 3600))])
-async def topup(req: TopUp):
+async def topup(req: TopUp, request: Request):
+    h, _ = await auth.resolve_account(request, req.account_secret)
     try:
-        return await payments.create_topup(req.amount_usd, req.method, req.account_secret, req.return_url)
+        return await payments.create_topup(req.amount_usd, req.method, h, req.return_url)
     except payments.PaymentError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # provider/network failure
@@ -40,9 +40,10 @@ class DemoTopUp(Account):
 
 
 @router.post("/topup/demo/{order_id}/confirm")
-async def confirm_demo_topup(order_id: str, req: DemoTopUp):
+async def confirm_demo_topup(order_id: str, req: DemoTopUp, request: Request):
+    h, _ = await auth.resolve_account(request, req.account_secret)
     try:
-        return payments.confirm_demo_topup(order_id, req.account_secret, req.amount_usd)
+        return payments.confirm_demo_topup(order_id, h, req.amount_usd)
     except payments.PaymentError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -52,9 +53,10 @@ class Purchase(Account):
 
 
 @router.post("/purchase")
-async def purchase(req: Purchase):
+async def purchase(req: Purchase, request: Request):
+    h, _ = await auth.resolve_account(request, req.account_secret)
     try:
-        return payments.purchase_with_wallet(req.item_id, req.account_secret)
+        return payments.purchase_with_wallet(req.item_id, h)
     except payments.PaymentError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -66,8 +68,9 @@ class Withdraw(Account):
 
 
 @router.post("/withdraw", dependencies=[Depends(limiter("withdraw", "rl_listings_per_day", 86_400))])
-async def withdraw(req: Withdraw):
+async def withdraw(req: Withdraw, request: Request):
+    h, _ = await auth.resolve_account(request, req.account_secret)
     try:
-        return wallet.request_withdrawal(wallet.account_hash(req.account_secret), req.amount_usd, req.method, req.address)
+        return wallet.request_withdrawal(h, req.amount_usd, req.method, req.address)
     except wallet.WalletError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -20,6 +20,7 @@ factor is a readable expression that drops straight into the zoo.
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 import warnings
@@ -31,6 +32,8 @@ from app.services import factor_dsl
 from app.services.factor_dsl import FIELDS
 from app.services.factor_dsl import Node
 from app.services.factor_mine import (
+    MIN_MARGINAL_SHARPE,
+    marginal_contribution_blocking,
     MAX_COMPLEXITY,
     MAX_ZOO_CORR,
     MODES,
@@ -58,6 +61,7 @@ TURNOVER_WEIGHT = 0.02
 COST_FACTOR = 0.6           # fitness multiplier when the Top-5 book loses money after costs
 REDUNDANCY_FACTOR = 0.5     # fitness multiplier when too correlated with the HOF
 HOF_SIZE = 8
+log = logging.getLogger(__name__)
 TRANSFORM_OPS = set(TS_UNARY) | set(CROSS) | {"ts_corr"}
 
 
@@ -391,9 +395,26 @@ def evolve_blocking(
 
     # ---- final: the holdout speaks exactly once, per hall-of-fame factor
     discovered = []
+    accepted_so_far: list[dict] = []
     for h in hof:
         m = h["metrics"]
         accepted, reasons = _verdict(m, mode, trials=len(cache))
+        marginal_delta = None
+        if accepted and accepted_so_far:
+            try:
+                mg = marginal_contribution_blocking(
+                    {"expression": h["expr"], "invert": m["is_ic"] < 0, "horizon": horizon},
+                    [{"expression": a["expr"], "invert": a["is_ic"] < 0, "horizon": horizon} for a in accepted_so_far[-7:]],
+                    market, 5, horizon,
+                )
+                marginal_delta = mg["sharpe_delta"]
+                if marginal_delta < MIN_MARGINAL_SHARPE:
+                    accepted = False
+                    reasons = [*reasons, f"no portfolio increment: blend Sharpe {mg['without']['sharpe']:.2f} → {mg['with']['sharpe']:.2f}"]
+            except Exception as exc:  # noqa: BLE001 - advisory gate
+                log.warning("gp marginal check failed: %s", exc)
+        if accepted:
+            accepted_so_far.append({"expr": h["expr"], "is_ic": m["is_ic"]})
         values = m["_values"] if m["is_ic"] >= 0 else -m["_values"]
         port = _portfolio_from_values(values, panel, market, 5, horizon)
         discovered.append(
@@ -408,6 +429,7 @@ def evolve_blocking(
                 "turnover": m.get("turnover"),
                 "spread_after_cost_pct": m.get("spread_after_cost_pct"),
                 "t_stat": m.get("t_stat"),
+                "marginal_sharpe_delta": marginal_delta,
                 "accepted": accepted,
                 "reasons": reasons,
                 "invert": m["is_ic"] < 0,

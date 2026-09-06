@@ -4493,3 +4493,13 @@ tbody tr:hover td {
 .fr__folds td:last-child { text-align: right; }
 .fr__sugg { margin: 0 0 6px; padding-left: 18px; }
 .fr__sugg li { margin-bottom: 3px; line-height: 1.45; }
+
+/* ---- account menu ---------------------------------------------------------- */
+.acct { position: relative; }
+.acct__btn.is-on { color: var(--accent); border-color: rgba(59,224,255,0.5); }
+.acct__pop { position: absolute; right: 0; top: calc(100% + 6px); width: 300px; z-index: 40; padding: 12px 14px; border-radius: 10px; background: rgba(11,16,32,0.98); border: 1px solid rgba(59,224,255,0.3); box-shadow: 0 12px 30px rgba(0,0,0,0.5); font-size: 12.5px; }
+.acct__head { font-weight: 600; color: var(--accent); margin-bottom: 6px; }
+.acct__form { display: flex; flex-direction: column; gap: 8px; }
+.acct__form input { font: inherit; padding: 7px 9px; border-radius: 6px; border: 1px solid rgba(59,224,255,0.25); background: rgba(255,255,255,0.03); color: var(--fg); }
+.acct__form .dim { font-size: 11.5px; line-height: 1.45; margin: 0; }
+.acct__msg { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); }

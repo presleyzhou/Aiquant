@@ -55,6 +55,7 @@ interface Discovered {
   sharpe: number;
   max_drawdown_pct: number;
   bench_return_pct: number;
+  marginal_sharpe_delta?: number | null;
 }
 
 interface DoneEvent {

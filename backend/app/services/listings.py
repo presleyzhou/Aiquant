@@ -130,10 +130,14 @@ def _validate_payout(payout: dict, price: float) -> dict:
     raise ListingError("paid listings need a payout method (crypto or stripe)")
 
 
-def create(body: dict) -> dict:
-    seller_secret = str(body.get("seller_secret", ""))
-    if not 16 <= len(seller_secret) <= 128:
-        raise ListingError("seller_secret must be 16–128 chars")
+def create(body: dict, seller: str | None = None) -> dict:
+    """`seller` is the resolved account hash; falls back to hashing the legacy
+    `seller_secret` field for callers that still send it."""
+    if seller is None:
+        seller_secret = str(body.get("seller_secret", ""))
+        if not 16 <= len(seller_secret) <= 128:
+            raise ListingError("seller_secret must be 16–128 chars")
+        seller = seller_hash(seller_secret)
     kind = str(body.get("type", ""))
     if kind not in {"strategy", "factor"}:
         raise ListingError("type must be strategy or factor")
@@ -167,7 +171,7 @@ def create(body: dict) -> dict:
         "price_usd": price,
         "payload": _validate_payload(kind, dict(body.get("payload") or {})),
         "payout": _validate_payout(dict(body.get("payout") or {}), price),
-        "seller": seller_hash(seller_secret),
+        "seller": seller,
         "created_at": int(time.time()),
         "status": "active",
     }
@@ -187,11 +191,12 @@ def active() -> list[dict]:
     return rows
 
 
-def remove(listing_id: str, seller_secret: str) -> bool:
+def remove(listing_id: str, seller: str) -> bool:
+    """`seller` is the account hash."""
     row = get(listing_id)
     if row is None:
         return False
-    if not hmac.compare_digest(row["seller"], seller_hash(seller_secret)):
+    if not hmac.compare_digest(row["seller"], seller):
         raise ListingError("not the owner of this listing")
     kvstore.delete(f"listing:{listing_id}")
     return True
@@ -242,8 +247,8 @@ def sales_count(item_id: str) -> int:
     return sum(1 for o in orders_for(item_id) if o.get("status") == "confirmed" and not o.get("demo"))
 
 
-def seller_summary(seller_secret: str) -> list[dict]:
-    h = seller_hash(seller_secret)
+def seller_summary(h: str) -> list[dict]:
+    """`h` is the account hash."""
     fee = get_settings().platform_fee_pct / 100
     out = []
     for row in kvstore.list_prefix("listing"):
@@ -262,3 +267,15 @@ def seller_summary(seller_secret: str) -> list[dict]:
         })
     out.sort(key=lambda r: -r["created_at"])
     return out
+
+
+def reassign_seller(old: str, new: str) -> int:
+    """Move every listing owned by `old` (browser secret hash) to `new` (user
+    hash) — the one-time claim when a browser signs in."""
+    n = 0
+    for row in kvstore.list_prefix("listing"):
+        if row.get("seller") == old and old != new:
+            row["seller"] = new
+            kvstore.put(f"listing:{row['id']}", row)
+            n += 1
+    return n
