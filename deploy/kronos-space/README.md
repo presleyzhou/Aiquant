@@ -51,3 +51,13 @@ docker run -p 7860:7860 kronos-svc
 curl -X POST localhost:7860/api/kronos/forecast \
   -H 'Content-Type: application/json' -d '{"symbol":"BTC-USD"}'
 ```
+
+## 更新代码 / Updating the code
+
+容器启动时会 `git pull` 最新的 `main`，所以后端代码更新后只需在 Space 页面点 **Restart**（Settings → Restart this Space）；
+只有依赖变化（requirements 变了）才需要 **Factory rebuild**。如果 Factory rebuild 后仍是旧代码，说明构建复用了缓存层：
+把 Dockerfile 里的 `ARG CACHE_BUST=...` 改成任意新值再 rebuild 一次。
+
+The container `git pull`s `main` on every start, so a plain **Restart** picks up backend changes; a **Factory rebuild** is
+only needed when requirements change. If a rebuild still serves old code, the builder reused a cached layer — change
+`ARG CACHE_BUST=...` to any new value and rebuild once.
