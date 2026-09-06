@@ -246,3 +246,37 @@ def test_account_endpoints_without_login_and_claim(monkeypatch):
     assert client.post(f"/api/marketplace/listings/{lid}/remove", headers=hdr, json={}).status_code == 200
     # bad token with no secret → 401
     assert client.post("/api/wallet", headers={"Authorization": "Bearer bad"}, json={}).status_code == 401
+
+
+def test_admin_endpoints_require_token_and_recheck_writes_health(monkeypatch):
+    from app.config import get_settings
+    from app.services import factor_mine
+
+    client = TestClient(app)
+    assert client.get("/api/admin/overview").status_code == 403
+    monkeypatch.setattr(get_settings(), "admin_token", "secret-admin")
+    hdr = {"X-Admin-Token": "secret-admin"}
+    assert client.get("/api/admin/overview", headers=hdr).status_code == 200
+
+    # a pending withdrawal can be rejected → refunded
+    from app.services import wallet
+    h = wallet.account_hash(SELLER)
+    wallet.credit(h, 20, demo=False, ref="cs_w")
+    wd = client.post("/api/wallet/withdraw", json={"account_secret": SELLER, "amount_usd": 5, "method": "crypto", "address": "0x" + "d" * 40}).json()
+    assert wallet.view(h)["balance_usd"] == 15.0
+    r = client.post(f"/api/admin/withdrawals/{wd['id']}", headers=hdr, json={"status": "rejected", "note": "bad address"})
+    assert r.status_code == 200 and wallet.view(h)["balance_usd"] == 20.0
+    assert client.get("/api/admin/withdrawals?status=rejected", headers=hdr).json()["withdrawals"][0]["id"] == wd["id"]
+
+    # recheck sweeps a listed factor with a synthetic panel and exposes health publicly
+    import numpy as np, pandas as pd
+    idx = pd.date_range("2024-01-01", periods=420, freq="B", tz="UTC"); rng = np.random.default_rng(1)
+    close = pd.DataFrame(100 * np.exp(np.cumsum(rng.normal(0, 0.01, (420, 12)), axis=0)), index=idx, columns=[f"S{i}" for i in range(12)])
+    panel = {"close": close, "open": close, "high": close * 1.01, "low": close * 0.99, "volume": close * 1000}
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    client.post("/api/marketplace/listings", json=_listing(type="factor", price_usd=0, payout={}, payload={"expression": "rank(delta(close, 5))", "market": "us", "horizon": 10}))
+    meta = client.post("/api/admin/recheck", headers=hdr).json()
+    assert meta["done"] >= 1
+    health = client.post("/api/factors/health", json={"market": "us", "expressions": ["rank(delta(close, 5))"]}).json()
+    assert "rank(delta(close, 5))" in health["health"] and "grades" in health["health"]["rank(delta(close, 5))"]
+    assert health["meta"]["done"] >= 1

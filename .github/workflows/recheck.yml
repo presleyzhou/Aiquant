@@ -1,0 +1,26 @@
+name: Daily factor recheck
+
+# Re-evaluates every marketplace-listed factor and every factor in a synced
+# account library after the US close, writing health + grades to KV so the
+# library and paper pages show server-side verdicts without waiting for a
+# visitor. Needs the ADMIN_TOKEN repository secret (same value as the Vercel
+# env var) and a durable KV — with the file store the results evaporate.
+
+on:
+  schedule:
+    - cron: "30 22 * * 1-5"   # 22:30 UTC, after the NYSE close
+  workflow_dispatch:
+
+jobs:
+  recheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger server-side recheck
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          SITE_URL: ${{ vars.SITE_URL || 'https://aiquant-rust.vercel.app' }}
+        run: |
+          if [ -z "$ADMIN_TOKEN" ]; then echo "ADMIN_TOKEN secret not set — skipping"; exit 0; fi
+          curl -sS --max-time 290 -X POST "$SITE_URL/api/admin/recheck?max_factors=60" \
+            -H "X-Admin-Token: $ADMIN_TOKEN" | tee recheck.json
+          python3 -c "import json; d=json.load(open('recheck.json')); print('targets', d['targets'], 'done', d['done'], 'failed', d['failed'])"

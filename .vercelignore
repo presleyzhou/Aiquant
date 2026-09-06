@@ -11,3 +11,13 @@ docker-compose.yml
 .claude
 **/__pycache__
 **/.pytest_cache
+# docs / lecture assets and tests never belong in the serverless bundle
+docs
+deploy
+frontend/e2e
+frontend/playwright.config.ts
+frontend/test-results
+*.pptx
+*.docx
+*.png
+!frontend/public/*.png

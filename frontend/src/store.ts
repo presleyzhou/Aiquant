@@ -189,6 +189,9 @@ export interface SavedFactor {
   /** Holding period where the report card found IC peaking; used as the
    * default rebalance for backtests and paper deployments once known. */
   best_horizon?: number;
+  /** Consecutive prune reports that said retire/watch; ≥2 → 建议下线. */
+  prune_strikes?: number;
+  prune_verdict?: "keep" | "watch" | "retire";
 }
 
 export function savedFactors(): SavedFactor[] {

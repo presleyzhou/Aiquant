@@ -29,19 +29,18 @@ from typing import Any, AsyncIterator
 import pandas as pd
 
 from app.services import factor_dsl
-from app.services.factor_dsl import FIELDS
-from app.services.factor_dsl import Node
+from app.services.factor_dsl import FIELDS, Node
 from app.services.factor_mine import (
-    MIN_MARGINAL_SHARPE,
-    marginal_contribution_blocking,
     MAX_COMPLEXITY,
     MAX_ZOO_CORR,
+    MIN_MARGINAL_SHARPE,
     MODES,
     UNIVERSES,
     _load_panel_blocking,
     _portfolio_from_values,
     _verdict,
     evaluate_candidate,
+    marginal_contribution_blocking,
 )
 
 TS_UNARY = ["ts_mean", "ts_std", "ts_sum", "ts_min", "ts_max", "ts_rank", "delay", "delta"]

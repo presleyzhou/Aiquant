@@ -4,7 +4,7 @@ import {
   streamNDJSON,
   type CompositeResult,
   type FactorBacktestResult,
-  type FactorCheck, type MarginalResult } from "../api";
+  type FactorCheck, type MarginalResult, type PruneResult, type FactorHealth } from "../api";
 import { useT } from "../i18n";
 import {
   deleteFactor,
@@ -17,7 +17,7 @@ import {
   saveFactorTrials,
   updateFactor,
 } from "../store";
-import { buildFactorShare, takeFactorShare } from "../share";
+import { buildFactorShare, takeFactorShare, buildPipelineShare } from "../share";
 import { deployPaper } from "../store";
 import { DeployButton } from "./DeployButton";
 import { EquityChart } from "./EquityChart";
@@ -78,6 +78,31 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [weighting, setWeighting] = useState("ic");
   const [marginal, setMarginal] = useState<Record<string, MarginalResult | "pending" | "failed">>({});
+  const [pruning, setPruning] = useState(false);
+  const [serverHealth, setServerHealth] = useState<Record<string, FactorHealth>>({});
+
+  // Server-side recheck results (daily GitHub Action) for the library.
+  useEffect(() => {
+    const byMarket = new Map<string, string[]>();
+    for (const f of saved) byMarket.set(f.market, [...(byMarket.get(f.market) ?? []), f.expression]);
+    for (const [mk, exprs] of byMarket) {
+      api.factorHealth(mk, exprs.slice(0, 60))
+        .then((res) => setServerHealth((prev) => {
+          const next = { ...prev };
+          for (const [e, h] of Object.entries(res.health)) next[`${mk}|${e}`] = h;
+          return next;
+        }))
+        .catch(() => undefined);
+    }
+  }, [saved]);
+
+  const openInPipeline = (market: string) => {
+    const group = saved.filter((f) => f.market === market).slice(0, 8);
+    if (group.length === 0) return;
+    const url = buildPipelineShare({ market, factors: group.map((f) => ({ expression: f.expression, invert: f.is_ic < 0, horizon: f.best_horizon ?? f.horizon })) });
+    window.location.assign(url);
+  };
+  const [pruneMsg, setPruneMsg] = useState<string | null>(null);
   const [compositeResult, setCompositeResult] = useState<CompositeResult | null>(null);
   const [compositing, setCompositing] = useState(false);
   const [health, setHealth] = useState<Record<string, FactorCheck | "pending" | "failed">>({});
@@ -305,6 +330,43 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
       setTransfer((prev) => ({ ...prev, [key(f)]: result }));
     } catch {
       setTransfer((prev) => ({ ...prev, [key(f)]: "failed" }));
+    }
+  };
+
+  /** Library hygiene: leave-one-out increment + decay for every member of a
+   * market's library; verdicts accumulate as strikes so a factor is only
+   * flagged 建议下线 after two consecutive negative reports. */
+  const runPrune = async () => {
+    if (pruning) return;
+    setPruning(true);
+    setPruneMsg(null);
+    try {
+      const markets = [...new Set(saved.map((f) => f.market))];
+      let checked = 0;
+      let res: PruneResult | null = null;
+      for (const mk of markets) {
+        const group = saved.filter((f) => f.market === mk).slice(0, 8);
+        if (group.length < 2) continue;
+        res = await api.factorPrune({
+          factors: group.map((f) => ({ expression: f.expression, invert: f.is_ic < 0, horizon: f.best_horizon ?? f.horizon })),
+          market: mk,
+          top_n: 5,
+          rebalance: 10,
+        });
+        for (const m of res.members) {
+          const f = group.find((g) => g.expression === m.expression);
+          if (!f) continue;
+          const strikes = m.verdict === "keep" ? 0 : (f.prune_strikes ?? 0) + 1;
+          updateFactor(mk, f.expression, { prune_strikes: strikes, prune_verdict: m.verdict });
+          checked += 1;
+        }
+      }
+      setSaved(savedFactors());
+      setPruneMsg(checked ? t("fl.pr.done", { n: String(checked), s: res ? res.blend_sharpe.toFixed(2) : "—" }) : t("fl.pr.need2"));
+    } catch (err) {
+      setPruneMsg((err as Error).message);
+    } finally {
+      setPruning(false);
     }
   };
 
@@ -599,15 +661,28 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                     <span className="panel__title">{t("fl.mine.title")}</span>
                     <span className="panel__meta">
                       {saved.length > 0 && (
-                        <button className="btn btn--mini" onClick={checkAll} disabled={checking}>
-                          {checking ? t("fl.hc.running") : t("fl.hc.run")}
-                        </button>
+                        <>
+                          <button className="btn btn--mini" onClick={checkAll} disabled={checking}>
+                            {checking ? t("fl.hc.running") : t("fl.hc.run")}
+                          </button>
+                          <button
+                            className="btn btn--mini"
+                            style={{ marginLeft: 6 }}
+                            disabled={pruning || saved.length < 2}
+                            onClick={runPrune}
+                            title={t("fl.pr.title")}
+                          >
+                            {pruning ? "…" : t("fl.pr.button")}
+                          </button>
+                        </>
                       )}
                     </span>
                   </div>
                   {saved.length === 0 ? (
                     <div className="empty" style={{ padding: 18 }}>{t("fl.mine.empty")}</div>
                   ) : (
+                    <>
+                    {pruneMsg && <div className="dim" style={{ fontSize: 11, margin: "4px 0 6px" }}>{pruneMsg}</div>}
                     <ul className="lab-saved">
                       {saved.map((f) => {
                         const k = key(f);
@@ -664,6 +739,21 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                                   if (h !== (f.best_horizon ?? f.horizon)) setSaved(updateFactor(f.market, f.expression, { best_horizon: h }));
                                 }}
                               />
+                              {serverHealth[key(f)] && (() => {
+                                const sh = serverHealth[key(f)];
+                                const g = sh.grades;
+                                return (
+                                  <div className={`fl-badge ${sh.decayed ? "fl-badge--warn" : ""}`} title={t("fl.sh.title", { d: sh.as_of })}>
+                                    ☁ {t("fl.sh.badge", { d: new Date(sh.checked_at * 1000).toLocaleDateString(), g: `${g.predictive}${g.stability}${g.robustness}${g.tradability}${g.significance}` })}
+                                    {sh.decayed ? ` · ${t("fl.sh.decayed")}` : ""}
+                                  </div>
+                                );
+                              })()}
+                              {f.prune_verdict && f.prune_verdict !== "keep" && (
+                                <div className={`fl-badge ${(f.prune_strikes ?? 0) >= 2 ? "fl-badge--warn" : ""}`} title={t("fl.pr.badgeTitle")}>
+                                  {(f.prune_strikes ?? 0) >= 2 ? t("fl.pr.retire") : t(`fl.pr.${f.prune_verdict}` as "fl.pr.watch")}
+                                </div>
+                              )}
                               {f.best_horizon !== undefined && f.best_horizon !== f.horizon && (
                                 <div className="fl-badge" title={t("fl.bh.title")}>{t("fl.bh.badge", { h: String(f.best_horizon) })}</div>
                               )}
@@ -728,6 +818,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                         );
                       })}
                     </ul>
+                    </>
                   )}
                   {saved.length >= 2 && (
                     <div className="fl-composite-bar">
@@ -740,6 +831,9 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                         <option value="equal">{t("fl.cp.equal")}</option>
                         <option value="rolling">{t("fl.cp.rolling")}</option>
                       </select>
+                      <button className="btn" onClick={() => openInPipeline(saved[0]?.market ?? "us")} title={t("fl.pl.title")}>
+                        {t("fl.pl.button")}
+                      </button>
                       <button
                         className="btn btn--primary"
                         disabled={selected.size < 2 || compositing}

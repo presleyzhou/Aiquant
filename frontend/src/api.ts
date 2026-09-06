@@ -67,6 +67,7 @@ export interface FactorReport {
   icir: number;
   t_stat: number;
   t_stat_adj: number;
+  multiple_testing?: { trials: number; p_value: number; p_adjusted: number; expected_max_t: number; clears_noise_max: boolean; bar: number };
   quantiles: Array<{ q: number; ret_pct: number }>;
   spread_pct: number;
   monotonicity: number;
@@ -82,6 +83,58 @@ export interface FactorReport {
   regimes: { up_ic: number | null; down_ic: number | null; up_days: number; down_days: number };
   grades: Record<"predictive" | "stability" | "robustness" | "tradability" | "significance", "A" | "B" | "C">;
   suggestions: Array<{ code: string; value: number | string | null }>;
+}
+
+export interface FactorHealth {
+  market: string;
+  expression: string;
+  horizon: number;
+  source: string;
+  checked_at: number;
+  as_of: string;
+  is_ic: number;
+  oos_ic: number;
+  recent_ic: number;
+  grades: Record<string, "A" | "B" | "C">;
+  best_horizon: number;
+  spread_after_cost_ann_pct: number;
+  decayed: boolean;
+}
+
+export interface AdminOverview {
+  persistence: string;
+  counts: Record<string, number>;
+  gross_usd: number;
+  wallet_liabilities_usd: number;
+  health_runs: { last_run?: number; targets?: number; done?: number; failed?: number };
+}
+
+export interface AdminWithdrawal {
+  id: string;
+  account: string;
+  amount: number;
+  method: string;
+  address: string;
+  status: "pending" | "paid" | "rejected";
+  at: number;
+  note?: string;
+  settled_at?: number | null;
+}
+
+export interface PruneResult {
+  market: string;
+  blend_sharpe: number;
+  n: number;
+  members: Array<{
+    expression: string;
+    loo_sharpe_delta: number | null;
+    sharpe_without: number | null;
+    full_ic: number | null;
+    recent_ic: number | null;
+    decayed: boolean;
+    verdict: "keep" | "watch" | "retire";
+    reason: string;
+  }>;
 }
 
 export interface MarginalResult {
@@ -1027,12 +1080,38 @@ export const api = {
       body: JSON.stringify(body),
     }).then(json<CompositeResult>),
 
-  factorAnalyze: (expression: string, market: string, horizon: number, top_n = 5, cost_bps = 10) =>
+  factorAnalyze: (expression: string, market: string, horizon: number, top_n = 5, cost_bps = 10, trials = 0) =>
     fetch("/api/factors/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expression, market, horizon, top_n, cost_bps }),
+      body: JSON.stringify({ expression, market, horizon, top_n, cost_bps, trials }),
     }).then(json<FactorReport>),
+
+  factorHealth: (market: string, expressions: string[]) =>
+    fetch("/api/factors/health", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ market, expressions }),
+    }).then(json<{ health: Record<string, FactorHealth>; meta: { last_run?: number; targets?: number; done?: number; failed?: number } }>),
+
+  admin: {
+    overview: (token: string) => fetch("/api/admin/overview", { headers: { "X-Admin-Token": token } }).then(json<AdminOverview>),
+    withdrawals: (token: string) => fetch("/api/admin/withdrawals", { headers: { "X-Admin-Token": token } }).then(json<{ withdrawals: AdminWithdrawal[] }>),
+    updateWithdrawal: (token: string, id: string, status: "pending" | "paid" | "rejected", note: string) =>
+      fetch(`/api/admin/withdrawals/${encodeURIComponent(id)}`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token }, body: JSON.stringify({ status, note }),
+      }).then(json<AdminWithdrawal>),
+    orders: (token: string) => fetch("/api/admin/orders", { headers: { "X-Admin-Token": token } }).then(json<{ orders: Array<Record<string, unknown>> }>),
+    listings: (token: string) => fetch("/api/admin/listings", { headers: { "X-Admin-Token": token } }).then(json<{ listings: Array<MarketItem & { status: string; seller: string }> }>),
+    recheck: (token: string) => fetch("/api/admin/recheck", { method: "POST", headers: { "X-Admin-Token": token } }).then(json<{ last_run: number; targets: number; done: number; failed: number }>),
+  },
+
+  factorPrune: (body: { factors: Array<{ expression: string; invert?: boolean; horizon?: number }>; market: string; top_n?: number; rebalance?: number }) =>
+    fetch("/api/factors/prune", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<PruneResult>),
 
   factorMarginal: (body: {
     candidate: { expression: string; invert?: boolean; horizon?: number };

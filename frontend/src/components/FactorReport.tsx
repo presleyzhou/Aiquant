@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, type FactorReport as Report } from "../api";
 import { useT, type MsgKey } from "../i18n";
+import { factorTrials } from "../store";
 
 const AXES = ["predictive", "stability", "robustness", "tradability", "significance"] as const;
 
@@ -23,7 +24,7 @@ export function FactorReportButton({ expression, market, horizon, onBestHorizon 
     setBusy(true);
     setError(null);
     try {
-      const r = await api.factorAnalyze(expression, market, horizon);
+      const r = await api.factorAnalyze(expression, market, horizon, 5, 10, factorTrials());
       setReport(r);
       setOpen(true);
       onBestHorizon?.(r.best_horizon);
@@ -106,6 +107,16 @@ function ReportBody({ r }: { r: Report }) {
               ▲ {ic(r.regimes.up_ic)} <span className="dim">({r.regimes.up_days})</span> · ▼ {ic(r.regimes.down_ic)} <span className="dim">({r.regimes.down_days})</span>
             </b>
             <span>{t("fr.tstat")}</span><b>{r.t_stat_adj.toFixed(2)} <span className="dim">({t("fr.tstatRaw", { v: r.t_stat.toFixed(2) })})</span></b>
+            {r.multiple_testing && (
+              <>
+                <span>{t("fr.mt.trials")}</span><b>{r.multiple_testing.trials}</b>
+                <span>{t("fr.mt.p")}</span><b>{r.multiple_testing.p_value.toFixed(3)} → {r.multiple_testing.p_adjusted.toFixed(3)}</b>
+                <span>{t("fr.mt.noise")}</span>
+                <b className={r.multiple_testing.clears_noise_max ? "up" : "dn"}>
+                  {r.multiple_testing.expected_max_t.toFixed(2)} {r.multiple_testing.clears_noise_max ? "✓" : "✗"}
+                </b>
+              </>
+            )}
           </div>
         </div>
       </div>

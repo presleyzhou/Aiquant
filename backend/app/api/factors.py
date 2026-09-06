@@ -19,6 +19,7 @@ from app.services.factor_mine import (
     check_factor_blocking,
     composite_backtest_blocking,
     marginal_contribution_blocking,
+    prune_library_blocking,
     mine_stream,
     portfolio_backtest_blocking,
 )
@@ -268,6 +269,7 @@ async def explain_factor(req: ExplainRequest) -> dict:
 class AnalyzeRequest(CheckRequest):
     top_n: int = Field(5, ge=2, le=20)
     cost_bps: float = Field(10.0, ge=0, le=100)
+    trials: int = Field(0, ge=0, le=1_000_000)
 
 
 @router.post("/analyze")
@@ -276,7 +278,7 @@ async def factor_analyze(req: AnalyzeRequest) -> dict:
     and cost-adjusted spread, walk-forward folds, bull/bear split, t-stat."""
     try:
         return await asyncio.to_thread(
-            analyze_factor_blocking, req.expression, req.market, req.horizon, req.top_n, req.cost_bps
+            analyze_factor_blocking, req.expression, req.market, req.horizon, req.top_n, req.cost_bps, req.trials
         )
     except factor_dsl.FactorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -307,3 +309,46 @@ async def factor_marginal(req: MarginalRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class PruneRequest(BaseModel):
+    factors: list[CompositeFactor] = Field(min_length=2, max_length=8)
+    market: str = Field("us", pattern="^(us|crypto)$")
+    top_n: int = Field(5, ge=2, le=10)
+    rebalance: int = Field(10, ge=1, le=30)
+
+
+@router.post("/prune")
+async def factor_prune(req: PruneRequest) -> dict:
+    """Library hygiene: leave-one-out increment + decay → keep / watch / retire."""
+    try:
+        return await asyncio.to_thread(
+            prune_library_blocking, [f.model_dump() for f in req.factors], req.market, req.top_n, req.rebalance
+        )
+    except factor_dsl.FactorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class HealthLookup(BaseModel):
+    market: str = Field("us", pattern="^(us|crypto)$")
+    expressions: list[str] = Field(min_length=1, max_length=60)
+
+
+@router.post("/health")
+async def factor_health(req: HealthLookup) -> dict:
+    """Latest scheduled re-check results (written by /api/admin/recheck) for a
+    set of expressions; missing entries mean no server run has covered them."""
+    from app.api.admin import _health_key
+    from app.services import kvstore
+
+    def load():
+        out = {}
+        for e in req.expressions:
+            doc = kvstore.get(_health_key(req.market, e))
+            if doc:
+                out[e] = doc
+        return out
+
+    return {"health": await asyncio.to_thread(load), "meta": await asyncio.to_thread(kvstore.get, "health:meta") or {}}
