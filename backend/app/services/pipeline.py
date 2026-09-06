@@ -29,7 +29,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from app.services import disk_cache, factor_dsl, panel_providers, portfolio
+from app.services import disk_cache, factor_dsl, panel_cache, panel_providers, portfolio
 from app.services.factor_mine import (
     HOLDOUT_FRACTION,
     UNIVERSES,
@@ -269,11 +269,17 @@ def load_panel(spec: dict) -> dict[str, pd.DataFrame]:
     if isinstance(disk, dict) and "close" in disk:
         _remember_custom(key, disk)
         return disk
+    shared = panel_cache.load(key)
+    if shared is not None:
+        _remember_custom(key, shared)
+        disk_cache.store(key, shared)
+        return shared
     label = "custom" if spec["symbols"] else spec["market"]
     panel = download_panel(tickers, spec["history"], label, min_symbols=MIN_CUSTOM_SYMBOLS,
                            market=None if spec["symbols"] else spec["market"])
     _remember_custom(key, panel)
     disk_cache.store(key, panel)
+    panel_cache.store(key, panel, _CUSTOM_TTL)
     return panel
 
 
