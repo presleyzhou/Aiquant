@@ -5,6 +5,7 @@ import { BacktestPanel } from "./components/BacktestPanel";
 import { Tour } from "./components/Tour";
 import { UsagePopover } from "./components/UsagePopover";
 import { AccountMenu } from "./components/AccountMenu";
+import { AdminPage } from "./components/AdminPage";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // Code-split the heavy views: each loads on first visit and then stays
@@ -33,7 +34,7 @@ import {
   type MarketProfile,
 } from "./markets";
 
-type View = MarketId | "lab" | "factors" | "pipeline" | "paper" | "market";
+type View = MarketId | "lab" | "factors" | "pipeline" | "paper" | "market" | "admin";
 
 function loadWatchlist(profile: MarketProfile): string[] {
   try {
@@ -93,7 +94,12 @@ export default function App() {
   // (for backtests) queue the preset — panels handle the rest themselves.
   useEffect(() => {
     // Payment / Connect return links land on the market view.
-    if (new URLSearchParams(window.location.search).get("view") === "market") {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("admin") === "1") {
+      switchView("admin");
+      return;
+    }
+    if (params.get("view") === "market") {
       switchView("market");
       return;
     }
@@ -252,6 +258,7 @@ export default function App() {
           the strategy lab only hide: unmounting would wipe AI conversations,
           chart state, or an in-flight generation on every tab switch. */}
       <Suspense fallback={<div className="lab"><div className="lab__inner"><div className="empty">…</div></div></div>}>
+        {view === "admin" && <AdminPage />}
         {view === "market" && (
           <ErrorBoundary name="市场">
             <MarketPage onRunStrategy={() => switchView(lastTerminal)} />

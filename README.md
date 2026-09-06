@@ -249,6 +249,8 @@ DeMiguel-Garlappi-Uppal (2009)、Ledoit & Wolf (2008)、Harvey-Liu-Zhu (2016)、
 
 **市场支持买卖双边，支付走托管供应商，且诚实分层。** 买方：`STRIPE_SECRET_KEY` 开启银行卡 / Apple Pay / Google Pay（Stripe Checkout，`STRIPE_PAYMENT_METHODS` 可追加 `alipay,wechat_pay`），`COINBASE_COMMERCE_API_KEY` 开启数字货币（Coinbase Commerce 托管页，BTC / ETH / USDC…）；两条通道各自独立，卡号与私钥都不经过本站。支付确认后服务器签发 HMAC 权益凭证（`MARKETPLACE_SECRET`），付费社区内容的策略参数 / 因子表达式只凭凭证释放；`STRIPE_WEBHOOK_SECRET` / `COINBASE_WEBHOOK_SECRET` 启用签名校验的 webhook 入账。卖方：任何人可把自己的策略或因子库里的因子上架（免费或付费），收款选数字货币钱包（平台代收、扣 `PLATFORM_FEE_PCT` 后按周结算）或 Stripe Connect Express（开户链接一键跳转，成交时 Stripe 自动分账）。上架与订单账本存 Upstash / Vercel KV（`KV_REST_API_URL` + `KV_REST_API_TOKEN`），未配置时落到临时文件并在界面明示。两条通道都未配置时进入**明确标注的演示模式** —— 不展示收款地址、服务端永不伪造「已支付」、演示凭证永久带 demo 标记、演示成交不计入卖家销量。
 
+**服务器定时再体检与站长后台。** `.github/workflows/recheck.yml` 每个交易日收盘后调用 `POST /api/admin/recheck`（需 `ADMIN_TOKEN`），对所有已上架的因子和已同步账号因子库里的因子重跑健康检查与体检评级，结果写入 KV；前端因子库与卖家面板通过 `POST /api/factors/health` 读取并显示「服务器体检」徽标（日期、五项评级、衰减标记）。站长后台（页面 `?admin=1`，请求头 `X-Admin-Token`）提供总览（上架、订单、钱包负债、同步账号数、上次重检）、提现申请标记已付 / 拒绝（拒绝自动退回余额）、订单与上架列表、手动触发重检。因子库新增「→ Pipeline」：把本市场因子一键作为端到端量化 Pipeline 的信号来源打开，两条线共用同一份因子。
+
 **账户体系（可选，Supabase Auth）。** 配置 `SUPABASE_URL` + `SUPABASE_ANON_KEY`（后端）与 `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`（前端构建）后，页头出现「登录」：邮箱魔法链接登录，后端用 Supabase 的 /auth/v1/user 校验令牌（与签名算法无关），账户 id 派生自用户 id。登录后因子库、错题本、模拟持仓、预警、购买记录、自选自动合并到云端（KV）并跨设备同步，合并规则按键去重、只增不删；钱包与上架归属账号，「合并本浏览器的钱包与上架」一键把登录前的浏览器身份并入账号。未配置时保持浏览器密钥模式。`ADMIN_TOKEN` 保护 `/api/admin/*`。
 
 **严格档加入稳健性门槛；组合级增量检验；最佳持有期自动采用。** 评估器为每个候选计算 4 段时间折的同号数与牛熊分段 IC，strict 档要求至少 3 段同号且牛熊皆成立。因子库新增「Δ」按钮：把该因子加入本市场其余因子的滚动 IC 合成，比较加入前后的组合夏普（`POST /api/factors/marginal`），直接回答「它对组合有没有增量」，比两两相关 0.7 更贴近实用。体检报告发现的最佳持有期会记入因子库，组合回测与上线到模拟持仓默认改用它作为再平衡周期。

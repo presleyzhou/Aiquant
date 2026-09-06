@@ -4,7 +4,7 @@ import {
   streamNDJSON,
   type CompositeResult,
   type FactorBacktestResult,
-  type FactorCheck, type MarginalResult, type PruneResult } from "../api";
+  type FactorCheck, type MarginalResult, type PruneResult, type FactorHealth } from "../api";
 import { useT } from "../i18n";
 import {
   deleteFactor,
@@ -17,7 +17,7 @@ import {
   saveFactorTrials,
   updateFactor,
 } from "../store";
-import { buildFactorShare, takeFactorShare } from "../share";
+import { buildFactorShare, takeFactorShare, buildPipelineShare } from "../share";
 import { deployPaper } from "../store";
 import { DeployButton } from "./DeployButton";
 import { EquityChart } from "./EquityChart";
@@ -79,6 +79,29 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   const [weighting, setWeighting] = useState("ic");
   const [marginal, setMarginal] = useState<Record<string, MarginalResult | "pending" | "failed">>({});
   const [pruning, setPruning] = useState(false);
+  const [serverHealth, setServerHealth] = useState<Record<string, FactorHealth>>({});
+
+  // Server-side recheck results (daily GitHub Action) for the library.
+  useEffect(() => {
+    const byMarket = new Map<string, string[]>();
+    for (const f of saved) byMarket.set(f.market, [...(byMarket.get(f.market) ?? []), f.expression]);
+    for (const [mk, exprs] of byMarket) {
+      api.factorHealth(mk, exprs.slice(0, 60))
+        .then((res) => setServerHealth((prev) => {
+          const next = { ...prev };
+          for (const [e, h] of Object.entries(res.health)) next[`${mk}|${e}`] = h;
+          return next;
+        }))
+        .catch(() => undefined);
+    }
+  }, [saved]);
+
+  const openInPipeline = (market: string) => {
+    const group = saved.filter((f) => f.market === market).slice(0, 8);
+    if (group.length === 0) return;
+    const url = buildPipelineShare({ market, factors: group.map((f) => ({ expression: f.expression, invert: f.is_ic < 0, horizon: f.best_horizon ?? f.horizon })) });
+    window.location.assign(url);
+  };
   const [pruneMsg, setPruneMsg] = useState<string | null>(null);
   const [compositeResult, setCompositeResult] = useState<CompositeResult | null>(null);
   const [compositing, setCompositing] = useState(false);
@@ -716,6 +739,16 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                                   if (h !== (f.best_horizon ?? f.horizon)) setSaved(updateFactor(f.market, f.expression, { best_horizon: h }));
                                 }}
                               />
+                              {serverHealth[key(f)] && (() => {
+                                const sh = serverHealth[key(f)];
+                                const g = sh.grades;
+                                return (
+                                  <div className={`fl-badge ${sh.decayed ? "fl-badge--warn" : ""}`} title={t("fl.sh.title", { d: sh.as_of })}>
+                                    ☁ {t("fl.sh.badge", { d: new Date(sh.checked_at * 1000).toLocaleDateString(), g: `${g.predictive}${g.stability}${g.robustness}${g.tradability}${g.significance}` })}
+                                    {sh.decayed ? ` · ${t("fl.sh.decayed")}` : ""}
+                                  </div>
+                                );
+                              })()}
                               {f.prune_verdict && f.prune_verdict !== "keep" && (
                                 <div className={`fl-badge ${(f.prune_strikes ?? 0) >= 2 ? "fl-badge--warn" : ""}`} title={t("fl.pr.badgeTitle")}>
                                   {(f.prune_strikes ?? 0) >= 2 ? t("fl.pr.retire") : t(`fl.pr.${f.prune_verdict}` as "fl.pr.watch")}
@@ -798,6 +831,9 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                         <option value="equal">{t("fl.cp.equal")}</option>
                         <option value="rolling">{t("fl.cp.rolling")}</option>
                       </select>
+                      <button className="btn" onClick={() => openInPipeline(saved[0]?.market ?? "us")} title={t("fl.pl.title")}>
+                        {t("fl.pl.button")}
+                      </button>
                       <button
                         className="btn btn--primary"
                         disabled={selected.size < 2 || compositing}

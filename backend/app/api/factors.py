@@ -329,3 +329,26 @@ async def factor_prune(req: PruneRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class HealthLookup(BaseModel):
+    market: str = Field("us", pattern="^(us|crypto)$")
+    expressions: list[str] = Field(min_length=1, max_length=60)
+
+
+@router.post("/health")
+async def factor_health(req: HealthLookup) -> dict:
+    """Latest scheduled re-check results (written by /api/admin/recheck) for a
+    set of expressions; missing entries mean no server run has covered them."""
+    from app.api.admin import _health_key
+    from app.services import kvstore
+
+    def load():
+        out = {}
+        for e in req.expressions:
+            doc = kvstore.get(_health_key(req.market, e))
+            if doc:
+                out[e] = doc
+        return out
+
+    return {"health": await asyncio.to_thread(load), "meta": await asyncio.to_thread(kvstore.get, "health:meta") or {}}

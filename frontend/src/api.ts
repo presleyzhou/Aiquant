@@ -85,6 +85,42 @@ export interface FactorReport {
   suggestions: Array<{ code: string; value: number | string | null }>;
 }
 
+export interface FactorHealth {
+  market: string;
+  expression: string;
+  horizon: number;
+  source: string;
+  checked_at: number;
+  as_of: string;
+  is_ic: number;
+  oos_ic: number;
+  recent_ic: number;
+  grades: Record<string, "A" | "B" | "C">;
+  best_horizon: number;
+  spread_after_cost_ann_pct: number;
+  decayed: boolean;
+}
+
+export interface AdminOverview {
+  persistence: string;
+  counts: Record<string, number>;
+  gross_usd: number;
+  wallet_liabilities_usd: number;
+  health_runs: { last_run?: number; targets?: number; done?: number; failed?: number };
+}
+
+export interface AdminWithdrawal {
+  id: string;
+  account: string;
+  amount: number;
+  method: string;
+  address: string;
+  status: "pending" | "paid" | "rejected";
+  at: number;
+  note?: string;
+  settled_at?: number | null;
+}
+
 export interface PruneResult {
   market: string;
   blend_sharpe: number;
@@ -1004,6 +1040,25 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ expression, market, horizon, top_n, cost_bps, trials }),
     }).then(json<FactorReport>),
+
+  factorHealth: (market: string, expressions: string[]) =>
+    fetch("/api/factors/health", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ market, expressions }),
+    }).then(json<{ health: Record<string, FactorHealth>; meta: { last_run?: number; targets?: number; done?: number; failed?: number } }>),
+
+  admin: {
+    overview: (token: string) => fetch("/api/admin/overview", { headers: { "X-Admin-Token": token } }).then(json<AdminOverview>),
+    withdrawals: (token: string) => fetch("/api/admin/withdrawals", { headers: { "X-Admin-Token": token } }).then(json<{ withdrawals: AdminWithdrawal[] }>),
+    updateWithdrawal: (token: string, id: string, status: "pending" | "paid" | "rejected", note: string) =>
+      fetch(`/api/admin/withdrawals/${encodeURIComponent(id)}`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token }, body: JSON.stringify({ status, note }),
+      }).then(json<AdminWithdrawal>),
+    orders: (token: string) => fetch("/api/admin/orders", { headers: { "X-Admin-Token": token } }).then(json<{ orders: Array<Record<string, unknown>> }>),
+    listings: (token: string) => fetch("/api/admin/listings", { headers: { "X-Admin-Token": token } }).then(json<{ listings: Array<MarketItem & { status: string; seller: string }> }>),
+    recheck: (token: string) => fetch("/api/admin/recheck", { method: "POST", headers: { "X-Admin-Token": token } }).then(json<{ last_run: number; targets: number; done: number; failed: number }>),
+  },
 
   factorPrune: (body: { factors: Array<{ expression: string; invert?: boolean; horizon?: number }>; market: string; top_n?: number; rebalance?: number }) =>
     fetch("/api/factors/prune", {
