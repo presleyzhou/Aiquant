@@ -67,6 +67,7 @@ export interface FactorReport {
   icir: number;
   t_stat: number;
   t_stat_adj: number;
+  multiple_testing?: { trials: number; p_value: number; p_adjusted: number; expected_max_t: number; clears_noise_max: boolean; bar: number };
   quantiles: Array<{ q: number; ret_pct: number }>;
   spread_pct: number;
   monotonicity: number;
@@ -82,6 +83,22 @@ export interface FactorReport {
   regimes: { up_ic: number | null; down_ic: number | null; up_days: number; down_days: number };
   grades: Record<"predictive" | "stability" | "robustness" | "tradability" | "significance", "A" | "B" | "C">;
   suggestions: Array<{ code: string; value: number | string | null }>;
+}
+
+export interface PruneResult {
+  market: string;
+  blend_sharpe: number;
+  n: number;
+  members: Array<{
+    expression: string;
+    loo_sharpe_delta: number | null;
+    sharpe_without: number | null;
+    full_ic: number | null;
+    recent_ic: number | null;
+    decayed: boolean;
+    verdict: "keep" | "watch" | "retire";
+    reason: string;
+  }>;
 }
 
 export interface MarginalResult {
@@ -981,12 +998,19 @@ export const api = {
       body: JSON.stringify(body),
     }).then(json<CompositeResult>),
 
-  factorAnalyze: (expression: string, market: string, horizon: number, top_n = 5, cost_bps = 10) =>
+  factorAnalyze: (expression: string, market: string, horizon: number, top_n = 5, cost_bps = 10, trials = 0) =>
     fetch("/api/factors/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expression, market, horizon, top_n, cost_bps }),
+      body: JSON.stringify({ expression, market, horizon, top_n, cost_bps, trials }),
     }).then(json<FactorReport>),
+
+  factorPrune: (body: { factors: Array<{ expression: string; invert?: boolean; horizon?: number }>; market: string; top_n?: number; rebalance?: number }) =>
+    fetch("/api/factors/prune", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<PruneResult>),
 
   factorMarginal: (body: {
     candidate: { expression: string; invert?: boolean; horizon?: number };

@@ -687,3 +687,31 @@ async def test_mining_loop_applies_portfolio_increment_gate(monkeypatch):
     # the feedback the next round would see names the failure mode
     feedback = factor_mine._round_feedback(evals)
     assert "did not improve the blend" in feedback
+
+
+def test_multiple_testing_report_and_prune(monkeypatch):
+    from app.services import factor_mine
+    from app.services.factor_mine import multiple_testing_report
+
+    r1 = multiple_testing_report(3.5, 1)
+    assert r1["p_value"] < 0.001 and r1["p_adjusted"] == r1["p_value"] and r1["clears_noise_max"] is True
+    r300 = multiple_testing_report(2.0, 300)
+    assert r300["p_adjusted"] > r300["p_value"] and r300["expected_max_t"] > 3.0 and r300["clears_noise_max"] is False
+    assert r300["bar"] == 3.0
+
+    panel = _panel(n_days=500, n_syms=12)
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    rep = factor_mine.analyze_factor_blocking("rank(delta(close, 5))", "us", 10, trials=250)
+    assert rep["multiple_testing"]["trials"] == 250 and "p_adjusted" in rep["multiple_testing"]
+
+    client = TestClient(app)
+    r = client.post("/api/factors/prune", json={"factors": [
+        {"expression": "rank(delta(close, 5))", "horizon": 10},
+        {"expression": "rank(ts_std(close, 10))", "horizon": 10},
+        {"expression": "rank(ts_mean(volume, 5))", "horizon": 10},
+    ], "market": "us", "top_n": 3, "rebalance": 10})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["n"] == 3 and len(body["members"]) == 3
+    assert all(m["verdict"] in {"keep", "watch", "retire"} for m in body["members"])
+    assert client.post("/api/factors/prune", json={"factors": [{"expression": "rank(close)"}], "market": "us"}).status_code == 422

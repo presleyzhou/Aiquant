@@ -19,6 +19,7 @@ from app.services.factor_mine import (
     check_factor_blocking,
     composite_backtest_blocking,
     marginal_contribution_blocking,
+    prune_library_blocking,
     mine_stream,
     portfolio_backtest_blocking,
 )
@@ -268,6 +269,7 @@ async def explain_factor(req: ExplainRequest) -> dict:
 class AnalyzeRequest(CheckRequest):
     top_n: int = Field(5, ge=2, le=20)
     cost_bps: float = Field(10.0, ge=0, le=100)
+    trials: int = Field(0, ge=0, le=1_000_000)
 
 
 @router.post("/analyze")
@@ -276,7 +278,7 @@ async def factor_analyze(req: AnalyzeRequest) -> dict:
     and cost-adjusted spread, walk-forward folds, bull/bear split, t-stat."""
     try:
         return await asyncio.to_thread(
-            analyze_factor_blocking, req.expression, req.market, req.horizon, req.top_n, req.cost_bps
+            analyze_factor_blocking, req.expression, req.market, req.horizon, req.top_n, req.cost_bps, req.trials
         )
     except factor_dsl.FactorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -302,6 +304,26 @@ async def factor_marginal(req: MarginalRequest) -> dict:
         return await asyncio.to_thread(
             marginal_contribution_blocking,
             req.candidate.model_dump(), [o.model_dump() for o in req.others], req.market, req.top_n, req.rebalance,
+        )
+    except factor_dsl.FactorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class PruneRequest(BaseModel):
+    factors: list[CompositeFactor] = Field(min_length=2, max_length=8)
+    market: str = Field("us", pattern="^(us|crypto)$")
+    top_n: int = Field(5, ge=2, le=10)
+    rebalance: int = Field(10, ge=1, le=30)
+
+
+@router.post("/prune")
+async def factor_prune(req: PruneRequest) -> dict:
+    """Library hygiene: leave-one-out increment + decay → keep / watch / retire."""
+    try:
+        return await asyncio.to_thread(
+            prune_library_blocking, [f.model_dump() for f in req.factors], req.market, req.top_n, req.rebalance
         )
     except factor_dsl.FactorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -26,6 +26,7 @@ to CONFIRM the in-sample sign, and factors that fail are shown failing.
 from __future__ import annotations
 
 import asyncio
+import math
 import logging
 import time
 from typing import Any, AsyncIterator
@@ -41,27 +42,36 @@ from app.services.llm import ClaudeUnavailable, analyst
 log = logging.getLogger("aiquant.factors")
 
 UNIVERSES: dict[str, list[str]] = {
-    # 60 US large caps spanning all 11 GICS sectors — a 24-name cross-section
-    # made daily rank IC too noisy to trust.
+    # ~120 US large/mid caps across all 11 GICS sectors. A wider cross-section
+    # makes daily rank IC less noisy and lets the report card use deciles.
     "us": [
-        # tech / comms
-        "AAPL", "MSFT", "NVDA", "GOOG", "META", "AVGO", "CRM", "AMD", "NFLX", "ORCL", "ADBE", "CSCO",
-        # consumer
-        "AMZN", "TSLA", "HD", "COST", "WMT", "MCD", "NKE", "SBUX", "LOW", "TGT",
+        # information technology
+        "AAPL", "MSFT", "NVDA", "AVGO", "CRM", "AMD", "ORCL", "ADBE", "CSCO", "INTC", "QCOM", "TXN", "IBM",
+        "NOW", "INTU", "AMAT", "MU", "LRCX", "KLAC", "ADI", "PANW", "SNPS", "CDNS", "ANET", "PLTR",
+        # communication services
+        "GOOG", "META", "NFLX", "DIS", "CMCSA", "TMUS", "VZ", "T", "EA", "TTWO",
+        # consumer discretionary
+        "AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "BKNG", "TJX", "CMG", "ORLY", "MAR", "GM", "F",
+        # consumer staples
+        "COST", "WMT", "PG", "KO", "PEP", "PM", "MO", "MDLZ", "CL", "KMB",
         # financials
-        "JPM", "V", "MA", "BAC", "GS", "MS", "BLK", "AXP",
+        "JPM", "V", "MA", "BAC", "GS", "MS", "BLK", "AXP", "WFC", "C", "SCHW", "SPGI", "CB", "PGR", "MMC",
         # health care
-        "UNH", "LLY", "JNJ", "MRK", "ABBV", "PFE", "TMO", "AMGN",
-        # industrials / materials / energy / utilities / real estate
-        "CAT", "HON", "UPS", "BA", "GE", "LIN", "XOM", "CVX", "COP", "NEE", "DUK", "AMT", "PLD",
-        # staples / misc
-        "PG", "KO", "PEP", "PM", "DIS", "INTC", "QCOM", "TXN", "IBM",
+        "UNH", "LLY", "JNJ", "MRK", "ABBV", "PFE", "TMO", "AMGN", "ABT", "DHR", "ISRG", "GILD", "VRTX", "MDT", "BMY",
+        # industrials
+        "CAT", "HON", "UPS", "BA", "GE", "RTX", "DE", "LMT", "UNP", "ETN", "ADP", "WM",
+        # materials / energy / utilities / real estate
+        "LIN", "APD", "SHW", "FCX", "NEM", "XOM", "CVX", "COP", "SLB", "EOG", "NEE", "DUK", "SO", "AMT", "PLD", "EQIX",
     ],
+    # ~40 liquid crypto assets (24×7 panel).
     "crypto": [
         "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "DOGE-USD",
         "ADA-USD", "AVAX-USD", "DOT-USD", "LTC-USD", "LINK-USD", "TRX-USD",
         "SHIB-USD", "NEAR-USD", "UNI-USD", "ATOM-USD", "XLM-USD", "ETC-USD",
         "FIL-USD", "APT-USD", "ARB-USD", "OP-USD", "INJ-USD", "HBAR-USD",
+        "BCH-USD", "ALGO-USD", "VET-USD", "ICP-USD", "AAVE-USD", "MKR-USD",
+        "GRT-USD", "SAND-USD", "MANA-USD", "AXS-USD", "EGLD-USD", "THETA-USD",
+        "XTZ-USD", "EOS-USD", "FLOW-USD", "CHZ-USD",
     ],
 }
 
@@ -878,8 +888,36 @@ REPORT_HORIZONS = (1, 3, 5, 10, 20, 40)
 REPORT_FOLDS = 4
 
 
+def _norm_sf(z: float) -> float:
+    """Two-sided normal tail probability without scipy."""
+    return float(math.erfc(abs(z) / math.sqrt(2)))
+
+
+def multiple_testing_report(t_adj: float, trials: int) -> dict:
+    """How believable is this t-stat given how many candidates were tried?
+
+    * p_value: two-sided normal p of the horizon-adjusted t
+    * p_adjusted: Bonferroni p × trials (capped at 1) — the conservative read
+    * expected_max_t: the |t| the BEST of `trials` pure-noise factors would
+      show, ≈ sqrt(2 ln N) (extreme-value approximation) — if the observed
+      |t| does not clear it, the result is what luck alone would produce
+    * bar: the acceptance bar the miner applies at this trial count
+    """
+    n = max(int(trials or 0), 1)
+    p = _norm_sf(t_adj)
+    expected_max = math.sqrt(2 * math.log(n)) if n > 1 else 0.0
+    return {
+        "trials": n,
+        "p_value": round(p, 4),
+        "p_adjusted": round(min(1.0, p * n), 4),
+        "expected_max_t": round(expected_max, 2),
+        "clears_noise_max": bool(abs(t_adj) > expected_max),
+        "bar": round(float(significance_bar(n)), 2),
+    }
+
+
 def analyze_factor_blocking(
-    expression: str, market: str, horizon: int, top_n: int = 5, cost_bps: float = 10.0
+    expression: str, market: str, horizon: int, top_n: int = 5, cost_bps: float = 10.0, trials: int = 0
 ) -> dict:
     """Practitioner's report card for one factor — the diagnostics that
     AlphaEval / Alphalens-style workflows run before anything is traded:
@@ -909,7 +947,7 @@ def analyze_factor_blocking(
     ranked = values.rank(axis=1, pct=True)
 
     # --- quantiles: mean forward return per bucket, per period ------------
-    nq = 5
+    nq = 10 if ranked.shape[1] >= 100 else 5  # deciles once the cross-section is wide enough
     q_ret = _quintile_returns(ranked, fwd, nq)
     hi, lo = (q_ret[-1], q_ret[0]) if sign > 0 else (q_ret[0], q_ret[-1])
     spread_pp = hi - lo  # % per holding period, long top vs short bottom
@@ -968,6 +1006,7 @@ def analyze_factor_blocking(
     t_raw = float(ic.mean() / max(ic.std(), 1e-6) * np.sqrt(len(ic)))
     t_adj = t_raw / np.sqrt(horizon)
     mean_ic, icir = float(ic.mean()), float(ic.mean() / max(ic.std(), 1e-4))
+    multiple = multiple_testing_report(t_adj, trials)
 
     # --- grades ----------------------------------------------------------------
     def grade(v: float, a: float, b: float) -> str:
@@ -978,7 +1017,10 @@ def analyze_factor_blocking(
         "stability": grade(abs(icir), 0.30, 0.15),
         "robustness": "A" if positive_folds >= 3 and regime_ok else "B" if positive_folds >= 2 else "C",
         "tradability": "A" if spread_after_cost > 0 and turnover < 0.6 else "B" if spread_after_cost > 0 else "C",
-        "significance": "A" if abs(t_adj) >= 3 else "B" if abs(t_adj) >= 2 else "C",
+        "significance": (
+            "A" if abs(t_adj) >= 3 and multiple["clears_noise_max"]
+            else "B" if abs(t_adj) >= 2 else "C"
+        ),
     }
 
     suggestions = []
@@ -997,6 +1039,8 @@ def analyze_factor_blocking(
         suggestions.append({"code": "unstable_folds", "value": positive_folds})
     if abs(t_adj) < 3:
         suggestions.append({"code": "weak_significance", "value": round(t_adj, 2)})
+    if trials > 1 and not multiple["clears_noise_max"]:
+        suggestions.append({"code": "below_noise_max", "value": multiple["expected_max_t"]})
     if not suggestions:
         suggestions.append({"code": "all_clear", "value": None})
 
@@ -1014,6 +1058,7 @@ def analyze_factor_blocking(
         "icir": round(icir, 3),
         "t_stat": round(t_raw, 2),
         "t_stat_adj": round(t_adj, 2),
+        "multiple_testing": multiple,
         "quantiles": [{"q": i + 1, "ret_pct": round(v, 3)} for i, v in enumerate(q_ret)],
         "spread_pct": round(spread_pp, 3),
         "monotonicity": round(mono, 3),
@@ -1090,3 +1135,58 @@ def marginal_contribution_blocking(
         "corr_with_blend": round(corr, 3) if np.isfinite(corr) else None,
         "verdict": verdict,
     }
+
+
+def prune_library_blocking(factors: list[dict], market: str, top_n: int = 5, rebalance: int = 10) -> dict:
+    """Library hygiene: for every member, the leave-one-out increment (blend
+    Sharpe with vs without it) and the recent-IC decay check. Verdicts:
+    keep / watch / retire. The caller stores strikes across runs so a factor
+    is only labelled "建议下线" after two consecutive negative reports."""
+    market = market if market in UNIVERSES else "us"
+    factors = [f for f in factors if str(f.get("expression", "")).strip()][:8]
+    if len(factors) < 2:
+        raise factor_dsl.FactorError("pruning needs at least 2 factors from one market")
+    panel = _load_panel_blocking(market)
+    close = panel["close"]
+
+    def sharpe_of(fs: list[dict]) -> float:
+        if len(fs) == 1:
+            f = fs[0]
+            res = portfolio_backtest_blocking(str(f["expression"]), market, top_n, rebalance, bool(f.get("invert")))
+        else:
+            res = composite_backtest_blocking(fs, market, "rolling", top_n, rebalance)
+        return float(res["stats"]["sharpe"])
+
+    full = sharpe_of(factors)
+    out = []
+    for i, f in enumerate(factors):
+        rest = factors[:i] + factors[i + 1:]
+        try:
+            without = sharpe_of(rest)
+            loo = round(full - without, 3)  # > 0: removing it hurts → it adds value
+        except Exception:  # noqa: BLE001
+            without, loo = None, None
+        # decay: recent 60-day IC in the accepted direction vs full-sample IC
+        try:
+            values, _ = factor_dsl.compute(str(f["expression"]), panel)
+            h = max(1, min(30, int(f.get("horizon", rebalance))))
+            fwd = close.pct_change(h).shift(-h)
+            ic = _daily_rank_ic(values, fwd)
+            sign = -1.0 if bool(f.get("invert")) else 1.0
+            full_ic = float(ic.mean()) * sign
+            recent_ic = float(ic.iloc[-60:].mean()) * sign
+            decayed = recent_ic < 0.005 and full_ic > 0
+        except Exception:  # noqa: BLE001
+            full_ic, recent_ic, decayed = None, None, False
+        if loo is not None and loo < -0.05:
+            verdict, reason = "retire", "removing it raises the blend's Sharpe"
+        elif decayed or (loo is not None and loo < 0.02):
+            verdict, reason = "watch", "recent IC has faded" if decayed else "adds almost nothing to the blend"
+        else:
+            verdict, reason = "keep", "adds value and still predicts"
+        out.append({
+            "expression": f["expression"], "loo_sharpe_delta": loo, "sharpe_without": None if without is None else round(without, 3),
+            "full_ic": None if full_ic is None else round(full_ic, 4), "recent_ic": None if recent_ic is None else round(recent_ic, 4),
+            "decayed": decayed, "verdict": verdict, "reason": reason,
+        })
+    return {"market": market, "blend_sharpe": round(full, 3), "n": len(factors), "members": out}
