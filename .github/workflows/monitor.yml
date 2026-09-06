@@ -1,0 +1,29 @@
+name: Deployment monitor
+
+# Replays every signed-in user's paper deployments once a day, stores the
+# per-account report and posts webhook notices for NEW alerts (drawdown,
+# decay, rebalance, stale data). Requires the ADMIN_TOKEN secret matching the
+# backend's ADMIN_TOKEN. The endpoint processes 20 accounts per call; the
+# loop keeps calling until it reports zero remaining.
+on:
+  schedule:
+    - cron: "45 21 * * 1-5"   # 21:45 UTC on weekdays — after the US close
+    - cron: "15 0 * * 0,6"    # crypto never sleeps: one weekend pass too
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run monitor until no accounts remain
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          SITE: https://aiquant-rust.vercel.app
+        run: |
+          if [ -z "$ADMIN_TOKEN" ]; then echo "ADMIN_TOKEN secret not set; skipping"; exit 0; fi
+          for i in $(seq 1 12); do
+            body=$(curl -s --max-time 280 -X POST "$SITE/api/paper/monitor/run?limit=20" -H "x-admin-token: $ADMIN_TOKEN")
+            echo "pass $i: $body"
+            remaining=$(echo "$body" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("remaining", 0))' 2>/dev/null || echo 0)
+            [ "$remaining" = "0" ] && break
+          done

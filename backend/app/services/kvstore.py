@@ -121,3 +121,17 @@ def list_prefix(namespace: str) -> list[dict]:
     with _lock:
         doc = _file_read()
     return [v for k, v in doc.items() if k.startswith(f"{namespace}:")]
+
+
+def list_prefix_items(namespace: str) -> list[tuple[str, dict]]:
+    """Like list_prefix but keeps the keys — callers that need to address
+    the documents again (per-account jobs) use this."""
+    if mode() == "kv":
+        keys = _kv("SMEMBERS", f"idx:{namespace}") or []
+        if not keys:
+            return []
+        raws = _kv("MGET", *keys) or []
+        return [(k, json.loads(r)) for k, r in zip(keys, raws) if r]
+    with _lock:
+        doc = _file_read()
+    return [(k, v) for k, v in doc.items() if k.startswith(f"{namespace}:")]
