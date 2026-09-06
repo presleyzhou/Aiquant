@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
@@ -95,7 +95,7 @@ class MarketDataService:
 
     async def quote(self, symbol: str) -> dict:
         symbol = symbol.upper().strip()
-        now = datetime.now(timezone.utc).timestamp()
+        now = datetime.now(UTC).timestamp()
 
         async with self._lock:
             cached = self._quote_cache.get(symbol)
@@ -127,8 +127,8 @@ class MarketDataService:
         info: dict[str, Any] = {}
         try:
             info = ticker.fast_info or {}
-        except Exception:  # fast_info is flaky for some tickers
-            pass
+        except Exception as exc:  # fast_info is flaky for some tickers
+            log.debug("fast_info unavailable for %s: %s", symbol, exc)
 
         return {
             "symbol": symbol,
@@ -144,7 +144,7 @@ class MarketDataService:
                 else None
             ),
             "currency": info.get("currency"),
-            "as_of": datetime.now(timezone.utc).isoformat(),
+            "as_of": datetime.now(UTC).isoformat(),
         }
 
     async def quotes(self, symbols: list[str]) -> list[dict]:
@@ -152,7 +152,7 @@ class MarketDataService:
             *(self.quote(s) for s in symbols), return_exceptions=True
         )
         out = []
-        for sym, res in zip(symbols, results):
+        for sym, res in zip(symbols, results, strict=False):
             if isinstance(res, Exception):
                 out.append({"symbol": sym.upper(), "error": str(res)})
             else:

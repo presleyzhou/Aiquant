@@ -257,6 +257,8 @@ DeMiguel-Garlappi-Uppal (2009)、Ledoit & Wolf (2008)、Harvey-Liu-Zhu (2016)、
 目标持仓较上次变化（需调仓）、数据超过 5 天未更新、无法重算。报告存 KV 供「模拟持仓」页展示；用户在页内填写 Slack / Discord /
 Telegram webhook 后，**新出现**的提醒会推送一次（同一提醒不重复打扰）。webhook 仅接受 https 公网地址。需在 GitHub Secrets 配置与后端一致的 `ADMIN_TOKEN`。
 
+**课堂演示模式与质量门禁。** 因子挖掘页标题旁的「📚 课堂演示」按 15 分钟讲义顺序走 8 步，每步高亮对应控件并标出幻灯片页码；因子库与合成、体检、上线等功能不再依赖 AI key（仅挖掘表单与循环日志需要）。模拟持仓中的因子部署显示服务器体检徽标。后端接入 ruff 规则集并进入 CI（E/F/I/B/UP/RUF/DTZ 等，风格类规则显式豁免），Playwright 冒烟测试扩展到 13 条，覆盖体检徽标、瘦身检查、课堂模式与站长后台。
+
 **服务器定时再体检与站长后台。** `.github/workflows/recheck.yml` 每个交易日收盘后调用 `POST /api/admin/recheck`（需 `ADMIN_TOKEN`），对所有已上架的因子和已同步账号因子库里的因子重跑健康检查与体检评级，结果写入 KV；前端因子库与卖家面板通过 `POST /api/factors/health` 读取并显示「服务器体检」徽标（日期、五项评级、衰减标记）。站长后台（页面 `?admin=1`，请求头 `X-Admin-Token`）提供总览（上架、订单、钱包负债、同步账号数、上次重检）、提现申请标记已付 / 拒绝（拒绝自动退回余额）、订单与上架列表、手动触发重检。因子库新增「→ Pipeline」：把本市场因子一键作为端到端量化 Pipeline 的信号来源打开，两条线共用同一份因子。
 
 **账户体系（可选，Supabase Auth）。** 配置 `SUPABASE_URL` + `SUPABASE_ANON_KEY`（后端）与 `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`（前端构建）后，页头出现「登录」：邮箱魔法链接登录，后端用 Supabase 的 /auth/v1/user 校验令牌（与签名算法无关），账户 id 派生自用户 id。登录后因子库、错题本、模拟持仓、预警、购买记录、自选自动合并到云端（KV）并跨设备同步，合并规则按键去重、只增不删；钱包与上架归属账号，「合并本浏览器的钱包与上架」一键把登录前的浏览器身份并入账号。未配置时保持浏览器密钥模式。`ADMIN_TOKEN` 保护 `/api/admin/*`。

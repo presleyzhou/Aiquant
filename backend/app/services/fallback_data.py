@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import io
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pandas as pd
@@ -26,7 +26,7 @@ _PERIOD_DAYS = {
 
 def _cutoff(period: str) -> pd.Timestamp:
     days = _PERIOD_DAYS.get(period, 731)
-    return pd.Timestamp(datetime.now(timezone.utc) - timedelta(days=days))
+    return pd.Timestamp(datetime.now(UTC) - timedelta(days=days))
 
 
 def stooq_daily(symbol: str, period: str) -> pd.DataFrame:

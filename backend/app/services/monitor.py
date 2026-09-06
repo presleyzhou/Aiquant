@@ -24,7 +24,7 @@ import math
 import re
 import socket
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from urllib.parse import urlparse
 
 import httpx
@@ -210,7 +210,7 @@ async def run_account(key: str, doc: dict, force: bool = False) -> dict | None:
     report = {
         "account": account,
         "generated_at": int(time.time()),
-        "generated_on": datetime.now(timezone.utc).date().isoformat(),
+        "generated_on": datetime.now(UTC).date().isoformat(),
         "items": items,
         "alerts_total": sum(len(i["alerts"]) for i in items),
     }

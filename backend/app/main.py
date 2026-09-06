@@ -7,7 +7,21 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import account, admin, ai, analytics, factors, kronos, market, marketplace, paper, payments, pipeline, wallet, ws
+from app.api import (
+    account,
+    admin,
+    ai,
+    analytics,
+    factors,
+    kronos,
+    market,
+    marketplace,
+    paper,
+    payments,
+    pipeline,
+    wallet,
+    ws,
+)
 from app.config import get_settings
 
 logging.basicConfig(

@@ -66,7 +66,7 @@ def test_macd_components_are_consistent():
 def test_bollinger_bands_are_ordered():
     df = trending()
     out = ind.bollinger(df)
-    for upper, middle, lower in zip(out["upper"], out["middle"], out["lower"]):
+    for upper, middle, lower in zip(out["upper"], out["middle"], out["lower"], strict=False):
         assert upper["value"] >= middle["value"] >= lower["value"]
 
 
@@ -175,7 +175,7 @@ def test_walk_forward_fold_geometry():
     folds = report["folds"]
     assert report["aggregate"]["folds"] == 3 and len(folds) == 3
     # Test windows tile forward without overlap, newest fold ends at data end.
-    for prev, cur in zip(folds, folds[1:]):
+    for prev, cur in zip(folds, folds[1:], strict=False):
         assert prev["test_end"] <= cur["test_start"]
     # Same params in every fold — each fold carries train AND test stats.
     for fold in folds:

@@ -217,7 +217,7 @@ class KronosService:
             },
             "history": [
                 {"time": epoch(ts), "close": round(float(c), 6)}
-                for ts, c in zip(history_idx, history_tail["close"])
+                for ts, c in zip(history_idx, history_tail["close"], strict=False)
             ],
             "forecast": [
                 {
@@ -226,7 +226,7 @@ class KronosService:
                     "high": round(float(h), 6),
                     "low": round(float(lo), 6),
                 }
-                for ts, row, h, lo in zip(future, pred.itertuples(), band_high, band_low)
+                for ts, row, h, lo in zip(future, pred.itertuples(), band_high, band_low, strict=False)
             ],
             "summary": {
                 "last_close": round(last_close, 6),
@@ -324,7 +324,7 @@ class KronosService:
         preds = self._batch_predict(frame, anchors, market, horizon)
         closes = frame["close"].to_numpy()
         points = []
-        for a, pred in zip(anchors, preds):
+        for a, pred in zip(anchors, preds, strict=False):
             pred_close = float(pred["close"].iloc[-1])
             anchor_close = float(closes[a])
             points.append(
@@ -370,7 +370,7 @@ class KronosService:
         closes = frame["close"].to_numpy()
 
         rows = []
-        for a, pred in zip(anchors, preds):
+        for a, pred in zip(anchors, preds, strict=False):
             anchor_close = float(closes[a])
             pred_change = (float(pred["close"].iloc[-1]) / anchor_close - 1) * 100
             actual_change = (float(closes[a + horizon]) / anchor_close - 1) * 100

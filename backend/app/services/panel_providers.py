@@ -21,12 +21,10 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pandas as pd
-
-from app.services import disk_cache
 
 log = logging.getLogger("aiquant.panel")
 
@@ -45,7 +43,7 @@ def is_crypto(symbol: str) -> bool:
 
 
 def _cutoff(period: str) -> pd.Timestamp:
-    return pd.Timestamp(datetime.now(timezone.utc) - timedelta(days=_PERIOD_DAYS.get(period, 1096)))
+    return pd.Timestamp(datetime.now(UTC) - timedelta(days=_PERIOD_DAYS.get(period, 1096)))
 
 
 def _settings():

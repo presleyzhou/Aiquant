@@ -10,9 +10,8 @@ nothing but httpx — and cached briefly.
 
 from __future__ import annotations
 
-import hmac
-
 import hashlib
+import hmac
 import logging
 import time
 

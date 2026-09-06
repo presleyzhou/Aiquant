@@ -20,8 +20,6 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.services.ratelimit import limiter
-
 from app.api.analytics import kronos_points_to_series
 from app.api.kronos import signal_points
 from app.services import backtest as bt
@@ -33,6 +31,7 @@ from app.services.factor_mine import (
     portfolio_backtest_blocking,
 )
 from app.services.pipeline import current_holdings_blocking, run_pipeline_blocking
+from app.services.ratelimit import limiter
 
 router = APIRouter(prefix="/api/paper", tags=["paper"])
 

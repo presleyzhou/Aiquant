@@ -348,7 +348,7 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
     if weighting == "ic_expanding":
         # weight_t(f) = expanding mean of IC_f over observations known at t
         cols = []
-        for f, ic in zip(spec["factors"], ic_series):
+        for f, ic in zip(spec["factors"], ic_series, strict=False):
             known = ic.reindex(close.index).expanding(min_periods=_IC_WARMUP).mean().shift(f["horizon"] + 1)
             cols.append(known)
         w_t = pd.concat(cols, axis=1)
@@ -377,12 +377,12 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
             mags = [m / total if total > 1e-9 else 1.0 / n for m in mags]
         else:
             mags = [1.0 / n] * n
-        weights = [sg * m for sg, m in zip(signs, mags)]
-        for c, w in zip(components, weights):
+        weights = [sg * m for sg, m in zip(signs, mags, strict=False)]
+        for c, w in zip(components, weights, strict=False):
             c["weight"] = round(w, 3)
             c["avg_weight"] = round(w, 3)
             c["active_pct"] = 100.0
-        scores = sum(r * w for r, w in zip(ranked_list, weights))
+        scores = sum(r * w for r, w in zip(ranked_list, weights, strict=False))
 
     # composite diagnostics: IC at several horizons (the information-horizon
     # curve of Grinold & Kahn) — tells the user how fast the blend decays and
@@ -813,7 +813,7 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
     trials: list[float] = []  # every configuration evaluated → the DSR's N
 
     # each factor alone through the same portfolio machinery
-    for comp, ranks in zip(signal["components"], ranked_list):
+    for comp, ranks in zip(signal["components"], ranked_list, strict=False):
         try:
             solo = simulate(ranks if comp["is_ic"] >= 0 else -ranks, panel, spec, ic=abs(comp["is_ic"]))
             comp["standalone_sharpe"] = portfolio.period_stats(solo["net"], solo["bench"], sim["ann"])["sharpe"]

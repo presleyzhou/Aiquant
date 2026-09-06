@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ApiError, api, type PaperMonitorAlert, type PaperMonitorAlertCode, type PaperMonitorReport, type PaperTrack, type Point,
+  ApiError, api, type FactorHealth, type PaperMonitorAlert, type PaperMonitorAlertCode, type PaperMonitorReport, type PaperTrack, type Point,
 } from "../api";
 import { onAuth } from "../auth";
 import { useT } from "../i18n";
@@ -28,6 +28,24 @@ export function PaperPage({ hidden }: Props) {
   const [overlay, setOverlay] = useState(true);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const monitor = useMonitor(hidden);
+  const [health, setHealth] = useState<Record<string, FactorHealth>>({});
+
+  // Server-side recheck verdicts for factor deployments (daily job).
+  useEffect(() => {
+    const byMarket = new Map<string, string[]>();
+    for (const d of deployments) {
+      if (d.kind !== "factor") continue;
+      const mk = String(d.config.market ?? "us"), ex = String(d.config.expression ?? "");
+      if (ex) byMarket.set(mk, [...(byMarket.get(mk) ?? []), ex]);
+    }
+    for (const [mk, exprs] of byMarket) {
+      api.factorHealth(mk, exprs).then((res) => setHealth((prev) => {
+        const next = { ...prev };
+        for (const [e, h] of Object.entries(res.health)) next[`${mk}|${e}`] = h;
+        return next;
+      })).catch(() => undefined);
+    }
+  }, [deployments]);
 
   const load = useCallback((dep: PaperDeployment) => {
     setTracks((prev) => ({ ...prev, [dep.id]: "loading" }));
@@ -206,6 +224,7 @@ export function PaperPage({ hidden }: Props) {
                   onRemove={() => remove(dep.id)}
                   onRefresh={() => load(dep)}
                   onNote={(note) => setDeployments(updatePaperNote(dep.id, note))}
+                  health={dep.kind === "factor" ? health[`${String(dep.config.market ?? "us")}|${String(dep.config.expression ?? "")}`] : undefined}
                 />
               ))}
             </div>
@@ -465,9 +484,10 @@ interface CardProps {
   onRemove: () => void;
   onRefresh: () => void;
   onNote: (note: string) => void;
+  health?: FactorHealth;
 }
 
-function Card({ dep, track, monitorAlerts, monitorDate, confirming, onRemove, onRefresh, onNote }: CardProps) {
+function Card({ dep, track, monitorAlerts, monitorDate, confirming, onRemove, onRefresh, onNote, health }: CardProps) {
   const { t } = useT();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(dep.note ?? "");
@@ -538,6 +558,12 @@ function Card({ dep, track, monitorAlerts, monitorDate, confirming, onRemove, on
           <div className="pp-badges">
             <PositionChip track={track} />
             <DecayChip track={track} />
+            {health && (
+              <span className={`pp-chip ${health.decayed ? "pp-chip--warn" : "pp-chip--ok"}`} title={t("pp.healthTitle", { d: health.as_of })}>
+                ☁ {t("pp.health", { g: `${health.grades.predictive}${health.grades.stability}${health.grades.robustness}${health.grades.tradability}${health.grades.significance}` })}
+                {health.decayed ? ` · ${t("fl.sh.decayed")}` : ""}
+              </span>
+            )}
             {ddAlert && (
               <span className="pp-chip pp-chip--warn" title={t("pp.ddAlertTitle")}>
                 ⚠ {t("pp.ddAlert", { v: track.stats.current_drawdown_pct.toFixed(1) })}

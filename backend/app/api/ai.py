@@ -3,12 +3,11 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-
-from app.services.ratelimit import limiter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.services.llm import STRATEGY_SYSTEM_PROMPT, STRATEGY_TOOLS, analyst
+from app.services.ratelimit import limiter
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ai", tags=["ai"])

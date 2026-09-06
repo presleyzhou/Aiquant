@@ -122,7 +122,7 @@ def _recheck_blocking(max_factors: int) -> dict:
                 "decayed": abs(chk["recent_ic"]) < 0.005 or (chk["recent_ic"] * chk["is_ic"] < 0),
             })
             done += 1
-        except Exception as exc:  # noqa: BLE001 - one bad factor must not stop the sweep
+        except Exception as exc:
             log.warning("recheck failed for %s: %s", expr, exc)
             failed += 1
     meta = {"last_run": int(time.time()), "targets": len(targets), "done": done, "failed": failed}

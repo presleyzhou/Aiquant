@@ -485,7 +485,7 @@ def test_alternatives_carry_the_equal_weight_test():
 
 def test_expanding_weights_gate_out_noise_factors():
     panel = _panel(600, 20, seed=9)
-    ret = panel["close"].pct_change()
+    _ = panel["close"].pct_change()
     # a genuine (oracle-ish) factor plus pure noise: the noise should be switched off most of the time
     panel = dict(panel)
     spec = pipeline.normalize_spec({**SPEC, "factors": ["rank(close)", "rank(volume)"], "signal_weighting": "ic_expanding"})
@@ -627,7 +627,7 @@ def test_custom_universe_uses_downloader_and_caches(monkeypatch):
     monkeypatch.setattr(pipeline.disk_cache, "load", lambda key, ttl: None)
     monkeypatch.setattr(pipeline.disk_cache, "store", lambda key, obj: None)
     pipeline._CUSTOM_CACHE.clear()
-    spec = {**SPEC, "symbols": names + ["ZZZZ"], "history": "5y"}
+    spec = {**SPEC, "symbols": [*names, "ZZZZ"], "history": "5y"}
     res = pipeline.run_pipeline_blocking(spec)
     assert calls and calls[0][1] == "5y" and "ZZZZ" in calls[0][0]
     assert res["universe"]["custom"] is True and res["universe"]["history"] == "5y"
@@ -722,11 +722,11 @@ def test_custom_cache_is_bounded(monkeypatch):
 
 def test_symbol_regex_accepts_indices_and_rejects_unicode():
     base = ["AAPL", "MSFT", "NVDA", "GOOG", "META", "AMZN", "TSLA"]
-    assert "^GSPC" in pipeline.parse_symbols(base + ["^gspc"])
+    assert "^GSPC" in pipeline.parse_symbols([*base, "^gspc"])
     with pytest.raises(factor_dsl.FactorError):
-        pipeline.parse_symbols(base + ["ıbm"])
+        pipeline.parse_symbols([*base, "ıbm"])
     with pytest.raises(factor_dsl.FactorError):
-        pipeline.parse_symbols(base + ["AAPL^"])
+        pipeline.parse_symbols([*base, "AAPL^"])
 
 
 def test_download_panel_survives_a_field_missing_a_column(monkeypatch):

@@ -131,7 +131,7 @@ def list_prefix_items(namespace: str) -> list[tuple[str, dict]]:
         if not keys:
             return []
         raws = _kv("MGET", *keys) or []
-        return [(k, json.loads(r)) for k, r in zip(keys, raws) if r]
+        return [(k, json.loads(r)) for k, r in zip(keys, raws, strict=False) if r]
     with _lock:
         doc = _file_read()
     return [(k, v) for k, v in doc.items() if k.startswith(f"{namespace}:")]
