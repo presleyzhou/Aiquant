@@ -632,9 +632,16 @@ function PositionChip({ track }: { track: PaperTrack }) {
   if (p.state === "holdings") {
     const symbols = p.symbols ?? [];
     const weights = p.weights_pct;
-    // Pipeline deployments carry target weights aligned with the symbols.
+    // Pipeline deployments carry target weights aligned with the symbols. A
+    // long-short book carries NEGATIVE weights for its shorts: every weight is
+    // then printed with an explicit sign so +50.0% / −50.0% read as sides.
+    const hasShorts = Array.isArray(weights) && weights.some((w) => typeof w === "number" && w < 0);
+    const fmtW = (w: number) => `${hasShorts && w > 0 ? "+" : ""}${w.toFixed(1)}%`;
     const label = symbols
-      .map((s, i) => (weights && weights[i] !== undefined ? `${s} ${weights[i].toFixed(1)}%` : s))
+      .map((s, i) => {
+        const w = weights?.[i];
+        return typeof w === "number" && Number.isFinite(w) ? `${s} ${fmtW(w)}` : s;
+      })
       .join(" · ");
     return (
       <span className="pp-chip pp-chip--long" title={t("pp.pos.holdingsTitle", { d: p.since ?? "" })}>

@@ -8,44 +8,56 @@ import {
   type PipelineRunRequest,
   type PipelineSignalWeighting,
 } from "../../api";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { useT, type MsgKey } from "../../i18n";
 import { buildPipelineShare, takePipelineShare } from "../../share";
 import { deployPaper, savedFactors, type SavedFactor } from "../../store";
 import { SectorStack } from "./charts";
 import { copyText } from "./clipboard";
+import { CompareRuns } from "./CompareRuns";
 import {
+  BORROW_RANGE,
   FALLBACK_CONFIG,
   FORM_KEY,
   HISTORIES,
+  MOBILE_QUERY,
   SECTOR_IDS,
   SIGNAL_WEIGHTINGS,
   STAGE_COUNT,
   SYMBOL_LIMITS,
+  TURNOVER_PENALTY_RANGE,
   WATCHLIST_KEYS,
 } from "./constants";
+import { exportPipelineWorkbook } from "./excel";
 import {
   formFromDefaults,
   formFromShare,
   loadForm,
   loadLast,
+  loadPinned,
   loadTrials,
   matchesPreset,
   parseSymbols,
   presetFields,
+  runKey,
   saveLast,
+  savePinned,
   saveTrials,
   type AltKey,
   type FactorOption,
   type FormState,
+  type PinnedRun,
   type PresetId,
 } from "./form";
-import { maxWeight, signed3 } from "./format";
+import { signed3 } from "./format";
 import { MemoCard } from "./MemoCard";
 import { markdownReport } from "./report";
+import { VerdictCard } from "./VerdictCard";
 import { BacktestResults } from "./stages/BacktestResults";
 import { PortfolioForm } from "./stages/PortfolioForm";
 import { RiskResults } from "./stages/RiskResults";
 import { SignalResult } from "./stages/SignalResult";
+import { TargetBook } from "./stages/TargetBook";
 import { UniverseResult } from "./stages/UniverseResult";
 import { TicketCard } from "./TicketCard";
 
@@ -86,6 +98,11 @@ export function PipelinePage({ hidden }: Props) {
   // V6: config-link share state
   const [shareCopied, setShareCopied] = useState<"idle" | "ok" | "fail">("idle");
   const [shareLoaded, setShareLoaded] = useState(false);
+  // V4-pipeline: Excel export state, the pinned "A" run and the mobile results collapse
+  const [xlsx, setXlsx] = useState<"idle" | "busy" | "ok" | "fail">("idle");
+  const [pinned, setPinned] = useState<PinnedRun | null>(loadPinned);
+  const mobile = useMediaQuery(MOBILE_QUERY);
+  const [expanded, setExpanded] = useState(false);
   const stageRefs = useRef<Array<HTMLElement | null>>([]);
 
   // V6 shared-link replay (?pl=): pre-fill the form, never run. Marking the
@@ -320,6 +337,10 @@ export function PipelinePage({ hidden }: Props) {
     prior_trials: clamp(Math.round(trials), limits.prior_trials),
     compare: form.compare,
     history: form.history,
+    // V4-pipeline: always sent so a shared link round-trips them; the server ignores the penalty outside mean_variance
+    turnover_penalty_bps: clamp(Math.round(form.turnoverPenaltyBps), limits.turnover_penalty_bps ?? TURNOVER_PENALTY_RANGE),
+    long_short: form.longShort,
+    borrow_bps: clamp(Math.round(form.borrowBps), limits.borrow_bps ?? BORROW_RANGE),
     // V5: only when the toggle is on — an omitted key means the built-in universe
     ...(form.customOn ? { symbols: customSymbols } : {}),
   });
@@ -332,10 +353,13 @@ export function PipelinePage({ hidden }: Props) {
     setCopied("idle");
     setMdCopied("idle");
     setShareLoaded(false);
+    setXlsx("idle");
     try {
       const res = await api.pipelineRun(buildRequest());
       setResult(res);
       setRestored(false);
+      // a fresh result lands behind the verdict card again on narrow screens
+      setExpanded(false);
       saveLast(res);
       setTrials((n) => {
         const next = n + 1;
@@ -384,18 +408,66 @@ export function PipelinePage({ hidden }: Props) {
   /** V4: the stage summaries as one Markdown document in the current language. */
   const copyMarkdown = async () => {
     if (!result) return;
-    const md = markdownReport(result, t, {
-      market: marketLabel(result.universe.market),
-      scheme: schemeName(result.portfolio.scheme),
-      weighting: weightingLabel(result.signal.weighting),
-      sector: (symbol: string, group?: string) => {
-        const g = groupOf(symbol, group);
-        return g === undefined ? undefined : sectorLabel(g);
-      },
-    });
+    const md = markdownReport(result, t, reportNames(result));
     const ok = await copyText(md);
     setMdCopied(ok ? "ok" : "fail");
     window.setTimeout(() => setMdCopied("idle"), 2500);
+  };
+
+  /** Names the report / workbook print instead of ids. */
+  const reportNames = (r: PipelineResult) => ({
+    market: marketLabel(r.universe.market),
+    scheme: schemeName(r.portfolio.scheme),
+    weighting: weightingLabel(r.signal.weighting),
+    sector: (symbol: string, group?: string) => {
+      const g = groupOf(symbol, group);
+      return g === undefined ? undefined : sectorLabel(g);
+    },
+  });
+
+  /** V4-pipeline: the whole result as a workbook; SheetJS loads on first click. */
+  const exportExcel = async () => {
+    if (!result || xlsx === "busy") return;
+    setXlsx("busy");
+    try {
+      await exportPipelineWorkbook(result, t, reportNames(result));
+      setXlsx("ok");
+    } catch {
+      setXlsx("fail");
+    }
+    window.setTimeout(() => setXlsx("idle"), 2500);
+  };
+
+  /** V4-pipeline: scheme · top_n · rebalance · factor count, in the UI language. */
+  const runLabel = (r: PipelineResult) =>
+    t("pl.cmp.label", {
+      s: schemeName(r.portfolio.scheme),
+      n: r.portfolio.top_n,
+      r: r.portfolio.rebalance,
+      f: r.signal.components.length,
+    });
+
+  const pinCurrent = () => {
+    if (!result) return;
+    const p: PinnedRun = { label: runLabel(result), at: new Date().toISOString(), result };
+    setPinned(p);
+    savePinned(p);
+  };
+
+  /** Swap A and B: the pinned run comes on screen in full, the on-screen run becomes A. */
+  const swapPinned = () => {
+    if (!pinned || !result) return;
+    const next: PinnedRun = { label: runLabel(result), at: new Date().toISOString(), result };
+    setPinned(next);
+    savePinned(next);
+    setResult(pinned.result);
+    setRestored(false);
+    saveLast(pinned.result);
+  };
+
+  const clearPinned = () => {
+    setPinned(null);
+    savePinned(null);
   };
 
   /** V6: the normalized spec without the browser-specific trial count. */
@@ -460,6 +532,13 @@ export function PipelinePage({ hidden }: Props) {
   const setStageRef = (i: number) => (el: HTMLElement | null) => {
     stageRefs.current[i] = el;
   };
+
+  // V4-pipeline long-short book: shorts carry negative weights (see TargetBook).
+  const longShort = result?.portfolio.long_short === true;
+  // A pinned run compares against a DIFFERENT run; the same config on the same data is just a cache hit.
+  const comparable = pinned !== null && result !== null && runKey(pinned.result) !== runKey(result);
+  // ≤ 720 px: stages ④–⑥ hide behind the verdict card until expanded
+  const collapsed = mobile && result !== null && !expanded;
 
   return (
     <div className="lab" style={hidden ? { display: "none" } : undefined}>
@@ -716,17 +795,42 @@ export function PipelinePage({ hidden }: Props) {
         </section>
 
         {/* ------------------------------------------------ stage 4 */}
-        <section className="panel pl-card" ref={setStageRef(3)} id="pl-stage-4" tabIndex={-1}>
+        {result && (
+          <VerdictCard result={result} mobile={mobile} expanded={expanded} onToggle={() => setExpanded((e) => !e)} />
+        )}
+        {pinned && result && comparable && !collapsed && (
+          <CompareRuns pinned={pinned} current={result} currentLabel={runLabel(result)} onSwap={swapPinned} onClear={clearPinned} />
+        )}
+        <section className="panel pl-card" ref={setStageRef(3)} id="pl-stage-4" tabIndex={-1} hidden={collapsed}>
           <div className="panel__head">
             <span className="panel__title">④ {t("pl.stage4")}</span>
             <span className="pl-head-actions">
               {result && (
                 <>
+                  {result.cached === true && (
+                    <span className="chip pl-cached" title={t("pl.bt.cachedTitle")} data-testid="pl-cached">
+                      ⟳ {t("pl.bt.cached")}
+                    </span>
+                  )}
                   {mdCopied === "ok" && <span className="pl-badge pl-badge--ok" data-testid="pl-md-copied">✓ {t("pl.bt.mdCopied")}</span>}
                   {mdCopied === "fail" && <span className="pl-badge pl-badge--warn">{t("pl.bt.mdCopyFailed")}</span>}
                   <button className="btn btn--mini" onClick={copyMarkdown} data-testid="pl-copy-md">
                     {t("pl.bt.copyMd")}
                   </button>
+                  {xlsx === "ok" && <span className="pl-badge pl-badge--ok" data-testid="pl-xlsx-ok">✓ {t("pl.xl.done")}</span>}
+                  {xlsx === "fail" && <span className="pl-badge pl-badge--warn">{t("pl.xl.failed")}</span>}
+                  <button className="btn btn--mini" onClick={exportExcel} disabled={xlsx === "busy"} title={t("pl.xl.title")} data-testid="pl-xlsx">
+                    {xlsx === "busy" ? t("pl.xl.busy") : t("pl.xl.button")}
+                  </button>
+                  {pinned && !comparable ? (
+                    <span className="chip is-on pl-pinned" title={t("pl.cmp.pinnedTitle")} data-testid="pl-pinned">
+                      A · {pinned.label}
+                    </span>
+                  ) : (
+                    <button className="btn btn--mini" onClick={pinCurrent} title={t("pl.cmp.pinTitle")} data-testid="pl-pin">
+                      {t("pl.cmp.pin")}
+                    </button>
+                  )}
                 </>
               )}
               <span className="panel__meta">
@@ -800,7 +904,7 @@ export function PipelinePage({ hidden }: Props) {
         </section>
 
         {/* -------------------------------------------- stages 5 + 6 */}
-        <div className="pl-grid">
+        <div className="pl-grid" hidden={collapsed}>
           <section className="panel pl-card" ref={setStageRef(4)} id="pl-stage-5" tabIndex={-1}>
             <div className="panel__head">
               <span className="panel__title">⑤ {t("pl.stage5")}</span>
@@ -818,8 +922,16 @@ export function PipelinePage({ hidden }: Props) {
             <div className="panel__head">
               <span className="panel__title">⑥ {t("pl.stage6")}</span>
               {result && (
-                <span className="panel__meta">
-                  {t("pl.deploy.asOf", { d: result.target_weights.as_of })} · {t("pl.pf.exposure", { v: result.target_weights.exposure_pct.toFixed(0) })}
+                <span className="panel__meta" data-testid="pl-book-meta">
+                  {t("pl.deploy.asOf", { d: result.target_weights.as_of })} ·{" "}
+                  {longShort
+                    ? t("pl.deploy.lsExposure", {
+                        net: result.target_weights.exposure_pct.toFixed(0),
+                        gross: (result.target_weights.gross_pct ?? 0).toFixed(0),
+                        long: (result.target_weights.long_pct ?? 0).toFixed(0),
+                        short: Math.abs(result.target_weights.short_pct ?? 0).toFixed(0),
+                      })
+                    : t("pl.pf.exposure", { v: result.target_weights.exposure_pct.toFixed(0) })}
                 </span>
               )}
             </div>
@@ -828,36 +940,7 @@ export function PipelinePage({ hidden }: Props) {
                 <div className="empty">{t("pl.bt.empty")}</div>
               ) : (
                 <>
-                  <div className="table-scroll pl-weights-scroll">
-                    <table className="lab-stats pl-weights" data-testid="pl-weights">
-                      <thead>
-                        <tr>
-                          <th>#</th>
-                          <th>{t("pl.deploy.symbol")}</th>
-                          {hasSectors && <th>{t("pl.deploy.sector")}</th>}
-                          <th>{t("pl.deploy.weight")}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {result.target_weights.weights.map((w) => (
-                          <tr key={w.symbol}>
-                            <td className="dim">{w.score_rank}</td>
-                            <td><b>{w.symbol}</b></td>
-                            {hasSectors && <td className="dim">{sectorLabel(groupOf(w.symbol, w.group) ?? "—")}</td>}
-                            <td>
-                              <div className="pl-bar">
-                                <div
-                                  className="pl-bar__fill"
-                                  style={{ width: `${Math.min(100, (w.weight_pct / maxWeight(result)) * 100)}%` }}
-                                />
-                                <span className="pl-bar__val">{w.weight_pct.toFixed(1)}%</span>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  <TargetBook result={result} longShort={longShort} hasSectors={hasSectors} groupOf={groupOf} sectorLabel={sectorLabel} />
 
                   {result.target_weights.groups && result.target_weights.groups.length > 0 && (
                     <>
@@ -894,7 +977,7 @@ export function PipelinePage({ hidden }: Props) {
                   </div>
                   <p className="dim pl-hint">{t("pl.deploy.note")}</p>
 
-                  <TicketCard spec={result.spec ?? buildRequest()} sectorLabel={sectorLabel} />
+                  <TicketCard spec={result.spec ?? buildRequest()} sectorLabel={sectorLabel} longShort={longShort} />
 
                   <MemoCard result={result} enabled={aiEnabled} lang={lang} />
                 </>

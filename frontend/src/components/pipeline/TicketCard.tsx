@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, type PipelineOrder, type PipelineOrders, type PipelineRunRequest } from "../../api";
+import { api, ApiError, type PipelineOrder, type PipelineOrders, type PipelineRunRequest } from "../../api";
 import { useT } from "../../i18n";
 import { copyText } from "./clipboard";
 import { MIN_TRADE_RANGE } from "./constants";
+import { exportTicketWorkbook } from "./excel";
 import { parseHoldings } from "./form";
 import { money, price } from "./format";
 
@@ -10,7 +11,9 @@ import { money, price } from "./format";
  * sell orders against the latest target book. The spec posted is the run on
  * screen (or the form's when none), so the ticket matches the numbers above;
  * a new run clears the previous ticket for the same reason. */
-export function TicketCard({ spec, sectorLabel }: { spec: PipelineRunRequest; sectorLabel: (id: string) => string }) {
+export function TicketCard({
+  spec, sectorLabel, longShort = false,
+}: { spec: PipelineRunRequest; sectorLabel: (id: string) => string; longShort?: boolean }) {
   const { t } = useT();
   const [nav, setNav] = useState<number>(100000);
   const [holdingsText, setHoldingsText] = useState("");
@@ -18,13 +21,18 @@ export function TicketCard({ spec, sectorLabel }: { spec: PipelineRunRequest; se
   const [ticket, setTicket] = useState<PipelineOrders | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** V4-pipeline: the server's 400 "long-only" detail, shown as a notice rather than an error. */
+  const [longOnly, setLongOnly] = useState<string | null>(null);
   const [csvCopied, setCsvCopied] = useState<"idle" | "ok" | "fail">("idle");
+  const [xlsx, setXlsx] = useState<"idle" | "busy" | "ok" | "fail">("idle");
 
   // Keyed on content, not identity: the caller may rebuild the spec object per render.
   const specKey = JSON.stringify(spec);
   useEffect(() => {
     setTicket(null);
     setError(null);
+    setLongOnly(null);
+    setXlsx("idle");
   }, [specKey]);
 
   const lines = useMemo(() => parseHoldings(holdingsText), [holdingsText]);
@@ -46,11 +54,40 @@ export function TicketCard({ spec, sectorLabel }: { spec: PipelineRunRequest; se
     try {
       setTicket(await api.pipelineOrders({ spec, nav, current, min_trade_pct: minTradePct }));
     } catch (err) {
-      setError((err as Error).message);
+      const msg = (err as Error).message;
+      if (err instanceof ApiError && err.status === 400 && /long[- ]only/i.test(msg)) setLongOnly(msg);
+      else setError(msg);
     } finally {
       setPending(false);
     }
   };
+
+  const exportExcel = async () => {
+    if (!ticket || xlsx === "busy") return;
+    setXlsx("busy");
+    try {
+      await exportTicketWorkbook(ticket, spec, t, sectorLabel);
+      setXlsx("ok");
+    } catch {
+      setXlsx("fail");
+    }
+    window.setTimeout(() => setXlsx("idle"), 2500);
+  };
+
+  // V4-pipeline long-short book: the server refuses to size shorts, so the
+  // form is replaced by the note — nothing to type, nothing to post.
+  if (longShort) {
+    return (
+      <div className="pl-ticket" data-testid="pl-ticket">
+        <div className="pl-memo__head">
+          <span className="pl-subhead" style={{ marginTop: 0 }}>{t("pl.tk.title")}</span>
+        </div>
+        <div className="pl-notice" data-testid="pl-ticket-longonly">
+          ⓘ {t("pl.tk.longOnly")}
+        </div>
+      </div>
+    );
+  }
 
   const copyCsv = async () => {
     if (!ticket) return;
@@ -140,10 +177,20 @@ export function TicketCard({ spec, sectorLabel }: { spec: PipelineRunRequest; se
             </button>
             {csvCopied === "ok" && <span className="pl-badge pl-badge--ok" data-testid="pl-ticket-csv-copied">✓ {t("pl.deploy.copied")}</span>}
             {csvCopied === "fail" && <span className="pl-badge pl-badge--warn">{t("pl.deploy.copyFailed")}</span>}
+            <button className="btn" onClick={exportExcel} disabled={xlsx === "busy"} title={t("pl.xl.ticketTitle")} data-testid="pl-ticket-xlsx">
+              {xlsx === "busy" ? t("pl.xl.busy") : t("pl.xl.button")}
+            </button>
+            {xlsx === "ok" && <span className="pl-badge pl-badge--ok" data-testid="pl-ticket-xlsx-ok">✓ {t("pl.xl.done")}</span>}
+            {xlsx === "fail" && <span className="pl-badge pl-badge--warn">{t("pl.xl.failed")}</span>}
           </>
         )}
       </div>
       {error && <div className="err" data-testid="pl-ticket-error">{error}</div>}
+      {longOnly && (
+        <div className="pl-notice" data-testid="pl-ticket-longonly">
+          ⓘ {t("pl.tk.longOnly")} <span className="dim">· {longOnly}</span>
+        </div>
+      )}
       {ticket && sm && (
         <>
           <div className="chip-row pl-chip-row" data-testid="pl-ticket-summary">

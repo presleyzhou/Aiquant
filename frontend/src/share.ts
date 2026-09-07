@@ -118,7 +118,11 @@ export function sanitizePipelineSpec(raw: unknown): PipelineRunRequest | null {
   if (weighting === "ic_expanding" || weighting === "ic" || weighting === "equal") spec.signal_weighting = weighting;
   const scheme = str("scheme");
   if (scheme) spec.scheme = scheme;
-  for (const key of ["top_n", "rebalance", "max_weight", "cost_bps", "vol_lookback", "hold_buffer", "trade_rate", "shrink_to_equal"] as const) {
+  for (const key of [
+    "top_n", "rebalance", "max_weight", "cost_bps", "vol_lookback", "hold_buffer", "trade_rate", "shrink_to_equal",
+    // V4-pipeline: absent on an old link → the form keeps its own values
+    "turnover_penalty_bps", "borrow_bps",
+  ] as const) {
     const v = num(key);
     if (v !== undefined) spec[key] = v;
   }
@@ -129,6 +133,7 @@ export function sanitizePipelineSpec(raw: unknown): PipelineRunRequest | null {
     if (v !== undefined) spec.target_vol_pct = v;
   }
   if (typeof r.compare === "boolean") spec.compare = r.compare;
+  if (typeof r.long_short === "boolean") spec.long_short = r.long_short;
   if (Array.isArray(r.symbols)) {
     const symbols = r.symbols
       .filter((x): x is string => typeof x === "string")

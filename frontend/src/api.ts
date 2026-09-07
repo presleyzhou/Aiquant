@@ -107,6 +107,42 @@ export interface AdminOverview {
   gross_usd: number;
   wallet_liabilities_usd: number;
   health_runs: { last_run?: number; targets?: number; done?: number; failed?: number };
+  /** Ops layer: the last merged daily ops pass (warm → recheck → monitor); `{}` before the first run. */
+  ops_last?: AdminOpsRun | Record<string, never>;
+  /** Ops layer: per-market data-provider usage over the trailing window. */
+  provider_health?: AdminProviderHealth;
+}
+
+export interface AdminOpsStep {
+  step: "warm" | "recheck" | "monitor" | string;
+  ok: boolean;
+  seconds: number;
+  result?: unknown;
+  error?: string;
+}
+
+export interface AdminOpsRun {
+  started_at: number;
+  finished_at: number;
+  seconds: number;
+  ok: boolean;
+  monitor_remaining: number;
+  steps: AdminOpsStep[];
+}
+
+export interface AdminProviderMarket {
+  calls: number;
+  fallbacks: number;
+  seconds: number;
+  served: Record<string, number>;
+  fallback_rate_pct: number;
+  avg_seconds: number;
+}
+
+export interface AdminProviderHealth {
+  days: number;
+  generated_at: number;
+  markets: Record<string, AdminProviderMarket>;
 }
 
 export interface AdminWithdrawal {
@@ -531,9 +567,24 @@ export interface PipelineConfig {
     shrink_to_equal?: number;
     /** V5: default panel depth (3y). */
     history?: PipelineHistory;
+    /** V4-pipeline: L1 turnover penalty (mean_variance only), 0 = off. */
+    turnover_penalty_bps?: number;
+    /** V4-pipeline: long top-N / short bottom-N, dollar-neutral. */
+    long_short?: boolean;
+    /** V4-pipeline: annual borrow fee on the short notional. */
+    borrow_bps?: number;
   };
-  /** V5: `symbols` = [min, max] size of a custom universe; absent on a pre-V5 server. */
-  limits: Record<PipelineLimitKey, [number, number]> & { symbols?: [number, number] };
+  /** V5: `symbols` = [min, max] size of a custom universe; absent on a pre-V5 server.
+   * V4-pipeline: `turnover_penalty_bps` / `borrow_bps` bounds; absent on an older server. */
+  limits: Record<PipelineLimitKey, [number, number]> & {
+    symbols?: [number, number];
+    turnover_penalty_bps?: [number, number];
+    borrow_bps?: [number, number];
+  };
+  /** V4-pipeline: point-in-time fundamentals availability. */
+  fundamentals?: { enabled: boolean; provider: "fmp" | string | null; market: string; fields: string[]; lag_days: number };
+  /** V4-pipeline: CPCV geometry the server uses when `compare` is on. */
+  cpcv?: { groups: number; k: number };
 }
 
 export interface PipelineRunRequest {
@@ -561,6 +612,33 @@ export interface PipelineRunRequest {
   symbols?: string[];
   /** V5: panel depth, default 3y. */
   history?: PipelineHistory;
+  /** V4-pipeline: 0–100, default 0. L1 cost per unit of weight traded (Gârleanu-Pedersen);
+   * only the mean_variance scheme uses it. */
+  turnover_penalty_bps?: number;
+  /** V4-pipeline: long top-N, short bottom-N, dollar-neutral. Default false. */
+  long_short?: boolean;
+  /** V4-pipeline: 0–500, default 100. Annual borrow fee on the short notional (long_short only). */
+  borrow_bps?: number;
+}
+
+/** V4-pipeline: combinatorial purged cross-validation (López de Prado 2018)
+ * over `groups` blocks with `k` test blocks per split; each of the `paths`
+ * stitched out-of-sample paths gets one annualised Sharpe. */
+export interface PipelineCpcv {
+  groups: number;
+  k: number;
+  splits: number;
+  paths: number;
+  purge_days: number;
+  embargo_days: number;
+  path_sharpes: number[];
+  path_days: number[];
+  median_sharpe: number | null;
+  min_sharpe: number | null;
+  max_sharpe: number | null;
+  /** 0–100 */
+  pct_paths_positive: number;
+  complete: boolean;
 }
 
 export interface PipelineSplitStats {
@@ -656,10 +734,13 @@ export interface PipelineSensitivity {
 
 export interface PipelineTargetWeight {
   symbol: string;
+  /** NEGATIVE for shorts in long-short mode. */
   weight_pct: number;
   score_rank: number;
   /** V3 sector / group id. */
   group?: string;
+  /** V4-pipeline: only in long-short mode. */
+  side?: "long" | "short";
 }
 
 /** V6 per-symbol data health; sorted by coverage ascending (worst first).
@@ -701,6 +782,8 @@ export interface PipelineCapacity {
 
 export interface PipelineResult {
   spec: PipelineRunRequest;
+  /** V4-pipeline: served from the server's result cache (same config + same panel date). */
+  cached?: boolean;
   universe: {
     market: string;
     symbols: number;
@@ -717,6 +800,9 @@ export interface PipelineResult {
     provider?: string;
     /** V6: per-symbol coverage, worst first; absent on a pre-V6 server. */
     health?: PipelineHealthRow[];
+    /** V4-pipeline: the universe is today's constituents — names delisted or
+     * acquired inside the window are missing, which flatters the backtest. */
+    survivorship?: { current_constituents_only: boolean; late_listings: number; delisted_included: boolean };
   };
   signal: {
     weighting: string;
@@ -763,6 +849,15 @@ export interface PipelineResult {
     breakeven_cost_bps?: number | null;
     hold_buffer?: number;
     trade_rate?: number;
+    /** V4-pipeline */
+    turnover_penalty_bps?: number;
+    long_short?: boolean;
+    /** null unless long_short */
+    borrow_bps?: number | null;
+    /** Total borrow fees paid over the backtest, % of NAV; null unless long_short. */
+    borrow_cost_pct?: number | null;
+    /** `avg_exposure_pct` is GROSS when long_short (≈ 200); this is the net figure. */
+    avg_net_exposure_pct?: number;
   };
   backtest: {
     span: { from: string; to: string };
@@ -835,12 +930,19 @@ export interface PipelineResult {
   sensitivity?: PipelineSensitivity | null;
   /** V6: square-root-impact capacity curve; absent on a pre-V6 server. */
   capacity?: PipelineCapacity | null;
+  /** V4-pipeline: null when `compare` is false or the diagnostic failed. */
+  cpcv?: PipelineCpcv | null;
   target_weights: {
     as_of: string;
+    /** Net exposure. */
     exposure_pct: number;
     weights: PipelineTargetWeight[];
     /** V3: target book summed per sector / group. */
     groups?: Array<{ group: string; weight_pct: number }>;
+    /** V4-pipeline long-short book. */
+    gross_pct?: number;
+    long_pct?: number;
+    short_pct?: number;
   };
   warnings: string[];
 }
@@ -1104,6 +1206,9 @@ export const api = {
     orders: (token: string) => fetch("/api/admin/orders", { headers: { "X-Admin-Token": token } }).then(json<{ orders: Array<Record<string, unknown>> }>),
     listings: (token: string) => fetch("/api/admin/listings", { headers: { "X-Admin-Token": token } }).then(json<{ listings: Array<MarketItem & { status: string; seller: string }> }>),
     recheck: (token: string) => fetch("/api/admin/recheck", { method: "POST", headers: { "X-Admin-Token": token } }).then(json<{ last_run: number; targets: number; done: number; failed: number }>),
+    /** Ops layer: run the merged daily ops pass now (warm → recheck → monitor); returns the `ops_last` shape. */
+    ops: (token: string) =>
+      fetch("/api/admin/ops?max_factors=60&monitor_limit=10", { method: "POST", headers: { "X-Admin-Token": token } }).then(json<AdminOpsRun>),
   },
 
   factorPrune: (body: { factors: Array<{ expression: string; invert?: boolean; horizon?: number }>; market: string; top_n?: number; rebalance?: number }) =>
