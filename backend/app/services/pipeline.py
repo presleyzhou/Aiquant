@@ -761,6 +761,10 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
                 "psr": _r(psr, 3),
                 "dsr": _r(dsr["dsr"], 3),
                 "trials": dsr["trials"],
+                # inputs kept so a cached result can be re-deflated for another
+                # user's trial count without recomputing the backtest
+                "_moments": portfolio.sharpe_moments(net),
+                "_trial_sharpes": [round(float(x), 6) for x in (trial_sharpes or [])][:64],
                 "expected_max_sharpe_ann": _r(dsr["expected_max_sharpe"] * np.sqrt(ann) if dsr["expected_max_sharpe"] is not None else None, 2),
                 "t_stat": tstat,
                 "hlz_hurdle": 3.0,

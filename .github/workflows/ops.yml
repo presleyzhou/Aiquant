@@ -1,0 +1,43 @@
+name: Daily ops
+
+# One scheduled pass replaces the former monitor.yml + recheck.yml:
+#   warm    — pre-load the built-in US / crypto panels into the shared KV cache
+#   recheck — re-grade every listed / synced factor (health + report card)
+#   monitor — replay every signed-in user's paper deployments, alert on NEW
+#             drawdown / decay / rebalance / stale / error findings
+# POST /api/admin/ops does all three inside one function budget and returns
+# `monitor_remaining`; the loop calls again until it is zero. The report is
+# stored as ops:last and shown in the admin console (?admin=1).
+# Needs the ADMIN_TOKEN secret (same value as the backend's ADMIN_TOKEN or
+# ADMIN_TOKEN_NEXT) and a durable KV.
+on:
+  schedule:
+    - cron: "45 21 * * 1-5"   # 21:45 UTC on weekdays — after the US close
+    - cron: "15 0 * * 0,6"    # crypto never sleeps: one weekend pass too
+  workflow_dispatch:
+
+jobs:
+  ops:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run the ops pass until no accounts remain
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          SITE: ${{ vars.SITE_URL || 'https://aiquant-rust.vercel.app' }}
+        run: |
+          if [ -z "$ADMIN_TOKEN" ]; then echo "ADMIN_TOKEN secret not set; skipping"; exit 0; fi
+          failures=0
+          for i in $(seq 1 12); do
+            # the first call does warm + recheck + monitor; follow-ups only need to drain the monitor
+            [ "$i" = "1" ] && url="$SITE/api/admin/ops?max_factors=60&monitor_limit=10" || url="$SITE/api/admin/ops?max_factors=1&monitor_limit=10"
+            body=$(curl -sS --max-time 295 -X POST "$url" -H "x-admin-token: $ADMIN_TOKEN") || body=""
+            echo "pass $i: ${body:0:600}"
+            remaining=$(echo "$body" | python3 -c 'import sys,json; print(int(json.load(sys.stdin)["monitor_remaining"]))' 2>/dev/null || echo "ERR")
+            if [ "$remaining" = "ERR" ]; then
+              failures=$((failures+1)); [ "$failures" -ge 3 ] && { echo "ops endpoint kept failing"; exit 1; }
+              sleep 20; continue
+            fi
+            [ "$remaining" = "0" ] && exit 0
+            [ "$remaining" = "-1" ] && { echo "monitor step failed or was skipped for time; retrying"; sleep 10; }
+          done
+          echo "accounts still remaining after 12 passes"; exit 1

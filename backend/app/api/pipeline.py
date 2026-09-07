@@ -52,10 +52,28 @@ async def get_config() -> dict:
     return pipeline_config()
 
 
+def _run_cached(raw: dict) -> dict:
+    """normalise → load panel → cache lookup keyed on spec + panel date → run."""
+    from app.services import run_cache
+    from app.services.pipeline import load_panel, normalize_spec
+
+    spec = normalize_spec(raw)
+    panel = load_panel(spec)
+    panel_date = str(panel["close"].index[-1].date())
+    key = run_cache.key_for(spec, panel_date)
+    hit = run_cache.get(key)
+    if hit is not None:
+        return run_cache.personalise(hit, spec.get("prior_trials", 0))
+    result = run_pipeline_blocking(spec, panel=panel)
+    run_cache.put(key, result)
+    result["cached"] = False
+    return result
+
+
 @router.post("/run", dependencies=[Depends(limiter("pipeline", "rl_pipeline_per_hour", 3600))])
 async def run(req: PipelineRequest) -> dict:
     try:
-        return await asyncio.to_thread(run_pipeline_blocking, req.model_dump())
+        return await asyncio.to_thread(_run_cached, req.model_dump())
     except factor_dsl.FactorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:

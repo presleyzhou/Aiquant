@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     supabase_anon_key: str | None = None
     # Operator token for /api/admin/* (withdrawals, ledger, rechecks).
     admin_token: str | None = None
+    # Second accepted admin token during rotation (set NEXT, switch clients, then move it to ADMIN_TOKEN).
+    admin_token_next: str | None = None
     # Daily deployment monitor: drawdown alert threshold (percent, positive number).
     monitor_drawdown_pct: float = 10.0
     rl_monitor_per_hour: int = 12

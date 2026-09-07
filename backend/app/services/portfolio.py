@@ -485,14 +485,10 @@ def norm_ppf(p: float) -> float:
            (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
 
 
-def probabilistic_sharpe(returns: pd.Series, benchmark_sr: float = 0.0) -> float | None:
-    """PSR (Bailey & López de Prado 2012): probability that the TRUE Sharpe
-    exceeds `benchmark_sr`, given the observed per-period Sharpe, the track
-    length and the return distribution's skew (γ3) and kurtosis (γ4):
-
-        PSR = Φ( (SR − SR*) · sqrt(T − 1) / sqrt(1 − γ3·SR + (γ4 − 1)/4 · SR²) )
-
-    All Sharpe ratios here are per period (daily), not annualised."""
+def sharpe_moments(returns: pd.Series) -> dict | None:
+    """The four numbers the PSR/DSR formulas need: per-period Sharpe, track
+    length, skew and (non-excess) kurtosis. Small enough to store with a
+    cached result so the DSR can be re-deflated for a different trial count."""
     r = returns.dropna()
     t = len(r)
     if t < 30:
@@ -501,12 +497,44 @@ def probabilistic_sharpe(returns: pd.Series, benchmark_sr: float = 0.0) -> float
     if sd <= _EPS:
         return None
     sr = float(r.mean() / sd)
-    skew = float(((r - r.mean()) ** 3).mean() / sd**3)
-    kurt = float(((r - r.mean()) ** 4).mean() / sd**4)
-    denom = 1 - skew * sr + (kurt - 1) / 4 * sr * sr
+    return {
+        "sr": sr, "t": t,
+        "skew": float(((r - r.mean()) ** 3).mean() / sd**3),
+        "kurt": float(((r - r.mean()) ** 4).mean() / sd**4),
+    }
+
+
+def psr_from_moments(m: dict | None, benchmark_sr: float = 0.0) -> float | None:
+    if not m:
+        return None
+    sr, t = m["sr"], m["t"]
+    denom = 1 - m["skew"] * sr + (m["kurt"] - 1) / 4 * sr * sr
     if denom <= _EPS:
         return None
     return norm_cdf((sr - benchmark_sr) * math.sqrt(t - 1) / math.sqrt(denom))
+
+
+def probabilistic_sharpe(returns: pd.Series, benchmark_sr: float = 0.0) -> float | None:
+    """PSR (Bailey & López de Prado 2012): probability that the TRUE Sharpe
+    exceeds `benchmark_sr`, given the observed per-period Sharpe, the track
+    length and the return distribution's skew (γ3) and kurtosis (γ4):
+
+        PSR = Φ( (SR − SR*) · sqrt(T − 1) / sqrt(1 − γ3·SR + (γ4 − 1)/4 · SR²) )
+
+    All Sharpe ratios here are per period (daily), not annualised."""
+    return psr_from_moments(sharpe_moments(returns), benchmark_sr)
+
+
+def deflated_sharpe_from(m: dict | None, trial_sharpes: list[float], extra_trials: int = 0) -> dict:
+    """DSR from stored moments — see `deflated_sharpe`."""
+    trials = [float(x) for x in trial_sharpes if x is not None and np.isfinite(x)]
+    n = len(trials) + max(0, int(extra_trials))
+    if len(trials) < 2:
+        return {"trials": n, "expected_max_sharpe": None, "dsr": psr_from_moments(m)}
+    var = float(np.var(trials, ddof=1))
+    gamma = 0.5772156649015329
+    sr_star = math.sqrt(max(var, 0.0)) * ((1 - gamma) * norm_ppf(1 - 1 / n) + gamma * norm_ppf(1 - 1 / (n * math.e)))
+    return {"trials": n, "expected_max_sharpe": round(sr_star, 4), "dsr": psr_from_moments(m, sr_star)}
 
 
 def deflated_sharpe(returns: pd.Series, trial_sharpes: list[float], extra_trials: int = 0) -> dict:

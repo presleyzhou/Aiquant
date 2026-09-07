@@ -99,6 +99,7 @@ vercel --prod   # 生产环境
 | `CLAUDE_CHAT_MAX_TOKENS` | `8000` | AI 分析对话的单次输出上限（策略工坊仍用 `CLAUDE_MAX_TOKENS`） |
 | `RL_CHAT_PER_HOUR` / `RL_STRATEGY_PER_DAY` / `RL_MINING_PER_DAY` / `RL_EVOLVE_PER_DAY` / `RL_MEMO_PER_DAY` | 20 / 5 / 5 / 20 / 20 | 每 IP 限流；`RL_GLOBAL_AI_PER_DAY`（500）为实例级每日 AI 调用熔断 |
 | `MONITOR_DRAWDOWN_PCT` / `RL_MONITOR_PER_HOUR` | `10` / `12` | 每日监控的回撤告警阈值（百分比）；「立即检查」与「测试推送」的每 IP 每小时限流 |
+| `ADMIN_TOKEN_NEXT` | 空 | 站长令牌轮换：新旧两个值同时有效，先在 Vercel 加 NEXT、再改 GitHub Secret、最后把 NEXT 提升为 `ADMIN_TOKEN` |
 | `ALPHA_VANTAGE_KEY` | 空 | 仅供内嵌的 Alpha Vantage provider 使用；yfinance 无需 key |
 | `PANEL_PROVIDER_CRYPTO` | `binance` | 因子挖掘 / 流水线的数字货币日线面板：`binance` = Binance 公开 K 线为主源，Binance 未上币由 CoinGecko 补齐，Yahoo 兜底；`yahoo` 强制 Yahoo |
 | `PANEL_PROVIDER_US` | `auto` | 美股日线面板：`auto` = 装了 AkShare（新浪财经前复权数据）就用 AkShare，否则 Yahoo；`akshare` / `yahoo` 强制。AkShare 约 100MB 依赖，不进 Vercel 包，本地 / Docker 用 `uv pip install -e '.[akshare]'` |
@@ -253,14 +254,16 @@ DeMiguel-Garlappi-Uppal (2009)、Ledoit & Wolf (2008)、Harvey-Liu-Zhu (2016)、
 
 **市场支持买卖双边，支付走托管供应商，且诚实分层。** 买方：`STRIPE_SECRET_KEY` 开启银行卡 / Apple Pay / Google Pay（Stripe Checkout，`STRIPE_PAYMENT_METHODS` 可追加 `alipay,wechat_pay`），`COINBASE_COMMERCE_API_KEY` 开启数字货币（Coinbase Commerce 托管页，BTC / ETH / USDC…）；两条通道各自独立，卡号与私钥都不经过本站。支付确认后服务器签发 HMAC 权益凭证（`MARKETPLACE_SECRET`），付费社区内容的策略参数 / 因子表达式只凭凭证释放；`STRIPE_WEBHOOK_SECRET` / `COINBASE_WEBHOOK_SECRET` 启用签名校验的 webhook 入账。卖方：任何人可把自己的策略或因子库里的因子上架（免费或付费），收款选数字货币钱包（平台代收、扣 `PLATFORM_FEE_PCT` 后按周结算）或 Stripe Connect Express（开户链接一键跳转，成交时 Stripe 自动分账）。上架与订单账本存 Upstash / Vercel KV（`KV_REST_API_URL` + `KV_REST_API_TOKEN`），未配置时落到临时文件并在界面明示。两条通道都未配置时进入**明确标注的演示模式** —— 不展示收款地址、服务端永不伪造「已支付」、演示凭证永久带 demo 标记、演示成交不计入卖家销量。
 
-**每日自动监控（登录后）。** `.github/workflows/monitor.yml` 每个交易日收盘后（周末各一次覆盖加密货币）调用 `POST /api/paper/monitor/run`，
+**每日自动监控（登录后）。** `.github/workflows/ops.yml` 每个交易日收盘后（周末各一次覆盖加密货币）调用 `POST /api/admin/ops`（一次完成预热 → 再体检 → 监控，返回 `monitor_remaining` 直至为 0），
 服务端重放每个账户云端同步的模拟持仓，按五条规则告警：回撤超过 `MONITOR_DRAWDOWN_PCT`（默认 10%）、边际衰减判定为 degraded、
 目标持仓较上次变化（需调仓）、数据超过 5 天未更新、无法重算。报告存 KV 供「模拟持仓」页展示；用户在页内填写 Slack / Discord /
 Telegram webhook 后，**新出现**的提醒会推送一次（同一提醒不重复打扰）。webhook 仅接受 https 公网地址。需在 GitHub Secrets 配置与后端一致的 `ADMIN_TOKEN`。
 
 **课堂演示模式与质量门禁。** 因子挖掘页标题旁的「📚 课堂演示」按 15 分钟讲义顺序走 8 步，每步高亮对应控件并标出幻灯片页码；因子库与合成、体检、上线等功能不再依赖 AI key（仅挖掘表单与循环日志需要）。模拟持仓中的因子部署显示服务器体检徽标。后端接入 ruff 规则集并进入 CI（E/F/I/B/UP/RUF/DTZ 等，风格类规则显式豁免），Playwright 冒烟测试扩展到 13 条，覆盖体检徽标、瘦身检查、课堂模式与站长后台。
 
-**服务器定时再体检与站长后台。** `.github/workflows/recheck.yml` 每个交易日收盘后调用 `POST /api/admin/recheck`（需 `ADMIN_TOKEN`），对所有已上架的因子和已同步账号因子库里的因子重跑健康检查与体检评级，结果写入 KV；前端因子库与卖家面板通过 `POST /api/factors/health` 读取并显示「服务器体检」徽标（日期、五项评级、衰减标记）。站长后台（页面 `?admin=1`，请求头 `X-Admin-Token`）提供总览（上架、订单、钱包负债、同步账号数、上次重检）、提现申请标记已付 / 拒绝（拒绝自动退回余额）、订单与上架列表、手动触发重检。因子库新增「→ Pipeline」：把本市场因子一键作为端到端量化 Pipeline 的信号来源打开，两条线共用同一份因子。
+**服务器定时再体检与站长后台。** 每日 ops 任务的第二步调用 `_recheck_blocking`（也可单独 `POST /api/admin/recheck`，需 `ADMIN_TOKEN`），对所有已上架的因子和已同步账号因子库里的因子重跑健康检查与体检评级，结果写入 KV；前端因子库与卖家面板通过 `POST /api/factors/health` 读取并显示「服务器体检」徽标（日期、五项评级、衰减标记）。站长后台（页面 `?admin=1`，请求头 `X-Admin-Token`）提供总览（上架、订单、钱包负债、同步账号数、上次重检）、提现申请标记已付 / 拒绝（拒绝自动退回余额）、订单与上架列表、手动触发重检。因子库新增「→ Pipeline」：把本市场因子一键作为端到端量化 Pipeline 的信号来源打开，两条线共用同一份因子。
+
+**运维可见性与真实数据夜测。** 站长后台总览新增「上次 ops 运行」（三步各自耗时 / 成败 / 剩余账户）与「数据源健康」（近 7 天每市场调用次数、退回 Yahoo 的比例、平均下载秒数，`provider_health.py` 按天计数写 KV）。`.github/workflows/live-check.yml` 每晚在有网络的 runner 上跑 `backend/scripts/live_check.py`：真实下载美股与加密货币面板、跑默认 Pipeline、生成调仓单，任一步出错或数据异常（币种过少、最新一根 K 线超过 5 天、目标权重为空）即失败并自动开 / 更新一条 `live-check` 标签的 issue，转绿后自动关闭。`POST /api/pipeline/run` 的结果按「规范化配置 + 面板最后一根 K 线日期 + 代码版本」哈希缓存到 KV（24 小时，`run_cache.py`），相同配置的重复运行、分享链接与监控毫秒级返回，响应带 `cached: true`；唯一与请求者相关的 DSR 试验次数由缓存的收益矩自动重算。
 
 **账户体系（可选，Supabase Auth）。** 配置 `SUPABASE_URL` + `SUPABASE_ANON_KEY`（后端）与 `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`（前端构建）后，页头出现「登录」：邮箱魔法链接登录，后端用 Supabase 的 /auth/v1/user 校验令牌（与签名算法无关），账户 id 派生自用户 id。登录后因子库、错题本、模拟持仓、预警、购买记录、自选自动合并到云端（KV）并跨设备同步，合并规则按键去重、只增不删；钱包与上架归属账号，「合并本浏览器的钱包与上架」一键把登录前的浏览器身份并入账号。未配置时保持浏览器密钥模式。`ADMIN_TOKEN` 保护 `/api/admin/*`。
 
