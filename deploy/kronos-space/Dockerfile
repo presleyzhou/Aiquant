@@ -15,7 +15,11 @@ WORKDIR /srv
 # reproducible rebuilds: --build-arg REPO_REF=<sha>
 ARG REPO_URL=https://github.com/presleyzhou/Aiquant.git
 ARG REPO_REF=main
-RUN git clone --depth 1 --branch ${REPO_REF} ${REPO_URL} app-src
+# Bump CACHE_BUST (any value) to force a fresh clone when the builder reuses
+# layers; Factory rebuild on HF Spaces normally clears the cache, but the
+# runtime `git pull` below means a plain Restart already picks up new code.
+ARG CACHE_BUST=2026-09-06
+RUN echo "cache-bust ${CACHE_BUST}" && git clone --depth 1 --branch ${REPO_REF} ${REPO_URL} app-src
 
 WORKDIR /srv/app-src/backend
 
@@ -38,4 +42,6 @@ PY
 ENV KRONOS_DEVICE=cpu
 # HF Spaces routes traffic to 7860; Fly/Railway respect $PORT at runtime.
 EXPOSE 7860
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-7860}"]
+# Pull the latest backend on every start (fast-forward only, never fails the
+# boot): a Restart refreshes code; a rebuild is only needed for new packages.
+CMD ["sh", "-c", "git -C /srv/app-src pull --ff-only --depth 1 || true; uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-7860}"]

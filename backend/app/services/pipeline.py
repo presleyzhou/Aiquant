@@ -97,7 +97,7 @@ SECTORS: dict[str, str] = {
     **{s: "communication" for s in ("CMCSA", "TMUS", "VZ", "T", "EA", "TTWO")},
     **{s: "consumer" for s in ("BKNG", "TJX", "CMG", "ORLY", "MAR", "GM", "F")},
     **{s: "staples" for s in ("MO", "MDLZ", "CL", "KMB")},
-    **{s: "financials" for s in ("WFC", "C", "SCHW", "SPGI", "CB", "PGR", "MMC")},
+    **{s: "financials" for s in ("WFC", "C", "SCHW", "SPGI", "CB", "PGR", "AON")},
     **{s: "health" for s in ("ABT", "DHR", "ISRG", "GILD", "VRTX", "MDT", "BMY")},
     **{s: "industrials" for s in ("RTX", "DE", "LMT", "UNP", "ETN", "ADP", "WM")},
     **{s: "materials" for s in ("APD", "SHW", "FCX", "NEM")},
