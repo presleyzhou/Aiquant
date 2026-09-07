@@ -56,7 +56,7 @@ UNIVERSES: dict[str, list[str]] = {
         # consumer staples
         "COST", "WMT", "PG", "KO", "PEP", "PM", "MO", "MDLZ", "CL", "KMB",
         # financials
-        "JPM", "V", "MA", "BAC", "GS", "MS", "BLK", "AXP", "WFC", "C", "SCHW", "SPGI", "CB", "PGR", "MMC",
+        "JPM", "V", "MA", "BAC", "GS", "MS", "BLK", "AXP", "WFC", "C", "SCHW", "SPGI", "CB", "PGR", "AON",
         # health care
         "UNH", "LLY", "JNJ", "MRK", "ABBV", "PFE", "TMO", "AMGN", "ABT", "DHR", "ISRG", "GILD", "VRTX", "MDT", "BMY",
         # industrials
