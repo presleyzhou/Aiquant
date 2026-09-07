@@ -11,7 +11,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.services import auth, kvstore, listings, wallet
+from app.services import auth, kvstore, listings, provider_health, wallet
 from app.services.factor_mine import (
     UNIVERSES,
     analyze_factor_blocking,
@@ -41,6 +41,8 @@ async def overview():
             "gross_usd": round(sum(float(o.get("amount") or 0) for o in confirmed), 2),
             "wallet_liabilities_usd": round(sum(float(w.get("balance_usd") or 0) for w in wallets), 2),
             "health_runs": kvstore.get("health:meta") or {},
+            "ops_last": kvstore.get("ops:last") or {},
+            "provider_health": provider_health.summary(7),
         }
     return await asyncio.to_thread(build)
 
@@ -92,7 +94,7 @@ def _health_key(market: str, expression: str) -> str:
     return "health:" + hashlib.sha1(f"{market}|{expression}".encode()).hexdigest()[:20]
 
 
-def _recheck_blocking(max_factors: int) -> dict:
+def _recheck_blocking(max_factors: int, deadline: float | None = None) -> dict:
     """Re-evaluate every factor that is listed on the marketplace or sits in a
     synced account's library: health check + report-card grades → KV."""
     targets: dict[tuple[str, str, int], str] = {}
@@ -106,9 +108,12 @@ def _recheck_blocking(max_factors: int) -> dict:
             if isinstance(f, dict) and f.get("expression"):
                 key = (str(f.get("market", "us")), str(f["expression"]), int(f.get("horizon", 10) or 10))
                 targets.setdefault(key, "account")
-    done, failed = 0, 0
+    done, failed, cut = 0, 0, 0
     for (market, expr, horizon), source in list(targets.items())[:max_factors]:
         if market not in UNIVERSES:
+            continue
+        if deadline is not None and time.time() > deadline:
+            cut += 1
             continue
         try:
             chk = check_factor_blocking(expr, market, horizon)
@@ -125,8 +130,9 @@ def _recheck_blocking(max_factors: int) -> dict:
         except Exception as exc:
             log.warning("recheck failed for %s: %s", expr, exc)
             failed += 1
-    meta = {"last_run": int(time.time()), "targets": len(targets), "done": done, "failed": failed}
-    kvstore.put("health:meta", meta)
+    meta = {"last_run": int(time.time()), "targets": len(targets), "done": done, "failed": failed, "cut_for_time": cut}
+    if max_factors > 1:   # a one-factor drain pass must not overwrite the real run's summary
+        kvstore.put("health:meta", meta)
     return meta
 
 
@@ -159,3 +165,68 @@ async def warm(markets: str = "us,crypto"):
         except Exception as exc:
             out[market] = {"error": str(exc)[:200], "seconds": round(time.time() - t0, 2)}
     return {"warmed": out, "kv": kvstore.mode()}
+
+
+OPS_BUDGET_SECONDS = 250
+
+
+@router.post("/ops")
+async def ops(max_factors: int = 60, monitor_limit: int = 10, recheck: bool = True):
+    """The single daily operations pass: warm the shared panels → recheck
+    listed / synced factors → run the deployment monitor. Each step is timed
+    and isolated (one failing step does not stop the others); the report is
+    stored as ops:last (+ a 14-run history) and shown in the admin console.
+    Returns `monitor.remaining` so the scheduler knows whether to call again."""
+    from app.services import monitor
+
+    started = time.time()
+    steps: list[dict] = []
+
+    async def step(name: str, fn):
+        t0 = time.time()
+        row = {"step": name, "ok": True}
+        try:
+            row["result"] = await fn()
+        except Exception as exc:
+            row["ok"] = False
+            row["error"] = str(exc)[:300]
+            log.warning("ops step %s failed: %s", name, exc)
+        row["seconds"] = round(time.time() - t0, 2)
+        steps.append(row)
+        return row
+
+    async def do_warm():
+        return (await warm())["warmed"]
+
+    async def do_recheck():
+        if not recheck:
+            return {"skipped": "drain pass"}
+        if time.time() - started > OPS_BUDGET_SECONDS * 0.6:
+            return {"skipped": "time budget"}
+        # hard stop: leave at least 40% of the budget for the monitor step
+        return await asyncio.to_thread(_recheck_blocking, max(1, min(max_factors, 200)), started + OPS_BUDGET_SECONDS * 0.6)
+
+    async def do_monitor():
+        left = OPS_BUDGET_SECONDS - (time.time() - started)
+        if left < OPS_BUDGET_SECONDS * 0.15:
+            return {"skipped": "time budget", "remaining": -1}
+        return await monitor.run_all(force=False, limit=max(1, min(monitor_limit, 100)), budget_seconds=left - 10)
+
+    await step("warm", do_warm)
+    await step("recheck", do_recheck)
+    # an interim report so a killed function still leaves a trace
+    await asyncio.to_thread(kvstore.put, "ops:last", {"started_at": int(started), "finished_at": None, "seconds": None,
+                                                        "steps": steps, "ok": None, "monitor_remaining": -1})
+    mon = await step("monitor", do_monitor)
+    report = {
+        "started_at": int(started), "finished_at": int(time.time()),
+        "seconds": round(time.time() - started, 2), "steps": steps,
+        "ok": all(r["ok"] for r in steps),
+    }
+    remaining = int((mon.get("result") or {}).get("remaining") or 0) if mon["ok"] else -1
+    report["monitor_remaining"] = remaining
+    history = kvstore.get("ops:history") or {"runs": []}
+    history["runs"] = ([{k: report[k] for k in ("started_at", "seconds", "ok", "monitor_remaining")}] + history["runs"])[:14]
+    await asyncio.to_thread(kvstore.put, "ops:last", report)
+    await asyncio.to_thread(kvstore.put, "ops:history", history)
+    return report

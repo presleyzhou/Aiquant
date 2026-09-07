@@ -189,6 +189,14 @@ def coingecko_frames(symbols: list[str], period: str) -> dict[str, pd.DataFrame]
 # ----------------------------------------------------------------- AkShare
 
 
+def effective_us_provider(configured: str) -> str:
+    """What "auto" means on this machine: AkShare when installed, else Yahoo —
+    so a Yahoo-served panel only counts as a fallback when AkShare was expected."""
+    if configured == "akshare" or (configured == "auto" and akshare_available()):
+        return "akshare"
+    return "yahoo" if configured in ("auto", "yahoo") else configured
+
+
 def akshare_available() -> bool:
     try:
         import akshare  # noqa: F401
@@ -335,6 +343,8 @@ def download_panel(tickers: list[str], period: str, label: str, min_symbols: int
                    market: str | None = None) -> dict[str, pd.DataFrame]:
     """The panel for `tickers`, from the configured providers, cleaned. The
     provider chain is recorded in `panel["close"].attrs["provider"]`."""
+    from app.services import provider_health
+
     settings = _settings()
     tickers = list(dict.fromkeys(str(t).upper() for t in tickers))
     crypto = [t for t in tickers if is_crypto(t)] if market != "us" else []
@@ -342,11 +352,15 @@ def download_panel(tickers: list[str], period: str, label: str, min_symbols: int
     frames: dict[str, pd.DataFrame] = {}
     used: list[str] = []
     if crypto:
+        t0 = time.time()
         f, u = _crypto_frames(crypto, period, settings.panel_provider_crypto)
         frames.update(f); used += u
+        provider_health.record("crypto", settings.panel_provider_crypto, u, time.time() - t0)
     if equity:
+        t0 = time.time()
         f, u = _equity_frames(equity, period, settings.panel_provider_us, min_symbols)
         frames.update(f); used += u
+        provider_health.record("us", effective_us_provider(settings.panel_provider_us), u, time.time() - t0)
     if not frames:
         raise LookupError(f"could not download the {label} universe")
     panel = clean_panel(_assemble(frames), label, min_symbols)

@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     coingecko_fill: bool = True
     # Optional CoinGecko demo/pro key → higher rate limits and longer history.
     coingecko_api_key: str | None = None
+    # Optional Financial Modeling Prep key → quarterly fundamentals (market
+    # cap, P/E, P/B, ROE) for the US pipeline universe, forward-filled after a
+    # publication lag so value / quality factors are point-in-time honest.
+    fmp_api_key: str | None = None
+    fundamentals_lag_days: int = 60
 
     # --- marketplace payments (optional) ---
     # Two independent rails, each real only when its key is present:
@@ -87,6 +92,8 @@ class Settings(BaseSettings):
     supabase_anon_key: str | None = None
     # Operator token for /api/admin/* (withdrawals, ledger, rechecks).
     admin_token: str | None = None
+    # Second accepted admin token during rotation (set NEXT, switch clients, then move it to ADMIN_TOKEN).
+    admin_token_next: str | None = None
     # Daily deployment monitor: drawdown alert threshold (percent, positive number).
     monitor_drawdown_pct: float = 10.0
     rl_monitor_per_hour: int = 12

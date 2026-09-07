@@ -4490,6 +4490,213 @@ tbody tr:hover td {
   }
 }
 
+/* V4-pipeline: one-line notice block (survivorship, long-only tickets) */
+.pl-notice {
+  padding: 8px 10px;
+  border: 1px dashed var(--border-bright);
+  border-radius: 3px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+/* V4-pipeline: cache-hit chip in the stage-④ header */
+.pl-cached {
+  color: var(--accent);
+  border-color: rgba(59, 224, 255, 0.4);
+  cursor: help;
+}
+
+.pl-pinned {
+  cursor: default;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* V4-pipeline: CPCV path strip (stage ④) */
+.pl-cpcv {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+
+.pl-cpcv__strip {
+  width: 100%;
+  height: 56px;
+  display: block;
+  overflow: visible;
+}
+
+.pl-cpcv__axis {
+  stroke: var(--border-bright);
+  stroke-width: 1;
+}
+
+.pl-cpcv__zero {
+  stroke: var(--text-faint);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.pl-cpcv__full {
+  stroke: var(--amber);
+  stroke-width: 1.5;
+}
+
+.pl-cpcv__lbl {
+  font-size: 8px;
+  fill: var(--text-faint);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+
+.pl-cpcv__lbl--full {
+  fill: var(--amber);
+}
+
+.pl-cpcv__dot {
+  stroke: var(--bg);
+  stroke-width: 1;
+  opacity: 0.9;
+}
+
+.pl-cpcv__dot--up {
+  fill: var(--green);
+}
+
+.pl-cpcv__dot--dn {
+  fill: var(--red, #ff5c6c);
+}
+
+/* V4-pipeline: verdict card — compact summary row on desktop, sticky on ≤ 720 px */
+.pl-verdict-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  margin: 0 0 12px;
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.pl-verdict-card__title {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.pl-verdict-card__nums {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+}
+
+.pl-verdict-card__num {
+  display: flex;
+  flex-direction: column;
+  min-width: 64px;
+}
+
+.pl-verdict-card__label {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.pl-verdict-card__num b {
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.pl-verdict-card--sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--panel-solid);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.pl-verdict-card__toggle {
+  margin-left: auto;
+}
+
+/* stages hidden behind the verdict card must stay hidden whatever `.panel` / `.pl-grid` set for display */
+.pl-card[hidden],
+.pl-grid[hidden] {
+  display: none !important;
+}
+
+/* V4-pipeline: A vs B comparison table */
+.pl-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  margin: 0 0 12px;
+  border: 1px solid rgba(59, 224, 255, 0.28);
+  border-radius: var(--radius);
+  background: rgba(59, 224, 255, 0.04);
+}
+
+.pl-compare__actions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.pl-compare__table td,
+.pl-compare__table th {
+  white-space: nowrap;
+}
+
+/* V4-pipeline: long-short book (stage ⑥) */
+.pl-side--long {
+  color: var(--green);
+  border-color: rgba(61, 220, 132, 0.45);
+  background: rgba(61, 220, 132, 0.1);
+}
+
+.pl-side--short {
+  color: var(--red, #ff5c6c);
+  border-color: rgba(255, 92, 108, 0.45);
+  background: rgba(255, 92, 108, 0.1);
+}
+
+.pl-book__group td {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.pl-ls .pl-field-hint {
+  white-space: normal;
+}
+
+@media (max-width: 720px) {
+  .pl-verdict-card__nums {
+    gap: 12px;
+  }
+
+  .pl-verdict-card__num {
+    min-width: 56px;
+  }
+
+  .pl-verdict-card__num b {
+    font-size: 15px;
+  }
+}
+
 /* paper: deployment kind badge */
 .pp-kind {
   margin-left: 8px;

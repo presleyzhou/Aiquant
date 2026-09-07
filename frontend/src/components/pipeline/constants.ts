@@ -8,7 +8,14 @@ export const TRIALS_KEY = "aiquant.pipeline.trials";
 /** V4: the last successful run, restored on mount so a reload does not lose
  * the numbers (and the Markdown report) the user was looking at. */
 export const LAST_KEY = "aiquant.pipeline.last";
+/** V4-pipeline: the run pinned as "A" for side-by-side comparison; sessionStorage so it survives a reload but not the tab. */
+export const PINNED_KEY = "aiquant.pipeline.pinned";
 export const STAGE_COUNT = 6;
+/** V4-pipeline fallbacks for a config that predates the long-short / turnover-penalty fields. */
+export const TURNOVER_PENALTY_RANGE: [number, number] = [0, 100];
+export const BORROW_RANGE: [number, number] = [0, 500];
+/** Results collapse behind the verdict card at or below this width. */
+export const MOBILE_QUERY = "(max-width: 720px)";
 
 /** V2 select options; used when the server predates `config.signal_weightings`. */
 export const SIGNAL_WEIGHTINGS: PipelineSignalWeighting[] = ["ic_expanding", "ic", "equal"];
@@ -53,6 +60,9 @@ export const FALLBACK_CONFIG: PipelineConfig = {
     trade_rate: 1,
     shrink_to_equal: 0,
     history: "3y",
+    turnover_penalty_bps: 0,
+    long_short: false,
+    borrow_bps: 100,
   },
   limits: {
     factors: [1, 8],
@@ -67,7 +77,10 @@ export const FALLBACK_CONFIG: PipelineConfig = {
     shrink_to_equal: [0, 1],
     prior_trials: [0, 10000],
     symbols: SYMBOL_LIMITS,
+    turnover_penalty_bps: TURNOVER_PENALTY_RANGE,
+    borrow_bps: BORROW_RANGE,
   },
+  cpcv: { groups: 6, k: 2 },
 };
 
 /** V3 group ids with a translation; anything else prints as its raw id. */
@@ -99,4 +112,6 @@ export const WARNING_KEYS: Record<string, MsgKey> = {
   not_significant: "pl.warn.not_significant",
   parameter_spike: "pl.warn.parameter_spike",
   low_capacity: "pl.warn.low_capacity",
+  long_short_caveats: "pl.warn.long_short_caveats",
+  cpcv_unstable: "pl.warn.cpcv_unstable",
 };

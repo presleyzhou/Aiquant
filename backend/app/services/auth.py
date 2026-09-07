@@ -90,5 +90,8 @@ async def resolve_account(request: Request, secret: str | None) -> tuple[str, di
 def require_admin(request: Request) -> None:
     s = get_settings()
     tok = request.headers.get("x-admin-token") or bearer(request) or ""
-    if not s.admin_token or not hmac.compare_digest(tok, s.admin_token):
+    # two accepted values so a token can be rotated without a deploy window
+    valid = [t for t in (s.admin_token, s.admin_token_next) if t]
+    given = tok.encode("utf-8", "surrogateescape")   # bytes: a non-ASCII header is a 403, not a 500
+    if not valid or not any(hmac.compare_digest(given, t.encode("utf-8")) for t in valid):
         raise HTTPException(status_code=403, detail="admin token required")

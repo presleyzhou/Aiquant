@@ -1,6 +1,12 @@
 import type { PipelineResult } from "../../api";
 
-export const maxWeight = (r: PipelineResult) => Math.max(0.01, ...r.target_weights.weights.map((w) => w.weight_pct));
+/** Largest |weight| in the book — shorts are negative in long-short mode, and bars scale on magnitude. */
+export const maxWeight = (r: PipelineResult) => Math.max(0.01, ...r.target_weights.weights.map((w) => Math.abs(w.weight_pct)));
+/** V4-pipeline CPCV: share of out-of-sample paths with a positive Sharpe; ≥ 80 robust, 60–80 borderline, below that the server flags `cpcv_unstable`. */
+export const cpcvTone = (v: number | null | undefined) =>
+  v === null || v === undefined ? "" : v >= 80 ? "pl-tone--ok" : v >= 60 ? "pl-tone--warn" : "pl-tone--bad";
+/** Ops: provider fallback rate — ≥ 25 % the primary source is failing, ≥ 10 % worth a look. */
+export const fallbackTone = (v: number) => (v >= 25 ? "pl-tone--bad" : v >= 10 ? "pl-tone--warn" : "pl-tone--ok");
 /** V5 ticket amounts: account currency, two decimals, thousands separators. */
 export const money = (v: number) => v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 /** Reference prices: two decimals above 1, four significant digits below (sub-dollar crypto). */

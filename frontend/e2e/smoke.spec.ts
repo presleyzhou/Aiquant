@@ -26,6 +26,8 @@ const curve = (n = 120, drift = 40) =>
   }));
 
 async function mockApi(page: Page) {
+  // V4-pipeline: the server's result cache — the same body (minus the browser trial count) twice in a row is a hit
+  let lastRunKey: string | null = null;
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -164,7 +166,16 @@ async function mockApi(page: Page) {
       });
     if (path === "/api/pipeline/run") {
       const body = route.request().postDataJSON() as
-        { factors?: unknown[]; scheme?: string; shrink_to_equal?: number; prior_trials?: number; symbols?: string[]; history?: string } | null;
+        { factors?: unknown[]; scheme?: string; shrink_to_equal?: number; prior_trials?: number; symbols?: string[]; history?: string;
+          top_n?: number; compare?: boolean; long_short?: boolean; borrow_bps?: number; turnover_penalty_bps?: number } | null;
+      const runKey = JSON.stringify({ ...(body ?? {}), prior_trials: undefined });
+      const cached = runKey === lastRunKey;
+      lastRunKey = runKey;
+      // V4-pipeline: Top-N 6 is a genuinely different configuration with different numbers (for the A/B compare spec)
+      const topN = body?.top_n ?? 8;
+      const alt = topN === 6;
+      const sharpe = alt ? 1.02 : 0.88;
+      const ls = body?.long_short === true;
       // V5: a custom list echoes back as `custom`; anything outside the fixture's known names is "dropped"
       const known = ["AAPL", "MSFT", "NVDA", "INTC", "AMZN", "GOOG", "META", "TSLA"];
       const custom = Array.isArray(body?.symbols) && body.symbols.length > 0;
@@ -176,12 +187,16 @@ async function mockApi(page: Page) {
       const split = (from: string, to: string, ret: number, sharpe: number) =>
         ({ from, to, total_return_pct: ret, sharpe, max_drawdown_pct: -9.5, excess_pct: ret - 20 });
       return json({
-        spec: { market: "us", factors, signal_weighting: "ic_expanding", scheme, top_n: 8, rebalance: 10, max_weight: 0.25,
+        cached,
+        spec: { market: "us", factors, signal_weighting: "ic_expanding", scheme, top_n: topN, rebalance: 10, max_weight: 0.25,
           cost_bps: 7, target_vol_pct: null, vol_lookback: 60, hold_buffer: 4, trade_rate: 1.0,
-          shrink_to_equal: body?.shrink_to_equal ?? 0, prior_trials: body?.prior_trials ?? 0, compare: true,
-          ...(custom ? { symbols: body!.symbols } : {}), history: body?.history ?? "3y" },
+          shrink_to_equal: body?.shrink_to_equal ?? 0, prior_trials: body?.prior_trials ?? 0, compare: body?.compare ?? true,
+          ...(custom ? { symbols: body!.symbols } : {}), history: body?.history ?? "3y",
+          turnover_penalty_bps: body?.turnover_penalty_bps ?? 0, long_short: ls, borrow_bps: body?.borrow_bps ?? 100 },
         universe: { market: "us", symbols: 4, from: "2023-09-05", to: "2026-09-03", bars: 752,
           custom, history: body?.history ?? "3y", requested: custom ? body!.symbols!.length : null, dropped,
+          // V4-pipeline: today's constituents only; two names listed after the panel start
+          survivorship: { current_constituents_only: true, late_listings: 2, delisted_included: false },
           // V6 / V6.1: per-symbol health, worst coverage first; INTC stopped printing 4 bars before the panel's end
           health: [
             { symbol: "INTC", group: "financials", coverage_pct: 83.3, gaps: 3, first: "2024-02-01", last: "2026-08-28", stale: true, stale_days: 4 },
@@ -213,17 +228,20 @@ async function mockApi(page: Page) {
             spread_ann_pct: 17.8, spread_sharpe: 0.94, monotonic: false,
           },
         },
-        portfolio: { scheme, top_n: 8, max_weight: 0.25, rebalance: 10, cost_bps: 7, target_vol_pct: null, vol_lookback: 60,
-          avg_effective_n: 6.4, avg_exposure_pct: 100.0, avg_turnover_pct: 3.1, rebalances: 60,
-          annual_turnover_x: 12.9, breakeven_cost_bps: 52.1, hold_buffer: 4, trade_rate: 1.0 },
+        portfolio: { scheme, top_n: topN, max_weight: 0.25, rebalance: 10, cost_bps: 7, target_vol_pct: null, vol_lookback: 60,
+          avg_effective_n: alt ? 4.8 : 6.4, avg_exposure_pct: ls ? 200.0 : 100.0, avg_turnover_pct: 3.1, rebalances: 60,
+          annual_turnover_x: alt ? 15.2 : 12.9, breakeven_cost_bps: 52.1, hold_buffer: 4, trade_rate: 1.0,
+          // V4-pipeline: long-short book — gross 200, net 0, borrow fees charged
+          turnover_penalty_bps: body?.turnover_penalty_bps ?? 0, long_short: ls,
+          borrow_bps: ls ? body?.borrow_bps ?? 100 : null, borrow_cost_pct: ls ? 1.2 : null, avg_net_exposure_pct: ls ? 0 : 100.0 },
         backtest: {
           span: { from: "2023-12-01", to: "2026-09-03" },
-          stats: { total_return_pct: 41.2, cagr_pct: 13.4, ann_vol_pct: 15.2, sharpe: 0.88, sortino: 1.21, calmar: 0.9,
+          stats: { total_return_pct: 41.2, cagr_pct: alt ? 15.1 : 13.4, ann_vol_pct: 15.2, sharpe, sortino: 1.21, calmar: 0.9,
             max_drawdown_pct: -14.9, win_rate_pct: 53.1, excess_pct: 6.3, beta: 0.82, tracking_error_pct: 6.1, information_ratio: 0.7,
             rolling_6m_beat_pct: 44.1, // V4: below 45 → red
             benchmark: { total_return_pct: 34.9, cagr_pct: 11.5, ann_vol_pct: 16.0, sharpe: 0.74, max_drawdown_pct: -18.2 } },
           in_sample: split("2023-12-01", "2025-09-01", 30.1, 1.02),
-          holdout: { ...split("2025-09-02", "2026-09-03", 8.5, 0.61), psr: 0.906 },
+          holdout: { ...split("2025-09-02", "2026-09-03", 8.5, alt ? 0.75 : 0.61), psr: 0.906 },
           overfitting: { psr: 0.982, dsr: 0.859, trials: 9, expected_max_sharpe_ann: 0.7,
             t_stat: 2.1, hlz_hurdle: 3.0, min_track_record_days: 336, track_days: 540 },
           equity_curve: curve(),
@@ -286,6 +304,12 @@ async function mockApi(page: Page) {
           ],
           median_sharpe: 0.24, min_sharpe: -0.15, spike: 0.64,
         },
+        // V4-pipeline: CPCV — 6 groups, 2 test groups per split = 15 splits → 5 stitched paths; 4 of 5 positive
+        cpcv: body?.compare === false ? null : {
+          groups: 6, k: 2, splits: 15, paths: 5, purge_days: 10, embargo_days: 5,
+          path_sharpes: [0.71, 0.42, -0.12, 0.95, 0.58], path_days: [540, 540, 540, 540, 540],
+          median_sharpe: 0.58, min_sharpe: -0.12, max_sharpe: 0.95, pct_paths_positive: 80, complete: true,
+        },
         // V6 / V6.1: square-root-impact capacity curve, breakeven at 2.65B; every trade had volume data
         capacity: {
           aum_grid: [1000000, 10000000, 100000000, 1000000000],
@@ -297,22 +321,36 @@ async function mockApi(page: Page) {
           costed_trade_pct: 100,
           model: "sqrt_impact",
         },
-        target_weights: {
-          as_of: "2026-09-03", exposure_pct: 100.0,
-          weights: [
-            { symbol: "AAPL", weight_pct: 25.0, score_rank: 1, group: "tech" },
-            { symbol: "MSFT", weight_pct: 25.0, score_rank: 2, group: "tech" },
-            { symbol: "NVDA", weight_pct: 25.0, score_rank: 3, group: "tech" },
-            { symbol: "INTC", weight_pct: 25.0, score_rank: 4, group: "financials" },
-          ],
-          groups: [{ group: "tech", weight_pct: 75.0 }, { group: "financials", weight_pct: 25.0 }],
-        },
-        warnings: ["few_rebalances", "not_significant", "parameter_spike", "low_capacity"],
+        target_weights: ls
+          ? {
+              as_of: "2026-09-03", exposure_pct: 0.0, gross_pct: 200.0, long_pct: 100.0, short_pct: -100.0,
+              weights: [
+                { symbol: "AAPL", weight_pct: 50.0, score_rank: 1, group: "tech", side: "long" },
+                { symbol: "MSFT", weight_pct: 50.0, score_rank: 2, group: "tech", side: "long" },
+                { symbol: "INTC", weight_pct: -50.0, score_rank: 3, group: "financials", side: "short" },
+                { symbol: "NVDA", weight_pct: -50.0, score_rank: 4, group: "tech", side: "short" },
+              ],
+              groups: [{ group: "tech", weight_pct: 50.0 }, { group: "financials", weight_pct: -50.0 }],
+            }
+          : {
+              as_of: "2026-09-03", exposure_pct: 100.0,
+              weights: [
+                { symbol: "AAPL", weight_pct: 25.0, score_rank: 1, group: "tech" },
+                { symbol: "MSFT", weight_pct: 25.0, score_rank: 2, group: "tech" },
+                { symbol: "NVDA", weight_pct: 25.0, score_rank: 3, group: "tech" },
+                { symbol: "INTC", weight_pct: 25.0, score_rank: 4, group: "financials" },
+              ],
+              groups: [{ group: "tech", weight_pct: 75.0 }, { group: "financials", weight_pct: 25.0 }],
+            },
+        warnings: ["few_rebalances", "not_significant", "parameter_spike", "low_capacity", ...(ls ? ["long_short_caveats"] : [])],
       });
     }
     if (path === "/api/pipeline/orders") {
       // V5: a two-order ticket — the sell (funding) first, then the buy; NAV echoed from the request
-      const body = route.request().postDataJSON() as { nav?: number } | null;
+      const body = route.request().postDataJSON() as { nav?: number; spec?: { long_short?: boolean } } | null;
+      // V4-pipeline: the server never sizes shorts
+      if (body?.spec?.long_short === true)
+        return route.fulfill({ status: 400, json: { detail: "Rebalance tickets are long-only; turn long_short off to build one." } });
       const nav = body?.nav ?? 100000;
       return json({
         as_of: "2026-09-03",
@@ -387,8 +425,19 @@ async function mockApi(page: Page) {
         { expression: "rank(ts_std(close, 10))", loo_sharpe_delta: -0.2, sharpe_without: 1.1, full_ic: 0.01, recent_ic: -0.001, decayed: true, verdict: "retire", reason: "removing it raises Sharpe" } ] });
     if (path === "/api/admin/overview") {
       if (route.request().headers()["x-admin-token"] !== "e2e-token") return route.fulfill({ status: 403, json: { detail: "admin token required" } });
-      return json({ persistence: "file", counts: { listings: 2, active_listings: 1, orders: 5, real_orders: 1, wallets: 3, accounts_synced: 1, withdrawals_pending: 1 }, gross_usd: 12.5, wallet_liabilities_usd: 30, health_runs: { last_run: 1_700_000_000, done: 4, failed: 0 } });
+      return json({ persistence: "file", counts: { listings: 2, active_listings: 1, orders: 5, real_orders: 1, wallets: 3, accounts_synced: 1, withdrawals_pending: 1 }, gross_usd: 12.5, wallet_liabilities_usd: 30, health_runs: { last_run: 1_700_000_000, done: 4, failed: 0 },
+        // Ops layer: last merged ops pass (monitor step failed on one account) + trailing-7-day provider usage
+        ops_last: { started_at: 1_700_000_000, finished_at: 1_700_000_042, seconds: 42.3, ok: false, monitor_remaining: 3, steps: [
+          { step: "warm", ok: true, seconds: 30.1, result: { factors: 60 } },
+          { step: "recheck", ok: true, seconds: 8.2, result: { done: 4, failed: 0 } },
+          { step: "monitor", ok: false, seconds: 4.0, error: "yahoo timeout for account ab12cd34" } ] },
+        provider_health: { days: 7, generated_at: 1_700_000_100, markets: {
+          us: { calls: 8, fallbacks: 1, seconds: 3.2, served: { yahoo: 7, stooq: 1 }, fallback_rate_pct: 12.5, avg_seconds: 0.4 },
+          crypto: { calls: 11, fallbacks: 0, seconds: 2.2, served: { binance: 5, coingecko: 5, yahoo: 1 }, fallback_rate_pct: 0, avg_seconds: 0.2 } } } });
     }
+    if (path === "/api/admin/ops")
+      return json({ started_at: 1_700_100_000, finished_at: 1_700_100_020, seconds: 20.0, ok: true, monitor_remaining: 0, steps: [
+        { step: "warm", ok: true, seconds: 12.0 }, { step: "recheck", ok: true, seconds: 5.0 }, { step: "monitor", ok: true, seconds: 3.0 } ] });
     if (path === "/api/admin/withdrawals") return json({ withdrawals: [{ id: "wd_1", account: "abcdef123456", amount: 4, method: "crypto", address: "0xabc", status: "pending", at: 1_700_000_000 }] });
     if (path === "/api/admin/orders") return json({ orders: [] });
     if (path === "/api/admin/listings") return json({ listings: [] });
@@ -1044,6 +1093,242 @@ test("pipeline: a ?pl= link pre-fills the form (hrp, custom factor) without runn
   await expect(page.getByTestId("pl-share-loaded")).toHaveCount(0);
 });
 
+test("pipeline: CPCV block, survivorship notice, cached chip, pin & compare, Excel download", async ({ page }) => {
+  test.slow();
+  let runBody: Record<string, unknown> | null = null;
+  await page.route("**/api/pipeline/run", (route) => {
+    runBody = route.request().postDataJSON() as Record<string, unknown>;
+    return route.fallback();
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "端到端量化", exact: true }).click();
+  await page.getByRole("checkbox", { name: "短期反转" }).check();
+  await page.getByTestId("pl-run").click();
+  await expect(page.getByTestId("pl-sharpe")).toContainText("0.88");
+  // ③ → request: the V4 fields travel with defaults (penalty 0, long-short off, borrow 100)
+  expect(runBody).not.toBeNull();
+  expect(runBody!.turnover_penalty_bps).toBe(0);
+  expect(runBody!.long_short).toBe(false);
+  expect(runBody!.borrow_bps).toBe(100);
+  // the turnover-penalty field only exists for mean_variance
+  await expect(page.getByTestId("pl-turnover-penalty")).toHaveCount(0);
+  // ① survivorship notice: today's constituents, two late listings
+  const surv = page.getByTestId("pl-survivorship");
+  await expect(surv).toBeVisible();
+  await expect(surv).toContainText("股票池为今日成分股");
+  await expect(surv).toContainText("幸存者偏差");
+  await expect(surv).toContainText("晚于起点上市：2 只");
+  // ④ CPCV: five dots, zero + full-sample rule, 80% positive (green), median / min / max chips, geometry footnote
+  const cpcv = page.getByTestId("pl-cpcv");
+  await expect(cpcv).toBeVisible();
+  await expect(cpcv).toContainText("CPCV 样本外路径");
+  await expect(cpcv.locator("circle[data-path]")).toHaveCount(5);
+  await expect(cpcv.locator("circle.pl-cpcv__dot--dn")).toHaveCount(1);
+  await expect(page.getByTestId("pl-cpcv-full")).toHaveCount(1);
+  await expect(cpcv.locator("text.pl-cpcv__lbl--full")).toHaveText("0.88");
+  const positive = page.getByTestId("pl-cpcv-positive");
+  await expect(positive).toHaveText("为正 80%");
+  await expect(positive).toHaveClass(/pl-tone--ok/);
+  await expect(page.getByTestId("pl-cpcv-median")).toHaveText("中位 0.58");
+  await expect(cpcv).toContainText("最低 -0.12");
+  await expect(cpcv).toContainText("最高 0.95");
+  await expect(page.getByTestId("pl-cpcv-foot")).toHaveText("6 块 × 每次 2 块测试 = 15 组划分 → 5 条完整样本外路径；purge 10 天，embargo 5 天");
+  await expect(page.getByTestId("pl-cpcv-off")).toHaveCount(0);
+  // the first run of a config is never a cache hit
+  await expect(page.getByTestId("pl-cached")).toHaveCount(0);
+  // desktop verdict card: a compact, non-sticky summary row with the four numbers
+  const vc = page.getByTestId("pl-verdict-card");
+  await expect(vc).toBeVisible();
+  await expect(vc).not.toHaveClass(/pl-verdict-card--sticky/);
+  await expect(page.getByTestId("pl-vc-sharpe")).toContainText("0.88");
+  await expect(page.getByTestId("pl-vc-holdout")).toContainText("0.61");
+  await expect(page.getByTestId("pl-vc-dsr")).toContainText("0.86");
+  await expect(page.getByTestId("pl-vc-dsr").locator(".pl-tone--warn")).toBeVisible();
+  await expect(page.getByTestId("pl-vc-capacity")).toContainText("2.65B");
+  await expect(page.getByTestId("pl-vc-expand")).toHaveCount(0);
+  await expect(page.locator("#pl-stage-4")).toBeVisible();
+  // pin as A: the label chip replaces the button, no table yet (B would be the same run)
+  await page.getByTestId("pl-pin").click();
+  const pinnedChip = page.getByTestId("pl-pinned");
+  await expect(pinnedChip).toHaveText("A · 波动率倒数 · Top 8 · 10 日 · 1 因子");
+  await expect(page.getByTestId("pl-compare")).toHaveCount(0);
+  expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("aiquant.pipeline.pinned") ?? "null")?.result?.backtest?.stats?.sharpe)).toBe(0.88);
+  // a different configuration (Top-N 6) becomes B: the A vs B table appears with toned deltas
+  await page.getByTestId("pl-topn").fill("6");
+  await page.getByTestId("pl-run").click();
+  await expect(page.getByTestId("pl-sharpe")).toContainText("1.02");
+  await expect(page.getByTestId("pl-cached")).toHaveCount(0);
+  const cmp = page.getByTestId("pl-compare");
+  await expect(cmp).toBeVisible();
+  await expect(cmp).toContainText("A vs B");
+  const cmpTable = page.getByTestId("pl-compare-table");
+  await expect(cmpTable.locator("tbody tr")).toHaveCount(10);
+  await expect(cmpTable).toContainText("波动率倒数 · Top 8 · 10 日 · 1 因子");
+  await expect(cmpTable).toContainText("波动率倒数 · Top 6 · 10 日 · 1 因子");
+  const sharpeRow = cmpTable.locator("tr[data-metric=sharpe]");
+  await expect(sharpeRow).toContainText("0.88");
+  await expect(sharpeRow).toContainText("1.02");
+  await expect(page.getByTestId("pl-compare-delta-sharpe")).toHaveText("+0.14");
+  await expect(page.getByTestId("pl-compare-delta-sharpe")).toHaveClass(/up/);
+  await expect(page.getByTestId("pl-compare-delta-holdout")).toHaveText("+0.14");
+  await expect(page.getByTestId("pl-compare-delta-cagr")).toHaveText("+1.70%");
+  // higher turnover is worse → red even though the number went up
+  await expect(page.getByTestId("pl-compare-delta-turnover")).toHaveText("+2.3×");
+  await expect(page.getByTestId("pl-compare-delta-turnover")).toHaveClass(/dn/);
+  await expect(page.getByTestId("pl-compare-delta-cpcv")).toHaveText("0.00");
+  await expect(page.getByTestId("pl-compare-delta-capacity")).toHaveText("0");
+  await expect(page.getByTestId("pl-compare-delta-effn")).toHaveText("-1.6");
+  // the same configuration again is a server cache hit → the chip appears with its tooltip
+  await page.getByTestId("pl-run").click();
+  await expect(page.getByTestId("pl-trials")).toContainText("已尝试 3 次");
+  const cachedChip = page.getByTestId("pl-cached");
+  await expect(cachedChip).toBeVisible();
+  await expect(cachedChip).toHaveText("⟳ 缓存结果 · 同配置同数据");
+  await expect(cachedChip).toHaveAttribute("title", /DSR/);
+  // Excel export: SheetJS is lazy-loaded on click and the workbook download fires
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByTestId("pl-xlsx").click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("aiquant-pipeline-us-2026-09-03.xlsx");
+  await expect(page.getByTestId("pl-xlsx-ok")).toBeVisible();
+  // the pin survives a reload (sessionStorage) and still compares against the restored result
+  await page.reload();
+  await page.getByRole("button", { name: "端到端量化", exact: true }).click();
+  await expect(page.getByTestId("pl-restored")).toBeVisible();
+  await expect(page.getByTestId("pl-compare")).toBeVisible();
+  await expect(page.getByTestId("pl-compare-delta-sharpe")).toHaveText("+0.14");
+  // swap: B becomes A, A's full result comes back on screen
+  await page.getByTestId("pl-compare-swap").click();
+  await expect(page.getByTestId("pl-sharpe")).toContainText("0.88");
+  await expect(cmpTable.locator("thead")).toContainText("Top 6");
+  await expect(page.getByTestId("pl-compare-delta-sharpe")).toHaveText("-0.14");
+  await expect(page.getByTestId("pl-compare-delta-sharpe")).toHaveClass(/dn/);
+  // clear: the table goes, the pin button is back, storage is empty
+  await page.getByTestId("pl-compare-clear").click();
+  await expect(page.getByTestId("pl-compare")).toHaveCount(0);
+  await expect(page.getByTestId("pl-pin")).toBeVisible();
+  expect(await page.evaluate(() => sessionStorage.getItem("aiquant.pipeline.pinned"))).toBeNull();
+  // ≤ 720 px: the verdict card turns sticky and stages ④–⑥ hide behind it until expanded
+  await page.setViewportSize({ width: 600, height: 900 });
+  await expect(page.getByTestId("pl-verdict-card")).toHaveClass(/pl-verdict-card--sticky/);
+  await expect(page.getByTestId("pl-verdict-card")).toHaveCSS("position", "sticky");
+  await expect(page.locator("#pl-stage-4")).toBeHidden();
+  await expect(page.locator("#pl-stage-6")).toBeHidden();
+  await expect(page.getByTestId("pl-sharpe")).toBeHidden();
+  const expand = page.getByTestId("pl-vc-expand");
+  await expect(expand).toHaveText("展开完整报告");
+  await expand.click();
+  await expect(page.locator("#pl-stage-4")).toBeVisible();
+  await expect(page.getByTestId("pl-sharpe")).toBeVisible();
+  await expect(expand).toHaveText("收起报告");
+  // compare off: CPCV is skipped and the block says so
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByRole("checkbox", { name: "对比所有方案" }).uncheck();
+  await page.getByTestId("pl-run").click();
+  await expect(page.getByTestId("pl-trials")).toContainText("已尝试 4 次");
+  await expect(page.getByTestId("pl-cpcv")).toHaveCount(0);
+  await expect(page.getByTestId("pl-cpcv-off")).toHaveText("开启对比以运行 CPCV");
+});
+
+test("pipeline: long-short toggle renders sides and refuses the ticket", async ({ page }) => {
+  let runBody: Record<string, unknown> | null = null;
+  await page.route("**/api/pipeline/run", (route) => {
+    runBody = route.request().postDataJSON() as Record<string, unknown>;
+    return route.fallback();
+  });
+  let ordersCalls = 0;
+  await page.route("**/api/pipeline/orders", (route) => { ordersCalls += 1; return route.fallback(); });
+  await page.goto("/");
+  await page.getByRole("button", { name: "端到端量化", exact: true }).click();
+  await page.getByRole("checkbox", { name: "短期反转" }).check();
+  // ③ the turnover penalty appears only for mean-variance, with its Gârleanu-Pedersen hint
+  await expect(page.getByTestId("pl-turnover-penalty")).toHaveCount(0);
+  await page.getByRole("radio", { name: /均值-方差/ }).click();
+  const penalty = page.getByTestId("pl-turnover-penalty");
+  await expect(penalty).toBeVisible();
+  await expect(penalty).toHaveValue("0");
+  await expect(page.locator(".pl-field-hint", { hasText: "Gârleanu-Pedersen 目标组合" })).toBeVisible();
+  await penalty.fill("20");
+  // the long-short toggle: permanent caveat, borrow field only when on
+  const caveat = page.getByTestId("pl-long-short-caveat");
+  await expect(caveat).toHaveText("保证金、召回与融券可得性未建模；调仓指令单仅支持多头");
+  await expect(page.getByTestId("pl-borrow")).toHaveCount(0);
+  await page.getByTestId("pl-long-short").check();
+  const borrow = page.getByTestId("pl-borrow");
+  await expect(borrow).toBeVisible();
+  await expect(borrow).toHaveValue("100");
+  await borrow.fill("150");
+  await page.getByTestId("pl-run").click();
+  await expect(page.getByTestId("pl-sharpe")).toBeVisible();
+  // → request carries all three fields
+  expect(runBody).not.toBeNull();
+  expect(runBody!.scheme).toBe("mean_variance");
+  expect(runBody!.turnover_penalty_bps).toBe(20);
+  expect(runBody!.long_short).toBe(true);
+  expect(runBody!.borrow_bps).toBe(150);
+  // the warning is translated
+  await expect(page.locator(".pl-warning", { hasText: "多空模式：借券费已计" })).toBeVisible();
+  // ③ portfolio summary: gross / net exposure, borrow fee and cumulative borrow cost, the penalty chip
+  await expect(page.getByTestId("pl-ls-chip")).toBeVisible();
+  await expect(page.getByTestId("pl-gross-chip")).toHaveText("总仓位 200% · 净 0%");
+  await expect(page.getByTestId("pl-borrow-chip")).toHaveText("借券费 150 bp/yr");
+  await expect(page.getByTestId("pl-borrow-cost-chip")).toHaveText("累计借券成本 1.20%");
+  await expect(page.getByTestId("pl-penalty-chip")).toHaveText("换手惩罚 20 bp");
+  // ⑥ header exposure line + the book split into longs and shorts with side badges; bars use |weight|
+  await expect(page.getByTestId("pl-book-meta")).toContainText("净 0% · 总 200% · 多 100% · 空 100%");
+  const weights = page.getByTestId("pl-weights");
+  await expect(page.getByTestId("pl-book-long")).toHaveText("多头");
+  await expect(page.getByTestId("pl-book-short")).toHaveText("空头");
+  await expect(weights.locator("tr[data-side=long]")).toHaveCount(2);
+  await expect(weights.locator("tr[data-side=short]")).toHaveCount(2);
+  const shortRow = weights.locator("tr[data-side=short]").first();
+  await expect(shortRow).toContainText("INTC");
+  await expect(shortRow.locator(".pl-side--short")).toHaveText("空");
+  await expect(shortRow).toContainText("-50.0%");
+  await expect(shortRow.locator(".pl-bar__fill")).toHaveClass(/pl-bar__fill--dn/);
+  await expect(shortRow.locator(".pl-bar__fill")).toHaveCSS("width", /^(?!0px).+/);
+  await expect(weights.locator("tr[data-side=long]").first().locator(".pl-side--long")).toHaveText("多");
+  // rows are grouped: both longs come before the first short
+  const sides = await weights.locator("tr[data-side]").evaluateAll((rows) => rows.map((r) => r.getAttribute("data-side")));
+  expect(sides).toEqual(["long", "long", "short", "short"]);
+  // the ticket is replaced by the long-only note — no form, no request
+  const ticket = page.getByTestId("pl-ticket");
+  await expect(ticket).toBeVisible();
+  await expect(page.getByTestId("pl-ticket-longonly")).toContainText("调仓指令单仅支持多头");
+  await expect(page.getByTestId("pl-ticket-longonly")).toContainText("long-only");
+  await expect(page.getByTestId("pl-ticket-build")).toHaveCount(0);
+  await expect(page.getByTestId("pl-ticket-nav")).toHaveCount(0);
+  expect(ordersCalls).toBe(0);
+  // deploy-to-paper keeps working for a long-short book
+  await page.getByTestId("pl-deploy").click();
+  await expect(page.getByTestId("pl-deployed")).toBeVisible();
+  const kinds = await page.evaluate(() =>
+    (JSON.parse(localStorage.getItem("aiquant.paper") ?? "[]") as Array<{ kind: string; payload?: { long_short?: boolean } }>).map((d) => d.kind),
+  );
+  expect(kinds).toContain("pipeline");
+  // the share link round-trips the three fields
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: (s: string) => { (window as unknown as { __md: string }).__md = s; return Promise.resolve(); } },
+    });
+  });
+  await page.getByTestId("pl-share").click();
+  const shareLink = await page.evaluate(() => (window as unknown as { __md: string }).__md);
+  const sharedSpec = JSON.parse(Buffer.from(new URL(shareLink).searchParams.get("pl")!, "base64url").toString("utf8")) as Record<string, unknown>;
+  expect(sharedSpec.long_short).toBe(true);
+  expect(sharedSpec.borrow_bps).toBe(150);
+  expect(sharedSpec.turnover_penalty_bps).toBe(20);
+  // turning long-short off brings the ticket form back (the spec on screen is still the long-short run until the next run)
+  await page.getByTestId("pl-long-short").uncheck();
+  await expect(page.getByTestId("pl-borrow")).toHaveCount(0);
+  await page.getByTestId("pl-run").click();
+  await expect(page.getByTestId("pl-trials")).toContainText("已尝试 2 次");
+  await expect(page.getByTestId("pl-ticket-longonly")).toHaveCount(0);
+  await expect(page.getByTestId("pl-ticket-build")).toBeVisible();
+  await expect(page.getByTestId("pl-book-short")).toHaveCount(0);
+});
+
 test("factor library: server health badge, prune check strikes, lecture mode", async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem("aiquant.factors.zoo", JSON.stringify([
@@ -1081,4 +1366,46 @@ test("admin console: token gate, overview stats and pending withdrawal", async (
   await expect(page.getByText("1 / 2")).toBeVisible();
   await expect(page.getByText("$30.00")).toBeVisible();
   await expect(page.getByRole("button", { name: "标记已付" })).toBeVisible();
+  // Ops layer: last ops run — total seconds, failed badge (monitor step failed), three step rows, remaining accounts
+  const ops = page.getByTestId("adm-ops");
+  await expect(ops).toContainText("上次运维");
+  await expect(page.getByTestId("adm-ops-when")).toContainText("共 42.3 秒");
+  await expect(page.getByTestId("adm-ops-ok")).toHaveText("失败");
+  await expect(page.getByTestId("adm-ops-ok")).toHaveClass(/pl-badge--warn/);
+  const steps = page.getByTestId("adm-ops-steps");
+  await expect(steps.locator("tr[data-step]")).toHaveCount(3);
+  await expect(steps.locator("tr[data-step=warm]")).toContainText("预热缓存");
+  await expect(steps.locator("tr[data-step=warm]")).toContainText("成功");
+  await expect(steps.locator("tr[data-step=warm]")).toContainText("30.1s");
+  await expect(steps.locator("tr[data-step=monitor]")).toContainText("失败");
+  await expect(steps.locator("tr[data-step=monitor]")).toContainText("yahoo timeout for account ab12cd34");
+  await expect(page.getByTestId("adm-ops-remaining")).toHaveText("剩余账户 3");
+  await expect(page.getByTestId("adm-ops-empty")).toHaveCount(0);
+  // Ops layer: provider health — two markets, us fallback 12.5% (warn), crypto 0% (ok), served breakdown sorted by count
+  const prov = page.getByTestId("adm-providers");
+  await expect(prov).toContainText("数据源健康（近 7 天）");
+  const provRows = page.getByTestId("adm-providers-table").locator("tbody tr");
+  await expect(provRows).toHaveCount(2);
+  await expect(page.getByTestId("adm-prov-fallback-us")).toHaveText("12.5%");
+  await expect(page.getByTestId("adm-prov-fallback-us")).toHaveClass(/pl-tone--warn/);
+  await expect(page.getByTestId("adm-prov-fallback-crypto")).toHaveText("0.0%");
+  await expect(page.getByTestId("adm-prov-fallback-crypto")).toHaveClass(/pl-tone--ok/);
+  await expect(provRows.filter({ hasText: "crypto" })).toContainText("binance 5 · coingecko 5 · yahoo 1");
+  await expect(provRows.filter({ hasText: "us" }).first()).toContainText("0.40s");
+  // "Run now" posts to /api/admin/ops with the token and reloads the overview
+  let opsCalls = 0;
+  let opsToken: string | undefined;
+  await page.route("**/api/admin/ops**", (route) => {
+    opsCalls += 1;
+    opsToken = route.request().headers()["x-admin-token"];
+    expect(route.request().method()).toBe("POST");
+    return route.fallback();
+  });
+  let overviewCalls = 0;
+  await page.route("**/api/admin/overview", (route) => { overviewCalls += 1; return route.fallback(); });
+  await page.getByTestId("adm-ops-run").click();
+  await expect.poll(() => opsCalls).toBe(1);
+  expect(opsToken).toBe("e2e-token");
+  await expect.poll(() => overviewCalls).toBeGreaterThanOrEqual(1);
+  await expect(page.getByTestId("adm-ops-run")).toHaveText("立即运行");
 });

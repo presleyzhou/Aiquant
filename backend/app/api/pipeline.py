@@ -44,6 +44,9 @@ class PipelineRequest(BaseModel):
     trade_rate: float = Field(1.0, ge=0.1, le=1.0, allow_inf_nan=False, description="fraction of the distance to the target traded per rebalance")
     shrink_to_equal: float = Field(0.0, ge=0.0, le=1.0, allow_inf_nan=False, description="blend optimised weights toward 1/N (DeMiguel et al. 2009)")
     prior_trials: int = Field(0, ge=0, le=10_000, description="configurations already tried by this user; inflates the DSR's N")
+    turnover_penalty_bps: float = Field(0.0, ge=0, le=100, allow_inf_nan=False, description="L1 cost per unit traded in the mean-variance objective (Gârleanu-Pedersen aim portfolio); 0 = off")
+    long_short: bool = Field(False, description="long the top N, short the bottom N, dollar-neutral (borrow cost charged; margin/locate not modelled)")
+    borrow_bps: float = Field(100.0, ge=0, le=500, allow_inf_nan=False, description="annual borrow fee on the short notional")
     compare: bool = True
 
 
@@ -52,10 +55,27 @@ async def get_config() -> dict:
     return pipeline_config()
 
 
+def _run_cached(raw: dict) -> dict:
+    """normalise → load panel → cache lookup keyed on spec + panel date → run."""
+    from app.services import run_cache
+    from app.services.pipeline import load_panel, normalize_spec
+
+    spec = normalize_spec(raw)
+    panel = load_panel(spec)
+    key = run_cache.key_for(spec, run_cache.panel_fingerprint(panel))
+    hit = run_cache.get(key)
+    if hit is not None:
+        return run_cache.personalise(hit, spec.get("prior_trials", 0))
+    result = run_cache._finite(run_pipeline_blocking(spec, panel=panel))
+    run_cache.put(key, result)
+    result["cached"] = False
+    return result
+
+
 @router.post("/run", dependencies=[Depends(limiter("pipeline", "rl_pipeline_per_hour", 3600))])
 async def run(req: PipelineRequest) -> dict:
     try:
-        return await asyncio.to_thread(run_pipeline_blocking, req.model_dump())
+        return await asyncio.to_thread(_run_cached, req.model_dump())
     except factor_dsl.FactorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:

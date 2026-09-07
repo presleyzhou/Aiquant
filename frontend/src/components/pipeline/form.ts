@@ -8,7 +8,7 @@ import type {
   PipelineStarterFactor,
 } from "../../api";
 import type { SavedFactor } from "../../store";
-import { FALLBACK_CONFIG, FORM_KEY, LAST_KEY, TRIALS_KEY } from "./constants";
+import { FALLBACK_CONFIG, FORM_KEY, LAST_KEY, PINNED_KEY, TRIALS_KEY } from "./constants";
 
 /** Everything the user can set. Persisted as-is so a reload lands on the same
  * configuration; `selected` is keyed by expression so a factor stays ticked
@@ -37,6 +37,12 @@ export interface FormState {
   symbolsText: string;
   /** V5: panel depth. */
   history: PipelineHistory;
+  /** V4-pipeline: L1 turnover penalty in bp, mean_variance only. */
+  turnoverPenaltyBps: number;
+  /** V4-pipeline: long top-N / short bottom-N. */
+  longShort: boolean;
+  /** V4-pipeline: annual borrow fee on the short notional, bp. */
+  borrowBps: number;
 }
 
 
@@ -115,6 +121,9 @@ export function formFromShare(
     customOn: (spec.symbols?.length ?? 0) > 0,
     symbolsText: spec.symbols ? spec.symbols.join(", ") : base.symbolsText,
     history: spec.history ?? base.history,
+    turnoverPenaltyBps: spec.turnover_penalty_bps ?? base.turnoverPenaltyBps,
+    longShort: spec.long_short ?? base.longShort,
+    borrowBps: spec.borrow_bps ?? base.borrowBps,
   };
 }
 
@@ -140,6 +149,9 @@ export function formFromDefaults(d: PipelineConfig["defaults"], base?: Partial<F
     holdBuffer: d.hold_buffer ?? FALLBACK_CONFIG.defaults.hold_buffer ?? 4,
     tradeRate: d.trade_rate ?? FALLBACK_CONFIG.defaults.trade_rate ?? 1,
     shrinkToEqual: d.shrink_to_equal ?? 0,
+    turnoverPenaltyBps: d.turnover_penalty_bps ?? 0,
+    longShort: d.long_short ?? false,
+    borrowBps: d.borrow_bps ?? 100,
   };
 }
 
@@ -235,6 +247,9 @@ export function loadForm(): FormState | null {
       customOn: parsed.customOn === true,
       symbolsText: typeof parsed.symbolsText === "string" ? parsed.symbolsText : "",
       history: parsed.history === "5y" ? "5y" : "3y",
+      turnoverPenaltyBps: typeof parsed.turnoverPenaltyBps === "number" ? parsed.turnoverPenaltyBps : base.turnoverPenaltyBps,
+      longShort: parsed.longShort === true,
+      borrowBps: typeof parsed.borrowBps === "number" ? parsed.borrowBps : base.borrowBps,
     };
   } catch {
     return null;
@@ -252,3 +267,42 @@ export interface FactorOption {
 }
 
 export type AltKey = keyof Omit<PipelineAlternative, "scheme">;
+
+/* ---- V4-pipeline: pin a run as "A" for side-by-side comparison ------------ */
+export interface PinnedRun {
+  /** scheme · top_n · rebalance · factors — built by the page in the current language. */
+  label: string;
+  /** ISO time of pinning. */
+  at: string;
+  result: PipelineResult;
+}
+
+/** Identity of a run for "is B a different run from A": the normalized spec
+ * (minus the browser trial count) plus the panel date. Two runs of the same
+ * config on the same data compare as equal, which is exactly a cache hit. */
+export function runKey(r: PipelineResult): string {
+  const spec = { ...(r.spec ?? {}) } as Record<string, unknown>;
+  delete spec.prior_trials;
+  return `${JSON.stringify(spec)}|${r.universe?.to ?? ""}`;
+}
+
+export function loadPinned(): PinnedRun | null {
+  try {
+    const raw = sessionStorage.getItem(PINNED_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as PinnedRun;
+    if (!p || typeof p !== "object" || typeof p.label !== "string" || !p.result?.backtest?.stats || !p.result.target_weights?.weights) return null;
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+export function savePinned(p: PinnedRun | null) {
+  try {
+    if (p === null) sessionStorage.removeItem(PINNED_KEY);
+    else sessionStorage.setItem(PINNED_KEY, JSON.stringify(p));
+  } catch {
+    /* quota exceeded or storage unavailable — the pin still lives in state */
+  }
+}

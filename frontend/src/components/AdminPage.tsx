@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type AdminOverview, type AdminWithdrawal, type MarketItem } from "../api";
+import { api, type AdminOpsRun, type AdminOverview, type AdminWithdrawal, type MarketItem } from "../api";
 import { useT } from "../i18n";
+import { fallbackTone } from "./pipeline/format";
 
 const TOKEN_KEY = "aiquant.admin.token";
 
@@ -41,7 +42,16 @@ export function AdminPage() {
     setBusy(true);
     try { const r = await api.admin.recheck(token); setError(t("adm.recheckDone", { n: String(r.done), f: String(r.failed) })); await load(token); } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   };
+  const runOps = async () => {
+    setBusy(true);
+    try { await api.admin.ops(token); await load(token); } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
   const when = (ts?: number | null) => (ts ? new Date(ts * 1000).toLocaleString() : "—");
+  /** `{}` before the first run → null. */
+  const opsLast: AdminOpsRun | null =
+    overview?.ops_last && typeof (overview.ops_last as AdminOpsRun).started_at === "number" ? (overview.ops_last as AdminOpsRun) : null;
+  const providers = overview?.provider_health;
+  const providerRows = providers ? Object.entries(providers.markets) : [];
 
   if (!overview) {
     return (
@@ -73,6 +83,52 @@ export function AdminPage() {
         <div className="panel__head"><span className="panel__title">{t("adm.recheck")}</span>
           <span className="panel__meta">{t("adm.lastRun", { d: when(overview.health_runs.last_run), n: String(overview.health_runs.done ?? 0), f: String(overview.health_runs.failed ?? 0) })}
             <button className="ghost" style={{ marginLeft: 8 }} disabled={busy} onClick={recheck}>{busy ? "…" : t("adm.recheckNow")}</button></span></div>
+      </section>
+      <section className="panel mk-mine" data-testid="adm-ops">
+        <div className="panel__head"><span className="panel__title">{t("adm.ops")}</span>
+          <span className="panel__meta">
+            {opsLast && (
+              <>
+                <span data-testid="adm-ops-when">{when(opsLast.started_at)} · {t("adm.ops.total", { s: opsLast.seconds.toFixed(1) })}</span>
+                <span className={`pl-badge ${opsLast.ok ? "pl-badge--ok" : "pl-badge--warn"}`} style={{ marginLeft: 8 }} data-testid="adm-ops-ok">
+                  {opsLast.ok ? t("adm.ops.ok") : t("adm.ops.failed")}
+                </span>
+              </>
+            )}
+            <button className="ghost" style={{ marginLeft: 8 }} disabled={busy} onClick={runOps} data-testid="adm-ops-run">{busy ? "…" : t("adm.ops.runNow")}</button>
+          </span></div>
+        {!opsLast ? <div className="empty" style={{ padding: 14 }} data-testid="adm-ops-empty">{t("adm.ops.never")}</div> : (
+          <div style={{ overflowX: "auto" }}><table className="pp-compare mk-mine__table" data-testid="adm-ops-steps"><thead><tr><th>{t("adm.ops.step")}</th><th>{t("adm.w.status")}</th><th>{t("adm.ops.seconds")}</th><th>{t("adm.ops.error")}</th></tr></thead><tbody>
+            {opsLast.steps.map((st) => (
+              <tr key={st.step} data-step={st.step}>
+                <td style={{ textAlign: "left" }}>{t(`adm.ops.step.${st.step}` as "adm.ops.step.warm") === `adm.ops.step.${st.step}` ? st.step : t(`adm.ops.step.${st.step}` as "adm.ops.step.warm")}</td>
+                <td className={st.ok ? "up" : "dn"}>{st.ok ? t("adm.ops.ok") : t("adm.ops.failed")}</td>
+                <td>{st.seconds.toFixed(1)}s</td>
+                <td className="dim" style={{ textAlign: "left", fontSize: 11 }}>{st.error ?? "—"}</td>
+              </tr>
+            ))}
+            <tr><td colSpan={4} className="dim" style={{ textAlign: "left" }} data-testid="adm-ops-remaining">{t("adm.ops.remaining", { n: String(opsLast.monitor_remaining) })}</td></tr>
+          </tbody></table></div>
+        )}
+      </section>
+      <section className="panel mk-mine" data-testid="adm-providers">
+        <div className="panel__head"><span className="panel__title">{t("adm.prov", { d: String(providers?.days ?? "—") })}</span>
+          <span className="panel__meta">{providers ? when(providers.generated_at) : ""}</span></div>
+        {providerRows.length === 0 ? <div className="empty" style={{ padding: 14 }} data-testid="adm-providers-empty">{t("adm.prov.none")}</div> : (
+          <div style={{ overflowX: "auto" }}><table className="pp-compare mk-mine__table" data-testid="adm-providers-table"><thead><tr><th>{t("fl.market")}</th><th>{t("adm.prov.calls")}</th><th>{t("adm.prov.fallback")}</th><th>{t("adm.prov.avg")}</th><th>{t("adm.prov.served")}</th></tr></thead><tbody>
+            {providerRows.map(([market, m]) => (
+              <tr key={market} data-market={market}>
+                <td style={{ textAlign: "left" }}><b>{market}</b></td>
+                <td>{m.calls}</td>
+                <td className={fallbackTone(m.fallback_rate_pct)} data-testid={`adm-prov-fallback-${market}`}>{m.fallback_rate_pct.toFixed(1)}%</td>
+                <td>{m.avg_seconds.toFixed(2)}s</td>
+                <td className="dim" style={{ textAlign: "left", fontSize: 11 }}>
+                  {Object.entries(m.served).sort((a, b) => b[1] - a[1]).map(([p, n]) => `${p} ${n}`).join(" · ") || "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody></table></div>
+        )}
       </section>
       <section className="panel mk-mine">
         <div className="panel__head"><span className="panel__title">{t("adm.withdrawals")}</span><span className="panel__meta">{withdrawals.length}</span></div>

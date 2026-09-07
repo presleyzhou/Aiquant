@@ -1,6 +1,7 @@
 import type { PipelineConfig, PipelineResult } from "../../../api";
 import { useT, type MsgKey } from "../../../i18n";
 import { NumField } from "../blocks";
+import { BORROW_RANGE, TURNOVER_PENALTY_RANGE } from "../constants";
 import { PRESET_IDS, type FormState, type PresetId } from "../form";
 
 /** Stage ③ body: presets, scheme radios, the parameter grid and — after a
@@ -152,13 +153,59 @@ export function PortfolioForm({
             <span className="dim">{form.compare ? t("pl.pf.compareOn") : t("pl.pf.compareOff")}</span>
           </div>
         </label>
+        {form.scheme === "mean_variance" && (
+          <NumField
+            label={t("pl.pf.turnoverPenalty")}
+            value={form.turnoverPenaltyBps}
+            range={limits.turnover_penalty_bps ?? TURNOVER_PENALTY_RANGE}
+            hint={t("pl.pf.turnoverPenaltyHint")}
+            onChange={(v) => patch({ turnoverPenaltyBps: v })}
+            testId="pl-turnover-penalty"
+          />
+        )}
+        <label className="field pl-ls">
+          <span className="field__label">{t("pl.pf.longShort")}</span>
+          <div className="pl-inline">
+            <input
+              type="checkbox"
+              className="fl-zoo-row__check"
+              checked={form.longShort}
+              disabled={running}
+              onChange={(e) => patch({ longShort: e.target.checked })}
+              aria-label={t("pl.pf.longShort")}
+              data-testid="pl-long-short"
+            />
+            <span className="dim">{form.longShort ? t("pl.pf.longShortOn") : t("pl.pf.off")}</span>
+          </div>
+          <span className="pl-field-hint pl-hint--warn" data-testid="pl-long-short-caveat">{t("pl.pf.longShortCaveat")}</span>
+        </label>
+        {form.longShort && (
+          <NumField
+            label={t("pl.pf.borrow")}
+            value={form.borrowBps}
+            range={limits.borrow_bps ?? BORROW_RANGE}
+            hint={t("pl.pf.borrowHint")}
+            onChange={(v) => patch({ borrowBps: v })}
+            testId="pl-borrow"
+          />
+        )}
       </div>
       <p className="dim pl-hint">{t("pl.pf.hint")}</p>
       {result && (
         <div className="chip-row pl-chip-row">
           <span className="chip is-on">{schemeName(result.portfolio.scheme)}</span>
+          {result.portfolio.long_short && <span className="chip is-on" data-testid="pl-ls-chip">{t("pl.pf.longShortChip")}</span>}
           <span className="chip">{t("pl.pf.effN", { n: result.portfolio.avg_effective_n.toFixed(1) })}</span>
-          <span className="chip">{t("pl.pf.exposure", { v: result.portfolio.avg_exposure_pct.toFixed(0) })}</span>
+          {result.portfolio.long_short ? (
+            <span className="chip" title={t("pl.pf.grossTitle")} data-testid="pl-gross-chip">
+              {t("pl.pf.grossNet", {
+                g: result.portfolio.avg_exposure_pct.toFixed(0),
+                n: (result.portfolio.avg_net_exposure_pct ?? 0).toFixed(0),
+              })}
+            </span>
+          ) : (
+            <span className="chip">{t("pl.pf.exposure", { v: result.portfolio.avg_exposure_pct.toFixed(0) })}</span>
+          )}
           <span className="chip">{t("pl.pf.turnover", { v: result.portfolio.avg_turnover_pct.toFixed(1) })}</span>
           {result.portfolio.annual_turnover_x !== undefined && (
             <span className="chip" title={t("pl.pf.annualTurnoverTitle")}>
@@ -173,6 +220,21 @@ export function PortfolioForm({
             </span>
           )}
           <span className="chip">{t("pl.pf.rebalances", { n: String(result.portfolio.rebalances) })}</span>
+          {result.portfolio.long_short && (
+            <>
+              <span className="chip" data-testid="pl-borrow-chip">
+                {t("pl.pf.borrowChip", { v: result.portfolio.borrow_bps === null || result.portfolio.borrow_bps === undefined ? "—" : String(result.portfolio.borrow_bps) })}
+              </span>
+              <span className="chip dn" title={t("pl.pf.borrowCostTitle")} data-testid="pl-borrow-cost-chip">
+                {t("pl.pf.borrowCost", {
+                  v: result.portfolio.borrow_cost_pct === null || result.portfolio.borrow_cost_pct === undefined ? "—" : result.portfolio.borrow_cost_pct.toFixed(2),
+                })}
+              </span>
+            </>
+          )}
+          {(result.portfolio.turnover_penalty_bps ?? 0) > 0 && (
+            <span className="chip" data-testid="pl-penalty-chip">{t("pl.pf.penaltyChip", { v: String(result.portfolio.turnover_penalty_bps) })}</span>
+          )}
         </div>
       )}
     </>

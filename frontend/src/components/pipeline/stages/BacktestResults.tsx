@@ -4,6 +4,7 @@ import { EquityChart } from "../../EquityChart";
 import { SplitRow, Stat } from "../blocks";
 import { Heatmap, SensitivityGrid } from "../charts";
 import { WARNING_KEYS } from "../constants";
+import { CpcvBlock } from "../CpcvBlock";
 import type { AltKey, FormState } from "../form";
 import {
   hitTone, mintrlTone, num, numOpt, pOpt, pTone, pct, pctOpt, prob, probTone, signed2Opt, spikeTone, tone, tstatTone,
@@ -305,6 +306,14 @@ export function BacktestResults({
           />
           <p className="dim pl-hint">{t("pl.bt.sens.note")}</p>
         </>
+      )}
+
+      {result && result.cpcv !== undefined && (
+        result.cpcv === null ? (
+          <p className="dim pl-hint" data-testid="pl-cpcv-off">{t("pl.cpcv.off")}</p>
+        ) : (
+          <CpcvBlock cpcv={result.cpcv} fullSharpe={bt.stats.sharpe} />
+        )
       )}
     </>
   );

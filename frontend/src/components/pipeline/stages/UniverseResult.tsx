@@ -49,6 +49,11 @@ export function UniverseResult({
           )}
         </div>
       )}
+      {result.universe.survivorship && (
+        <div className="pl-notice" data-testid="pl-survivorship">
+          ⓘ {t("pl.uni.survivorship", { n: result.universe.survivorship.late_listings })}
+        </div>
+      )}
       {result.universe.health && result.universe.health.length > 0 && (
         <HealthTable rows={result.universe.health} sectorLabel={sectorLabel} />
       )}
