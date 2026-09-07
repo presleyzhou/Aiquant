@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from app.services import kvstore
 
@@ -43,7 +43,7 @@ def record(market: str, configured: str, used: list[str], seconds: float) -> Non
 
 def summary(days: int = 7) -> dict:
     """Aggregate the last `days` daily documents per market."""
-    today = date.today()
+    today = datetime.now(UTC).date()
     out: dict[str, dict] = {}
     for i in range(days):
         doc = kvstore.get(f"provhealth:{(today - timedelta(days=i)).isoformat()}")

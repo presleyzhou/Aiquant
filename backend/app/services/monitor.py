@@ -241,12 +241,14 @@ def _finite(obj):
     return obj
 
 
-async def run_all(force: bool = False, limit: int = ACCOUNTS_PER_RUN) -> dict:
+async def run_all(force: bool = False, limit: int = ACCOUNTS_PER_RUN, budget_seconds: float | None = None) -> dict:
     """Walk every cloud state document; stop after `limit` accounts so one
-    call stays inside the function time budget. Returns counts and how many
-    accounts still need a pass (the caller loops until zero)."""
+    call stays inside the function time budget (`budget_seconds`, default
+    RUN_DEADLINE_SECONDS). Returns counts and how many accounts still need a
+    pass (the caller loops until zero)."""
     processed = skipped = alerts = notified = remaining = 0
     now = time.time()
+    deadline = min(RUN_DEADLINE_SECONDS, budget_seconds if budget_seconds is not None else RUN_DEADLINE_SECONDS)
     for key, doc in await asyncio.to_thread(kvstore.list_prefix_items, "state"):
         data = (doc or {}).get("data") or {}
         if not data.get("aiquant.paper"):
@@ -258,7 +260,7 @@ async def run_all(force: bool = False, limit: int = ACCOUNTS_PER_RUN) -> dict:
             continue
         # stay inside the serverless time budget: whatever is left is reported
         # as remaining and the scheduler calls again
-        if processed >= limit or time.time() - now > RUN_DEADLINE_SECONDS:
+        if processed >= limit or time.time() - now > deadline:
             remaining += 1
             continue
         report = await run_account(key, doc, force=True)

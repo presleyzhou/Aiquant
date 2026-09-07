@@ -154,10 +154,10 @@ def test_ops_runs_steps_isolated_and_stores_report(monkeypatch, tmp_path):
     async def fake_warm(markets="us,crypto"):
         return {"warmed": {"us": {"symbols": 100, "provider": "yahoo", "seconds": 1.0}}, "kv": "file"}
 
-    def boom(n):
+    def boom(n, deadline=None):
         raise RuntimeError("recheck exploded")
 
-    async def fake_run_all(force=False, limit=10):
+    async def fake_run_all(force=False, limit=10, budget_seconds=None):
         return {"processed": 2, "skipped": 0, "remaining": 3, "alerts": 1, "notified": 0}
 
     monkeypatch.setattr(admin_api, "warm", fake_warm)
@@ -178,6 +178,72 @@ def test_ops_runs_steps_isolated_and_stores_report(monkeypatch, tmp_path):
     assert "provider_health" in over and over["provider_health"]["days"] == 7
 
 
+def test_ops_drain_pass_skips_recheck_and_keeps_health_meta(monkeypatch, tmp_path):
+    from app.api import admin as admin_api
+    from app.services import monitor
+
+    _file_store(monkeypatch, tmp_path)
+    hdr = _admin(monkeypatch)
+    kvstore.put("health:meta", {"done": 60})
+
+    async def fake_warm(markets="us,crypto"):
+        return {"warmed": {}, "kv": "file"}
+
+    async def fake_run_all(force=False, limit=10, budget_seconds=None):
+        assert budget_seconds is not None and 0 < budget_seconds < admin_api.OPS_BUDGET_SECONDS
+        return {"processed": 1, "skipped": 0, "remaining": 0, "alerts": 0, "notified": 0}
+
+    called = {"n": 0}
+
+    def recheck(n, deadline=None):
+        called["n"] += 1
+        return {}
+
+    monkeypatch.setattr(admin_api, "warm", fake_warm)
+    monkeypatch.setattr(admin_api, "_recheck_blocking", recheck)
+    monkeypatch.setattr(monitor, "run_all", fake_run_all)
+    rep = client.post("/api/admin/ops?recheck=0", headers=hdr).json()
+    assert called["n"] == 0 and rep["steps"][1]["result"] == {"skipped": "drain pass"}
+    assert rep["monitor_remaining"] == 0 and rep["ok"] is True
+    assert kvstore.get("health:meta") == {"done": 60}
+
+
+def test_recheck_deadline_cuts_and_single_factor_pass_does_not_write_meta(monkeypatch, tmp_path):
+    from app.api import admin as admin_api
+
+    _file_store(monkeypatch, tmp_path)
+    kvstore.put("health:meta", {"done": 60})
+    kvstore.put("listing:1", {"type": "factor", "status": "active", "payload": {"market": "us", "expression": "rank(close)", "horizon": 10}})
+    kvstore.put("listing:2", {"type": "factor", "status": "active", "payload": {"market": "us", "expression": "rank(volume)", "horizon": 10}})
+    monkeypatch.setattr(admin_api, "check_factor_blocking", lambda *a: (_ for _ in ()).throw(AssertionError("must not run")))
+    meta = admin_api._recheck_blocking(60, deadline=0.0)   # already past the deadline
+    assert meta["cut_for_time"] == 2 and meta["done"] == 0
+    assert kvstore.get("health:meta")["cut_for_time"] == 2
+    kvstore.put("health:meta", {"done": 60})
+    admin_api._recheck_blocking(1, deadline=0.0)
+    assert kvstore.get("health:meta") == {"done": 60}
+
+
+def test_run_cache_key_changes_when_the_last_bar_changes():
+    panel = _panel(300, 10)
+    a = run_cache.panel_fingerprint(panel)
+    panel["close"].iloc[-1, 0] *= 1.01          # the newest bar completed
+    b = run_cache.panel_fingerprint(panel)
+    assert a != b and a.split("-")[:3] == b.split("-")[:3]   # same date, different digest
+    panel["close"].attrs["provider"] = "akshare"
+    assert run_cache.panel_fingerprint(panel) not in (a, b)
+
+
+def test_personalise_keeps_expected_max_sharpe_consistent(monkeypatch):
+    panel = _panel(500, 20)
+    monkeypatch.setattr(pipeline, "_load_panel_blocking", lambda market: panel)
+    run_cache._MEM.clear()
+    first = client.post("/api/pipeline/run", json={**SPEC, "compare": True}).json()
+    second = client.post("/api/pipeline/run", json={**SPEC, "compare": True, "prior_trials": 900}).json()
+    o1, o2 = first["backtest"]["overfitting"], second["backtest"]["overfitting"]
+    assert second["cached"] and o2["expected_max_sharpe_ann"] > o1["expected_max_sharpe_ann"]
+
+
 def test_admin_token_rotation_accepts_both_values(monkeypatch, tmp_path):
     _file_store(monkeypatch, tmp_path)
     _admin(monkeypatch, "old-token", "new-token")
@@ -185,5 +251,6 @@ def test_admin_token_rotation_accepts_both_values(monkeypatch, tmp_path):
     assert client.get("/api/admin/overview", headers={"x-admin-token": "new-token"}).status_code == 200
     assert client.get("/api/admin/overview", headers={"x-admin-token": "wrong"}).status_code == 403
     assert client.get("/api/admin/overview").status_code == 403
+    assert client.get("/api/admin/overview", headers={b"x-admin-token": "tok\xe9".encode("latin-1")}).status_code == 403  # non-ASCII → 403, not 500
     _admin(monkeypatch, None, None)
     assert client.get("/api/admin/overview", headers={"x-admin-token": ""}).status_code == 403

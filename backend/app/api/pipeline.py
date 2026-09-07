@@ -62,12 +62,11 @@ def _run_cached(raw: dict) -> dict:
 
     spec = normalize_spec(raw)
     panel = load_panel(spec)
-    panel_date = str(panel["close"].index[-1].date())
-    key = run_cache.key_for(spec, panel_date)
+    key = run_cache.key_for(spec, run_cache.panel_fingerprint(panel))
     hit = run_cache.get(key)
     if hit is not None:
         return run_cache.personalise(hit, spec.get("prior_trials", 0))
-    result = run_pipeline_blocking(spec, panel=panel)
+    result = run_cache._finite(run_pipeline_blocking(spec, panel=panel))
     run_cache.put(key, result)
     result["cached"] = False
     return result

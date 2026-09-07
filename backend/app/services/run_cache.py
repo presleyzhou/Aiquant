@@ -16,6 +16,8 @@ import logging
 import time
 from collections import OrderedDict
 
+import numpy as np
+
 from app.services import kvstore, portfolio
 
 log = logging.getLogger("aiquant.run_cache")
@@ -25,6 +27,18 @@ TTL_SECONDS = 24 * 3600
 _MEM: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 _MEM_MAX = 32
 _EXCLUDE = {"prior_trials"}
+
+
+def panel_fingerprint(panel: dict) -> str:
+    """Date of the last bar plus a digest of its values, the panel shape and
+    the provider: an intra-day refresh that completes the newest bar (or a
+    provider fallback that changes the data) must not hit yesterday's run."""
+    close = panel["close"]
+    last = close.iloc[-1].to_numpy(dtype=float)
+    h = hashlib.sha1()
+    h.update(np.nan_to_num(last).tobytes())
+    h.update(f"{close.shape}|{close.attrs.get('provider', '')}".encode())
+    return f"{close.index[-1].date()}-{h.hexdigest()[:10]}"
 
 
 def key_for(spec: dict, panel_date: str) -> str:
@@ -89,6 +103,9 @@ def personalise(result: dict, prior_trials: int) -> dict:
         d = portfolio.deflated_sharpe_from(moments, trials, extra_trials=prior_trials)
         over["dsr"] = None if d["dsr"] is None else round(d["dsr"], 3)
         over["trials"] = d["trials"]
+        ann = 252 if result.get("spec", {}).get("market", "us") == "us" else 365
+        ems = d.get("expected_max_sharpe")
+        over["expected_max_sharpe_ann"] = None if ems is None else round(float(ems) * ann ** 0.5, 2)
     result["spec"]["prior_trials"] = int(prior_trials)
     result["cached"] = True
     return result

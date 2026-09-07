@@ -500,7 +500,13 @@ def _decide_weights(
                 cands = pd.concat([cands, pd.Series(edge, index=missing)])
         sel = _select(cands, n, spec["hold_buffer"], held_leg)
         sub = trailing[sel.index]
-        cur_leg = (sign * cur.reindex(sel.index).fillna(0.0)).clip(lower=0).to_numpy() if kappa > 0 else None
+        cur_leg = None
+        if kappa > 0:
+            # the book may be vol-scaled (sums to < 1); the optimiser works in
+            # unscaled weights, so measure the trade in that space
+            cur_leg = (sign * cur.reindex(sel.index).fillna(0.0)).clip(lower=0).to_numpy()
+            leg_total = float(sign * cur[sign * cur > 0].sum()) if len(cur) else 0.0
+            cur_leg = cur_leg / leg_total if leg_total > 1e-9 else None
         w = portfolio.construct(scheme, sel.values, sub.values, spec["max_weight"], ic=ic,
                                 current=cur_leg, turnover_penalty=kappa)
         if spec.get("shrink_to_equal", 0) > 0 and len(w):

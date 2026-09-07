@@ -183,6 +183,45 @@ def test_attach_refuses_without_key_or_on_crypto_and_runs_with_provider(monkeypa
                                                  "fields": ["mcap", "pe", "pb", "roe", "ep", "bp"], "lag_days": 60}
 
 
+def test_fundamentals_cache_is_per_universe(monkeypatch, tmp_path):
+    monkeypatch.setenv("AIQUANT_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(fundamentals, "kvstore", type("KV", (), {"mode": staticmethod(lambda: "file")}))
+    fundamentals._MEM.clear()
+    calls = []
+    monkeypatch.setattr(fundamentals, "_download", lambda syms: (calls.append(list(syms)) or {s: [{"date": "2024-03-31", "pe": 10.0}] for s in syms}))
+    small = fundamentals._raw_rows("us", ["A", "B"])
+    big = fundamentals._raw_rows("us", ["A", "B", "C", "D"])
+    assert set(small) == {"A", "B"} and set(big) == {"A", "B", "C", "D"} and len(calls) == 2
+    assert fundamentals._raw_rows("us", ["B", "A"]) == small and len(calls) == 2   # order-insensitive hit
+
+
+def test_download_survives_html_bodies_and_worker_errors(monkeypatch):
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("not json")
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, params=None):
+            if params.get("symbol") == "BOOM" or "BOOM" in url:
+                raise RuntimeError("worker died")
+            return Resp()
+
+    monkeypatch.setattr(fundamentals.httpx, "Client", Client)
+    monkeypatch.setattr(get_settings(), "fmp_api_key", "k")
+    assert fundamentals._download(["AAA", "BOOM"]) == {}
+
+
 def test_attach_fails_loudly_on_thin_coverage(monkeypatch):
     panel = _panel(300, 20)
     monkeypatch.setattr(get_settings(), "fmp_api_key", "k")

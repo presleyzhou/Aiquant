@@ -29,7 +29,7 @@ jobs:
           failures=0
           for i in $(seq 1 12); do
             # the first call does warm + recheck + monitor; follow-ups only need to drain the monitor
-            [ "$i" = "1" ] && url="$SITE/api/admin/ops?max_factors=60&monitor_limit=10" || url="$SITE/api/admin/ops?max_factors=1&monitor_limit=10"
+            [ "$i" = "1" ] && url="$SITE/api/admin/ops?max_factors=60&monitor_limit=10" || url="$SITE/api/admin/ops?recheck=0&monitor_limit=10"
             body=$(curl -sS --max-time 295 -X POST "$url" -H "x-admin-token: $ADMIN_TOKEN") || body=""
             echo "pass $i: ${body:0:600}"
             remaining=$(echo "$body" | python3 -c 'import sys,json; print(int(json.load(sys.stdin)["monitor_remaining"]))' 2>/dev/null || echo "ERR")

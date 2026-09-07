@@ -14,6 +14,7 @@ the free tier's daily quota is spent once, not per run.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -78,7 +79,10 @@ def fetch_symbol(symbol: str, api_key: str, client: httpx.Client) -> list[dict]:
             continue
         if resp.status_code != 200:
             continue
-        body = resp.json()
+        try:
+            body = resp.json()
+        except ValueError:          # an HTML rate-limit page with a 200
+            continue
         if not isinstance(body, list) or not body:
             continue
         rows = []
@@ -94,8 +98,15 @@ def fetch_symbol(symbol: str, api_key: str, client: httpx.Client) -> list[dict]:
 def _download(symbols: list[str]) -> dict[str, list[dict]]:
     key = get_settings().fmp_api_key or ""
     out: dict[str, list[dict]] = {}
+    def safe(sym: str, client: httpx.Client) -> list[dict]:
+        try:
+            return fetch_symbol(sym, key, client)
+        except Exception as exc:    # one bad symbol must not sink the batch
+            log.warning("fmp %s failed: %s", sym, exc)
+            return []
+
     with httpx.Client(timeout=15.0) as client, ThreadPoolExecutor(max_workers=6) as pool:
-        for sym, rows in zip(symbols, pool.map(lambda s: fetch_symbol(s, key, client), symbols), strict=True):
+        for sym, rows in zip(symbols, pool.map(lambda s: safe(s, client), symbols), strict=True):
             if rows:
                 out[sym] = rows
     return out
@@ -104,7 +115,8 @@ def _download(symbols: list[str]) -> dict[str, list[dict]]:
 def _raw_rows(market: str, symbols: list[str]) -> dict[str, list[dict]]:
     """Per-symbol quarterly rows, cached for a day (memory → disk → KV → FMP)."""
     day = datetime.now(UTC).date().isoformat()
-    key = f"fund-{market}-{day}"
+    digest = hashlib.sha1(",".join(sorted(symbols)).encode()).hexdigest()[:12]
+    key = f"fund-{market}-{day}-{digest}"      # per universe: custom lists must not poison the built-in one
     hit = _MEM.get(key)
     if hit and time.time() - hit[0] < TTL_SECONDS:
         return hit[1]
@@ -126,7 +138,8 @@ def _raw_rows(market: str, symbols: list[str]) -> dict[str, list[dict]]:
                 kvstore.put(key, {"rows": doc, "created": int(time.time())})
             except Exception as exc:
                 log.warning("fundamentals kv write failed: %s", exc)
-    _MEM.clear()
+    if len(_MEM) >= 8:
+        _MEM.pop(next(iter(_MEM)))
     _MEM[key] = (time.time(), doc)
     return doc
 

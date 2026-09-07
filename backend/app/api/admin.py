@@ -94,7 +94,7 @@ def _health_key(market: str, expression: str) -> str:
     return "health:" + hashlib.sha1(f"{market}|{expression}".encode()).hexdigest()[:20]
 
 
-def _recheck_blocking(max_factors: int) -> dict:
+def _recheck_blocking(max_factors: int, deadline: float | None = None) -> dict:
     """Re-evaluate every factor that is listed on the marketplace or sits in a
     synced account's library: health check + report-card grades → KV."""
     targets: dict[tuple[str, str, int], str] = {}
@@ -108,9 +108,12 @@ def _recheck_blocking(max_factors: int) -> dict:
             if isinstance(f, dict) and f.get("expression"):
                 key = (str(f.get("market", "us")), str(f["expression"]), int(f.get("horizon", 10) or 10))
                 targets.setdefault(key, "account")
-    done, failed = 0, 0
+    done, failed, cut = 0, 0, 0
     for (market, expr, horizon), source in list(targets.items())[:max_factors]:
         if market not in UNIVERSES:
+            continue
+        if deadline is not None and time.time() > deadline:
+            cut += 1
             continue
         try:
             chk = check_factor_blocking(expr, market, horizon)
@@ -127,8 +130,9 @@ def _recheck_blocking(max_factors: int) -> dict:
         except Exception as exc:
             log.warning("recheck failed for %s: %s", expr, exc)
             failed += 1
-    meta = {"last_run": int(time.time()), "targets": len(targets), "done": done, "failed": failed}
-    kvstore.put("health:meta", meta)
+    meta = {"last_run": int(time.time()), "targets": len(targets), "done": done, "failed": failed, "cut_for_time": cut}
+    if max_factors > 1:   # a one-factor drain pass must not overwrite the real run's summary
+        kvstore.put("health:meta", meta)
     return meta
 
 
@@ -167,7 +171,7 @@ OPS_BUDGET_SECONDS = 250
 
 
 @router.post("/ops")
-async def ops(max_factors: int = 60, monitor_limit: int = 10):
+async def ops(max_factors: int = 60, monitor_limit: int = 10, recheck: bool = True):
     """The single daily operations pass: warm the shared panels → recheck
     listed / synced factors → run the deployment monitor. Each step is timed
     and isolated (one failing step does not stop the others); the report is
@@ -195,17 +199,24 @@ async def ops(max_factors: int = 60, monitor_limit: int = 10):
         return (await warm())["warmed"]
 
     async def do_recheck():
+        if not recheck:
+            return {"skipped": "drain pass"}
         if time.time() - started > OPS_BUDGET_SECONDS * 0.6:
             return {"skipped": "time budget"}
-        return await asyncio.to_thread(_recheck_blocking, max(1, min(max_factors, 200)))
+        # hard stop: leave at least 40% of the budget for the monitor step
+        return await asyncio.to_thread(_recheck_blocking, max(1, min(max_factors, 200)), started + OPS_BUDGET_SECONDS * 0.6)
 
     async def do_monitor():
-        if time.time() - started > OPS_BUDGET_SECONDS * 0.85:
+        left = OPS_BUDGET_SECONDS - (time.time() - started)
+        if left < OPS_BUDGET_SECONDS * 0.15:
             return {"skipped": "time budget", "remaining": -1}
-        return await monitor.run_all(force=False, limit=max(1, min(monitor_limit, 100)))
+        return await monitor.run_all(force=False, limit=max(1, min(monitor_limit, 100)), budget_seconds=left - 10)
 
     await step("warm", do_warm)
     await step("recheck", do_recheck)
+    # an interim report so a killed function still leaves a trace
+    await asyncio.to_thread(kvstore.put, "ops:last", {"started_at": int(started), "finished_at": None, "seconds": None,
+                                                        "steps": steps, "ok": None, "monitor_remaining": -1})
     mon = await step("monitor", do_monitor)
     report = {
         "started_at": int(started), "finished_at": int(time.time()),
