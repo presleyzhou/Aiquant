@@ -23,6 +23,12 @@ MAX_DEPTH = 10
 MAX_WINDOW = 120
 
 FIELDS = ("open", "high", "low", "close", "volume", "returns", "vwap")
+# Point-in-time fundamentals (quarterly, forward-filled after a publication
+# lag) — present in the panel only when a fundamentals provider is configured
+# (see services/fundamentals.py). `ep` / `bp` are earnings and book yields:
+# 1/PE and 1/PB, better behaved than the ratios when earnings turn negative.
+FUNDAMENTAL_FIELDS = ("mcap", "pe", "pb", "roe", "ep", "bp")
+ALL_FIELDS = FIELDS + FUNDAMENTAL_FIELDS
 
 # name -> (arity, needs_window_positions)  — windows are validated as ints.
 _TS_UNARY = {"ts_mean", "ts_std", "ts_sum", "ts_min", "ts_max", "ts_rank", "delay", "delta"}
@@ -131,8 +137,8 @@ class _Parser:
         if kind == "name":
             if self.peek() == ("op", "("):
                 return self.call(text)
-            if text not in FIELDS:
-                raise FactorError(f"unknown field {text!r}; fields: {', '.join(FIELDS)}")
+            if text not in ALL_FIELDS:
+                raise FactorError(f"unknown field {text!r}; fields: {', '.join(ALL_FIELDS)}")
             return Node("field", text)
         raise FactorError(f"unexpected token {text!r}")
 
@@ -184,6 +190,15 @@ def parse(expression: str) -> Node:
     return node
 
 
+def fields_used(node: Node) -> set[str]:
+    """Every panel field the expression reads."""
+    out = {str(node.value)} if node.kind == "field" else set()
+    for a in node.args:
+        if isinstance(a, Node):
+            out |= fields_used(a)
+    return out
+
+
 def complexity(node: Node) -> int:
     """Node count — the regularizer that keeps factors human-readable."""
     return 1 + sum(complexity(a) for a in node.args if isinstance(a, Node))
@@ -195,7 +210,12 @@ def complexity(node: Node) -> int:
 def evaluate(node: Node, panel: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Interpret an AST against the panel. Returns a date × symbol frame."""
     if node.kind == "field":
-        return panel[str(node.value)]
+        name = str(node.value)
+        if name not in panel:
+            if name in FUNDAMENTAL_FIELDS:
+                raise FactorError(f"field {name!r} needs fundamentals data (US market, FMP_API_KEY configured)")
+            raise FactorError(f"field {name!r} is not in this panel")
+        return panel[name]
     if node.kind == "num":
         template = next(iter(panel.values()))
         return pd.DataFrame(float(node.value), index=template.index, columns=template.columns)

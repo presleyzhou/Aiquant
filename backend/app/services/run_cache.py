@@ -20,7 +20,7 @@ from app.services import kvstore, portfolio
 
 log = logging.getLogger("aiquant.run_cache")
 
-CODE_VERSION = "v7"           # bump when the report's numbers change meaning
+CODE_VERSION = "v8"           # bump when the report's numbers change meaning
 TTL_SECONDS = 24 * 3600
 _MEM: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 _MEM_MAX = 32

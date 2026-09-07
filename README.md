@@ -104,6 +104,7 @@ vercel --prod   # 生产环境
 | `PANEL_PROVIDER_CRYPTO` | `binance` | 因子挖掘 / 流水线的数字货币日线面板：`binance` = Binance 公开 K 线为主源，Binance 未上币由 CoinGecko 补齐，Yahoo 兜底；`yahoo` 强制 Yahoo |
 | `PANEL_PROVIDER_US` | `auto` | 美股日线面板：`auto` = 装了 AkShare（新浪财经前复权数据）就用 AkShare，否则 Yahoo；`akshare` / `yahoo` 强制。AkShare 约 100MB 依赖，不进 Vercel 包，本地 / Docker 用 `uv pip install -e '.[akshare]'` |
 | `COINGECKO_FILL` / `COINGECKO_API_KEY` | `true` / 空 | 是否用 CoinGecko 补齐 Binance 未上的币；demo/pro key 可提高限额与历史长度（免费接口约 365 天） |
+| `FMP_API_KEY` / `FUNDAMENTALS_LAG_DAYS` | 空 / `60` | Financial Modeling Prep 季度基本面（市值、PE、PB、ROE → DSL 字段 `mcap` `pe` `pb` `roe` `ep` `bp`，仅美股）。每季数值在期末 + 滞后天数后才可见并前向填充（点时间正确）；未配置时字段不存在，引用即报错 |
 | `CORS_ORIGINS` | localhost | 仅当前后端不同源时才需要 |
 | `KRONOS_ENABLED` | `auto` | Kronos K线预测；`auto` = 装了 torch 就启用，`0` 强制关闭 |
 | `KRONOS_MODEL` | `NeoQuasar/Kronos-small` | 也可换 `NeoQuasar/Kronos-mini`（更快）或 `-base`（更准） |
@@ -230,6 +231,8 @@ curl -X POST localhost:8000/api/analytics/backtest -H 'Content-Type: application
    **调仓指令单**：输入组合规模与当前持仓股数，生成先卖后买、整数股、不做空的交易清单，附参考价、换手、预估成本与调仓后现金（`POST /api/pipeline/orders`）；
    配置了 AI 时可生成**投委会备忘录**（`POST /api/pipeline/memo`，轻量模型只能引用页面上的数字，强制结构化输出：
    deploy / paper_first / iterate / reject + 优点 / 疑虑 / 下一步 / 统计局限）。
+
+V4 补齐了验证与组合构建的最后几块：**CPCV**（López de Prado 2018 第 12 章：历史切 6 块、每次 2 块做测试共 15 组划分，训练块上重估因子 IC 权重并做 purge / embargo，拼成 5 条完整的样本外路径，报告路径 Sharpe 分布与正收益路径占比，`cpcv` 字段，占比 < 60% 或中位数 < 0 时给出 `cpcv_unstable`）；均值-方差目标里的 **L1 换手惩罚**（`turnover_penalty_bps`，Gârleanu-Pedersen 目标组合：每单位权重的交易成本按持有期摊到日频，与 α 同量纲，用精确的近端算子 + FISTA 求解，惩罚为 0 时与原解完全一致）；**多空模式**（`long_short`：做多前 N、做空后 N，美元中性，空头名义按 `borrow_bps` 逐日计借券费，报告净 / 总敞口、借券成本，目标权重带 `side`；保证金、召回与融券可得性**未建模**，调仓指令单拒绝多空配置并说明原因）；**幸存者偏差提示**（`universe.survivorship`：内置与自定义股票池都是今日成分股，退市 / 被收购的名字不在其中，回测因此偏乐观）；**基本面字段**（见 `FMP_API_KEY`）。
 
 组合构建与风险分析是从零实现的纯 numpy/pandas（`backend/app/services/portfolio.py`，不依赖 scipy 或外部优化器），
 流水线编排在 `backend/app/services/pipeline.py`，接口 `POST /api/pipeline/run`。文献：Ledoit & Wolf (2003/2004)、

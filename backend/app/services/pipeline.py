@@ -22,6 +22,8 @@ into one simulation with the honesty rules the rest of the site enforces:
 from __future__ import annotations
 
 import hashlib
+import itertools
+import logging
 import re
 import time
 from typing import Any
@@ -37,6 +39,8 @@ from app.services.factor_mine import (
     _load_panel_blocking,
     download_panel,
 )
+
+log = logging.getLogger("aiquant.pipeline")
 
 SCHEME_INFO: list[dict[str, str]] = [
     {"id": "equal", "zh": "等权 Top-N", "en": "Equal-weight Top-N",
@@ -114,12 +118,15 @@ DEFAULTS: dict[str, Any] = {
     "scheme": "inverse_vol", "signal_weighting": "ic_expanding", "top_n": 8, "rebalance": 10,
     "max_weight": 0.25, "cost_bps": 7.0, "target_vol_pct": None, "vol_lookback": 60, "horizon": 10,
     "hold_buffer": 4, "trade_rate": 1.0, "shrink_to_equal": 0.0, "history": "3y",
+    "turnover_penalty_bps": 0.0, "long_short": False, "borrow_bps": 100.0,
 }
 LIMITS: dict[str, list] = {
     "factors": [1, 8], "top_n": [2, 20], "rebalance": [1, 30], "max_weight": [0.05, 1.0],
     "cost_bps": [0, 50], "target_vol_pct": [5, 40], "vol_lookback": [20, 120],
     "hold_buffer": [0, 20], "trade_rate": [0.1, 1.0], "shrink_to_equal": [0.0, 1.0], "prior_trials": [0, 10_000],
+    "turnover_penalty_bps": [0.0, 100.0], "borrow_bps": [0.0, 500.0],
 }
+CPCV_GROUPS, CPCV_K = 6, 2      # 15 train/test splits → 5 stitched out-of-sample paths
 SIGNAL_WEIGHTINGS: tuple[str, ...] = ("ic_expanding", "ic", "equal")
 IC_HORIZONS: tuple[int, ...] = (1, 2, 3, 5, 10, 15, 20)
 _IC_WARMUP = 60             # IC observations before expanding weights leave equal-weight
@@ -147,7 +154,14 @@ def config() -> dict:
         "defaults": DEFAULTS,
         "limits": {**LIMITS, "symbols": [MIN_CUSTOM_SYMBOLS, MAX_CUSTOM_SYMBOLS]},
         "histories": list(HISTORIES),
+        "fundamentals": _fundamentals_config(),
+        "cpcv": {"groups": CPCV_GROUPS, "k": CPCV_K},
     }
+
+
+def _fundamentals_config() -> dict:
+    from app.services import fundamentals
+    return fundamentals.describe()
 
 
 # ----------------------------------------------------------------- spec
@@ -219,6 +233,15 @@ def normalize_spec(raw: dict) -> dict:
         # configurations the user already tried before this run (the client
         # counts them) — they inflate the Deflated Sharpe's N honestly
         "prior_trials": int(_clamp(raw.get("prior_trials", 0) or 0, *LIMITS["prior_trials"], cast=int)),
+        # Gârleanu-Pedersen: cost of trading one unit of weight, only the
+        # mean-variance scheme can trade it off against alpha
+        "turnover_penalty_bps": round(_clamp(raw.get("turnover_penalty_bps", DEFAULTS["turnover_penalty_bps"]) or 0,
+                                             *LIMITS["turnover_penalty_bps"]), 2),
+        # long the top N, short the bottom N, dollar-neutral; borrow cost on
+        # the short notional (annual bps) — margin, recall and locate risk are
+        # NOT modelled, the UI says so
+        "long_short": bool(raw.get("long_short", False)),
+        "borrow_bps": round(_clamp(raw.get("borrow_bps", DEFAULTS["borrow_bps"]) or 0, *LIMITS["borrow_bps"]), 2),
         "compare": bool(raw.get("compare", True)),
     }
 
@@ -312,6 +335,14 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
       equal        — 1/n with the sign fixed by the in-sample IC.
     """
     close = panel["close"]
+    # fundamentals join the panel only when a factor reads them (a copy: the
+    # shared price panel is never mutated)
+    wanted = set()
+    for f in spec["factors"]:
+        wanted |= factor_dsl.fields_used(factor_dsl.parse(f["expression"])) & set(factor_dsl.FUNDAMENTAL_FIELDS)
+    if wanted:
+        from app.services import fundamentals
+        panel = fundamentals.attach(panel, spec["market"])
     ranked_list: list[pd.DataFrame] = []
     ic_series: list[pd.Series] = []
     components: list[dict] = []
@@ -404,6 +435,7 @@ def build_signal(spec: dict, panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFra
     composite_is_ic = float(ic_main.iloc[:split].mean()) if split > 0 else 0.0
 
     info = {
+        "_ic_series": ic_series,   # consumed (and removed) by run_pipeline_blocking for CPCV
         "weighting": weighting, "components": components, "max_pair_corr": round(max_pair_corr, 3),
         "corr_matrix": corr_matrix,
         "ic_by_horizon": ic_by_horizon,
@@ -441,9 +473,12 @@ def _decide_weights(
     ann: int,
     held: set | None = None,
     ic: float | None = None,
+    current: pd.Series | None = None,
 ) -> tuple[pd.Series, float]:
     """Target weights (indexed by symbol) on one rebalance date and the
-    exposure multiplier applied by vol targeting."""
+    exposure multiplier applied by vol targeting. `held` is the set of names
+    in the book (long leg; short leg names carry negative weights in
+    `current`), `current` the full current weight vector by symbol."""
     lookback = spec["vol_lookback"]
     # only names with a usable trailing history can be sized
     usable = trailing.notna().sum() >= max(10, int(lookback * 0.6))
@@ -451,26 +486,48 @@ def _decide_weights(
     candidates = candidates[usable.reindex(candidates.index).fillna(False).astype(bool)]
     if len(candidates) < 2:
         return pd.Series(dtype=float), 1.0
-    top_n = min(spec["top_n"], len(candidates))
-    if held and spec["hold_buffer"] > 0:
-        # a held name whose score is missing TODAY (data hiccup) is not sold
-        # on that account: it is treated as sitting at the edge of the band
-        missing = [h for h in held if h not in candidates.index and bool(usable.get(h, False))]
-        if missing:
-            edge = candidates.sort_values(ascending=False).iloc[min(top_n, len(candidates)) - 1]
-            candidates = pd.concat([candidates, pd.Series(edge, index=missing)])
-    selected = _select(candidates, top_n, spec["hold_buffer"], held or set())
-    sub = trailing[selected.index]
-    w = portfolio.construct(scheme, selected.values, sub.values, spec["max_weight"], ic=ic)
-    if spec.get("shrink_to_equal", 0) > 0 and len(w):
-        # DeMiguel-Garlappi-Uppal (2009): optimisers rarely beat 1/N out of
-        # sample; blending toward it hedges estimation error
-        lam = spec["shrink_to_equal"]
-        w = (1 - lam) * w + lam * (w.sum() / len(w))
+    cur = current if current is not None else pd.Series(dtype=float)
+    # per unit of weight traded, amortised over the days the position is held
+    kappa = spec.get("turnover_penalty_bps", 0.0) / 10_000.0 / max(spec["rebalance"], 1)
+
+    def leg(cands: pd.Series, n: int, held_leg: set, sign: float) -> np.ndarray | None:
+        if held_leg and spec["hold_buffer"] > 0:
+            # a held name whose score is missing TODAY (data hiccup) is not sold
+            # on that account: it is treated as sitting at the edge of the band
+            missing = [h for h in held_leg if h not in cands.index and bool(usable.get(h, False))]
+            if missing:
+                edge = cands.sort_values(ascending=False).iloc[min(n, len(cands)) - 1]
+                cands = pd.concat([cands, pd.Series(edge, index=missing)])
+        sel = _select(cands, n, spec["hold_buffer"], held_leg)
+        sub = trailing[sel.index]
+        cur_leg = (sign * cur.reindex(sel.index).fillna(0.0)).clip(lower=0).to_numpy() if kappa > 0 else None
+        w = portfolio.construct(scheme, sel.values, sub.values, spec["max_weight"], ic=ic,
+                                current=cur_leg, turnover_penalty=kappa)
+        if spec.get("shrink_to_equal", 0) > 0 and len(w):
+            # DeMiguel-Garlappi-Uppal (2009): optimisers rarely beat 1/N out of
+            # sample; blending toward it hedges estimation error
+            lam = spec["shrink_to_equal"]
+            w = (1 - lam) * w + lam * (w.sum() / len(w))
+        return pd.Series(sign * w, index=sel.index)
+
+    if spec.get("long_short"):
+        n_leg = min(spec["top_n"], len(candidates) // 2)
+        if n_leg < 1:
+            return pd.Series(dtype=float), 1.0
+        held_long = {s for s in cur.index if cur[s] > 1e-6} if len(cur) else set()
+        held_short = {s for s in cur.index if cur[s] < -1e-6} if len(cur) else set()
+        long_w = leg(candidates, n_leg, held_long, 1.0)
+        short_pool = -candidates.drop(long_w.index, errors="ignore")   # most negative score = best short
+        short_w = leg(short_pool, n_leg, held_short - set(long_w.index), -1.0)
+        w = pd.concat([long_w, short_w])
+    else:
+        top_n = min(spec["top_n"], len(candidates))
+        w = leg(candidates, top_n, held or set(), 1.0)
     scale = 1.0
     if spec["target_vol_pct"]:
-        scale = portfolio.vol_scale(w, sub.values, spec["target_vol_pct"] / 100.0, ann)
-    return pd.Series(w * scale, index=selected.index), scale
+        sub = trailing[w.index]
+        scale = portfolio.vol_scale(w.to_numpy(), sub.values, spec["target_vol_pct"] / 100.0, ann)
+    return w * scale, scale
 
 
 def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, scheme: str | None = None,
@@ -491,6 +548,9 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
     lookback = spec["vol_lookback"]
     rebalance = spec["rebalance"]
     cost = spec["cost_bps"] / 10_000.0
+    long_short = bool(spec.get("long_short"))
+    borrow_daily = (spec.get("borrow_bps", 0.0) / 10_000.0) / ann if long_short else 0.0
+    borrow_paid = 0.0
 
     # first day the signal has at least top_n names AND a trailing window exists
     enough = (scores.notna().sum(axis=1) >= min(spec["top_n"], 2)).to_numpy()
@@ -536,25 +596,30 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
         day_contrib = held * r
         g = float(day_contrib.sum())
         gross[i] = g
-        net[i] = g - turnover[i] * cost
+        # the short notional pays a borrow fee every day it is open
+        borrow = float(-held[held < 0].sum()) * borrow_daily if long_short else 0.0
+        borrow_paid += borrow
+        net[i] = g - turnover[i] * cost - borrow
         contrib += day_contrib
-        active = held > 1e-12
+        active = np.abs(held) > 1e-12
         days_held += active
         weight_sum += held
         held_hist[i] = held
-        exposure[i] = float(held.sum())
+        # a long-short book reports GROSS exposure (its net is ≈ 0 by design)
+        exposure[i] = float(np.abs(held).sum()) if long_short else float(held.sum())
         held = held * (1 + r) / (1 + g) if abs(1 + g) > 1e-9 else held
         # decide the next weights on today's close
         if i in rebalance_days and i + 1 < T:
             trailing = ret.iloc[i - lookback + 1: i + 1]
             current = {symbols[k] for k in np.flatnonzero(held > 1e-6)}
-            w, scale = _decide_weights(scheme, scores.iloc[i], trailing, spec, ann, held=current, ic=ic)
+            w, scale = _decide_weights(scheme, scores.iloc[i], trailing, spec, ann, held=current, ic=ic,
+                                       current=pd.Series(held, index=symbols))
             if len(w):
                 pending = w
                 n_rebal += 1
                 eff_n.append(portfolio.effective_n(w.values))
                 unscaled = w.values / scale if scale > 1e-9 else w.values
-                if spec["max_weight"] < 1 and (unscaled >= spec["max_weight"] - 1e-9).any():
+                if spec["max_weight"] < 1 and (np.abs(unscaled) >= spec["max_weight"] - 1e-9).any():
                     cap_hits += 1
 
     # latest decision (for target weights): newest complete row with a full cross-section
@@ -568,7 +633,8 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
         if counts.iloc[i] < needed:
             continue
         trailing = ret.iloc[i - lookback + 1: i + 1]
-        w, scale = _decide_weights(scheme, scores.iloc[i], trailing, spec, ann, held=current, ic=ic)
+        w, scale = _decide_weights(scheme, scores.iloc[i], trailing, spec, ann, held=current, ic=ic,
+                                   current=pd.Series(held, index=symbols))
         if len(w) >= min(spec["top_n"], 2):
             last_target = (close.index[i], w, scale)
             break
@@ -598,6 +664,8 @@ def simulate(scores: pd.DataFrame, panel: dict[str, pd.DataFrame], spec: dict, s
         "cap_binding_pct": round(100.0 * cap_hits / n_rebal, 1) if n_rebal else 0.0,
         "rebalances": n_rebal,
         "last_target": last_target,
+        "long_short": long_short,
+        "borrow_paid": borrow_paid,
     }
 
 
@@ -682,10 +750,13 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
             by_group[SECTORS.get(str(sym), "other")] = by_group.get(SECTORS.get(str(sym), "other"), 0.0) + float(v)
         target = {
             "as_of": str(pd.Timestamp(ts).date()),
-            "exposure_pct": round(float(w.sum()) * 100, 1),
+            "exposure_pct": round(float(w.sum()) * 100, 1) + 0.0,
+            "gross_pct": round(float(w.abs().sum()) * 100, 1),
+            "long_pct": round(float(w[w > 0].sum()) * 100, 1),
+            "short_pct": round(float(-w[w < 0].sum()) * 100, 1) + 0.0,
             "weights": [
                 {"symbol": str(sym), "weight_pct": round(float(v) * 100, 2), "score_rank": rank,
-                 "group": SECTORS.get(str(sym), "other")}
+                 "group": SECTORS.get(str(sym), "other"), "side": "short" if v < 0 else "long"}
                 for rank, (sym, v) in enumerate(ordered.items(), start=1)
             ],
             "groups": [
@@ -730,6 +801,8 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
         warnings.append("concentrated")
     if universe["symbols"] < 12:
         warnings.append("low_coverage")
+    if sim.get("long_short"):
+        warnings.append("long_short_caveats")
 
     return {
         "spec": spec,
@@ -746,6 +819,11 @@ def report(spec: dict, panel: dict[str, pd.DataFrame], signal: dict, sim: dict,
             "breakeven_cost_bps": _r(breakeven, 1),
             "hold_buffer": spec["hold_buffer"], "trade_rate": spec["trade_rate"],
             "rebalances": int(sim["rebalances"]),
+            "turnover_penalty_bps": spec.get("turnover_penalty_bps", 0.0),
+            "long_short": bool(sim.get("long_short")),
+            "borrow_bps": spec.get("borrow_bps") if sim.get("long_short") else None,
+            "borrow_cost_pct": round(float(sim.get("borrow_paid", 0.0)) * 100, 2) if sim.get("long_short") else None,
+            "avg_net_exposure_pct": round(float(sim["held"].sum(axis=1).mean()) * 100, 1),
         },
         "backtest": {
             "span": {"from": str(net.index[0].date()), "to": str(net.index[-1].date())},
@@ -814,6 +892,15 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
         "dropped": sorted(set(spec["symbols"]) - set(map(str, close.columns))) if spec["symbols"] else [],
         "health": data_health(panel),
         "provider": panel_providers.provider_of(panel),
+        # the universe is today's constituents: names that were delisted,
+        # acquired or dropped during the window are absent, which flatters
+        # every backtest (Elton-Gruber-Blake 1996). Nothing here can undo
+        # that — the report must say it.
+        "survivorship": {
+            "current_constituents_only": True,
+            "late_listings": int(sum(1 for h in data_health(panel) if h.get("first") and h["first"] > str(close.index[min(30, len(close) - 1)].date()))),
+            "delisted_included": False,
+        },
     }
 
     scores, signal, ranked_list = build_signal(spec, panel)
@@ -892,8 +979,19 @@ def run_pipeline_blocking(raw_spec: dict, panel: dict[str, pd.DataFrame] | None 
             "spike": _r(centre - float(np.median(sharpes)), 2) if sharpes and centre is not None else None,
         }
 
+    ic_series = signal.pop("_ic_series", None)
+    cpcv_block = None
+    if spec["compare"] and ic_series:
+        try:
+            cpcv_block = cpcv(ranked_list, ic_series, spec, panel)
+        except Exception as exc:  # diagnostics never sink the run
+            log.warning("cpcv failed: %s", exc)
     out = report(spec, panel, signal, sim, alternatives, universe, [t for t in trials if t is not None])
     out["sensitivity"] = sensitivity
+    out["cpcv"] = cpcv_block
+    if cpcv_block and cpcv_block.get("path_sharpes") and (
+            cpcv_block["pct_paths_positive"] < 60 or (cpcv_block["median_sharpe"] or 0) < 0):
+        out["warnings"].append("cpcv_unstable")
     out["capacity"] = capacity_curve(sim, panel, spec, out["backtest"]["stats"])
     if out["capacity"]["breakeven_aum"] is not None and out["capacity"]["breakeven_aum"] < 1e7:
         out["warnings"].append("low_capacity")
@@ -931,6 +1029,11 @@ def orders_blocking(raw_spec: dict, nav: float, current: dict[str, float] | None
     the sheet says so, and the user fills at the open. Trades below
     `min_trade_pct` of NAV are suppressed as dust."""
     spec = normalize_spec(raw_spec)
+    if spec.get("long_short"):
+        raise factor_dsl.FactorError(
+            "rebalance tickets are long-only: a long-short book needs a margin account, borrow "
+            "availability and per-broker short rules this sheet cannot know — run it long-only for a ticket"
+        )
     if not np.isfinite(nav) or nav <= 0:
         raise factor_dsl.FactorError("nav must be a positive number")
     panel = panel if panel is not None else load_panel(spec)
@@ -1017,6 +1120,87 @@ def orders_blocking(raw_spec: dict, nav: float, current: dict[str, float] | None
             "cash_unknown": not cash_known,
             "target_exposure_pct": round(float(target.sum()) * 100, 1),
         },
+    }
+
+
+# ----------------------------------------------------------------- CPCV
+
+
+def cpcv(ranked_list: list[pd.DataFrame], ic_series: list[pd.Series], spec: dict,
+         panel: dict[str, pd.DataFrame], n_groups: int = CPCV_GROUPS, k: int = CPCV_K) -> dict:
+    """Combinatorial purged cross-validation (López de Prado 2018, ch. 12).
+
+    The history is cut into `n_groups` blocks; every choice of `k` test blocks
+    is one split. On each split the factor blend (sign and IC weight per
+    factor) is re-estimated on the TRAIN blocks only — purged of the
+    observations whose forward window touches a test block and embargoed
+    after each test block — and the portfolio is simulated with that blend.
+    The test-block returns of all splits are stitched into
+    k·C(n,k)/n complete out-of-sample paths, each covering the whole history
+    exactly once. Their Sharpe distribution says how much the single backtest
+    the user looks at owes to one lucky ordering of the data."""
+    close = panel["close"]
+    idx = close.index
+    T = len(idx)
+    ann = 252 if spec["market"] == "us" else 365
+    horizons = [f["horizon"] for f in spec["factors"]]
+    purge = max(horizons)
+    embargo = max(purge, int(0.01 * T))
+    bounds = np.linspace(0, T, n_groups + 1).astype(int)
+    combos = list(itertools.combinations(range(n_groups), k))
+    n_paths = k * len(combos) // n_groups
+    slot = dict.fromkeys(range(n_groups), 0)
+    pieces: list[list[pd.Series]] = [[] for _ in range(n_paths)]
+    ic_full = [s.reindex(idx) for s in ic_series]
+    failed = 0
+    for combo in combos:
+        test = np.zeros(T, dtype=bool)
+        train = np.ones(T, dtype=bool)
+        for g in combo:
+            b0, b1 = bounds[g], bounds[g + 1]
+            test[b0:b1] = True
+            train[max(0, b0 - purge): min(T, b1 + embargo)] = False
+        train &= ~test
+        weights = []
+        for ic in ic_full:
+            v = ic[train].dropna()
+            weights.append(float(v.mean()) if len(v) >= 30 else 0.0)
+        mags = np.abs(weights)
+        if mags.sum() < 1e-9:
+            weights = [1.0 / len(weights)] * len(weights)
+        else:
+            weights = [w / mags.sum() for w in weights]
+        scores = sum(r * w for r, w in zip(ranked_list, weights, strict=False))
+        comp_ic = float(sum(abs(w) * m for w, m in zip(weights, mags, strict=False)))
+        try:
+            sim = simulate(scores, panel, spec, ic=comp_ic)
+        except factor_dsl.FactorError:
+            failed += 1
+            continue
+        for g in combo:
+            piece = sim["net"].reindex(idx[bounds[g]: bounds[g + 1]]).dropna()
+            pieces[slot[g] % n_paths].append(piece)
+            slot[g] += 1
+    sharpes: list[float] = []
+    lengths: list[int] = []
+    for parts in pieces:
+        if not parts:
+            continue
+        path = pd.concat(parts).sort_index()
+        path = path[~path.index.duplicated()]
+        lengths.append(int(len(path)))
+        if len(path) >= _MIN_BARS and float(path.std(ddof=1)) > 1e-12:
+            sharpes.append(float(path.mean() / path.std(ddof=1) * np.sqrt(ann)))
+    return {
+        "groups": n_groups, "k": k, "splits": len(combos), "paths": n_paths,
+        "purge_days": int(purge), "embargo_days": int(embargo),
+        "path_sharpes": [round(x, 2) for x in sharpes],
+        "path_days": lengths,
+        "median_sharpe": _r(float(np.median(sharpes)), 2) if sharpes else None,
+        "min_sharpe": _r(min(sharpes), 2) if sharpes else None,
+        "max_sharpe": _r(max(sharpes), 2) if sharpes else None,
+        "pct_paths_positive": round(100.0 * sum(1 for x in sharpes if x > 0) / len(sharpes), 1) if sharpes else 0.0,
+        "complete": failed == 0 and len(sharpes) == n_paths,
     }
 
 

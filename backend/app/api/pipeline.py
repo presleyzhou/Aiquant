@@ -44,6 +44,9 @@ class PipelineRequest(BaseModel):
     trade_rate: float = Field(1.0, ge=0.1, le=1.0, allow_inf_nan=False, description="fraction of the distance to the target traded per rebalance")
     shrink_to_equal: float = Field(0.0, ge=0.0, le=1.0, allow_inf_nan=False, description="blend optimised weights toward 1/N (DeMiguel et al. 2009)")
     prior_trials: int = Field(0, ge=0, le=10_000, description="configurations already tried by this user; inflates the DSR's N")
+    turnover_penalty_bps: float = Field(0.0, ge=0, le=100, allow_inf_nan=False, description="L1 cost per unit traded in the mean-variance objective (Gârleanu-Pedersen aim portfolio); 0 = off")
+    long_short: bool = Field(False, description="long the top N, short the bottom N, dollar-neutral (borrow cost charged; margin/locate not modelled)")
+    borrow_bps: float = Field(100.0, ge=0, le=500, allow_inf_nan=False, description="annual borrow fee on the short notional")
     compare: bool = True
 
 

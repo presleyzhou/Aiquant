@@ -145,15 +145,49 @@ def inverse_vol_weights(returns: np.ndarray, cap: float) -> np.ndarray:
     return apply_cap(1.0 / vol, cap)
 
 
-def _accelerated_pgd(grad_fn, w0: np.ndarray, cap: float, lipschitz: float, iters: int, tol: float = 1e-8) -> np.ndarray:
+def prox_l1_capped_simplex(v: np.ndarray, current: np.ndarray, kappa: float, cap: float) -> np.ndarray:
+    """Exact proximal step for  kappa·‖w − current‖₁  over {sum w = 1, 0 ≤ w ≤ cap}:
+    per name a soft threshold pulling toward the current weight (a trade
+    smaller than kappa is not worth making), then the simplex shift found by
+    bisection — the same mechanics as the plain projection, which this
+    reduces to when kappa = 0. This is the L1 transaction-cost term of
+    Gârleanu & Pedersen (2013) made usable inside a projected-gradient loop."""
+    v = np.asarray(v, dtype=float)
+    c = np.asarray(current, dtype=float)
+    n = len(v)
+    if cap * n < 1 - 1e-9:
+        return np.full(n, cap)
+
+    def shrink(tau: float) -> np.ndarray:
+        x = v - tau
+        up = x > c + kappa
+        down = x < c - kappa
+        out = np.where(up, x - kappa, np.where(down, x + kappa, c))
+        return np.clip(out, 0, cap)
+
+    lo, hi = v.min() - kappa - 1.0, v.max() + kappa
+    for _ in range(48):
+        tau = (lo + hi) / 2
+        if shrink(tau).sum() > 1:
+            lo = tau
+        else:
+            hi = tau
+    return shrink((lo + hi) / 2)
+
+
+def _accelerated_pgd(grad_fn, w0: np.ndarray, cap: float, lipschitz: float, iters: int, tol: float = 1e-8,
+                     prox=None) -> np.ndarray:
     """FISTA (Beck & Teboulle 2009): projected gradient with Nesterov momentum
     over the capped simplex — an order of magnitude fewer iterations than
-    plain projected gradient on these ill-conditioned covariances."""
+    plain projected gradient on these ill-conditioned covariances. `prox`
+    (v, step) → w replaces the projection when the objective carries a
+    non-smooth term."""
     step = 1.0 / max(lipschitz, 1e-12)
     w = y = w0
     t = 1.0
     for _ in range(iters):
-        nxt = project_capped_simplex(y - step * grad_fn(y), cap)
+        v = y - step * grad_fn(y)
+        nxt = prox(v, step) if prox is not None else project_capped_simplex(v, cap)
         t_next = (1 + math.sqrt(1 + 4 * t * t)) / 2
         y = nxt + (t - 1) / t_next * (nxt - w)
         if np.abs(nxt - w).max() < tol:
@@ -269,11 +303,17 @@ def grinold_alpha(scores: np.ndarray, vols: np.ndarray, ic: float) -> np.ndarray
 
 
 def mean_variance_weights(alpha: np.ndarray, cov: np.ndarray, cap: float, risk_aversion: float = 1.0,
-                          iters: int = 300) -> np.ndarray:
-    """max alpha'w − lambda·w'Σw  s.t. sum(w)=1, 0 <= w <= cap, by accelerated
-    projected gradient. lambda scales with the typical volatility only (see
-    REF_IC), so the alpha keeps its Grinold units and a bigger IC really does
-    tilt the book harder."""
+                          iters: int = 300, current: np.ndarray | None = None,
+                          turnover_penalty: float = 0.0) -> np.ndarray:
+    """max alpha'w − lambda·w'Σw − kappa·‖w − w_current‖₁  s.t. sum(w)=1,
+    0 <= w <= cap, by accelerated proximal gradient. lambda scales with the
+    typical volatility only (see REF_IC), so the alpha keeps its Grinold units
+    and a bigger IC really does tilt the book harder. `turnover_penalty` is
+    the cost of trading one unit of weight in the same daily-return units as
+    alpha (already amortised over the holding period by the caller): with it
+    the optimiser trades toward the unconstrained optimum only where the
+    expected alpha pays for the trade — the "aim portfolio" of Gârleanu &
+    Pedersen (2013)."""
     n = cov.shape[0]
     # Risk scale independent of alpha, so |IC| genuinely moves the answer:
     # at a reference IC of 0.02 the alpha and risk gradients are comparable;
@@ -283,7 +323,12 @@ def mean_variance_weights(alpha: np.ndarray, cov: np.ndarray, cap: float, risk_a
     lam = max(risk_aversion * REF_IC / sigma_typ, 1e-9)
     w0 = project_capped_simplex(np.full(n, 1.0 / n), cap)
     lipschitz = 2 * lam * max(float(np.linalg.eigvalsh(cov).max()), 1e-10)
-    return _accelerated_pgd(lambda w: -alpha + 2 * lam * cov @ w, w0, cap, lipschitz, iters)
+    prox = None
+    if current is not None and turnover_penalty > 0:
+        cur = np.clip(np.asarray(current, dtype=float), 0, None)
+        prox = lambda v, step: prox_l1_capped_simplex(v, cur, step * turnover_penalty, cap)  # noqa: E731
+        w0 = prox(cur, 0.0) if cur.sum() > _EPS else w0
+    return _accelerated_pgd(lambda w: -alpha + 2 * lam * cov @ w, w0, cap, lipschitz, iters, prox=prox)
 
 
 def construct(
@@ -292,10 +337,14 @@ def construct(
     trailing_returns: np.ndarray,
     cap: float,
     ic: float | None = None,
+    current: np.ndarray | None = None,
+    turnover_penalty: float = 0.0,
 ) -> np.ndarray:
     """Weights for the already-selected names (columns of trailing_returns).
     `ic` (the signal's realised in-sample rank IC) only matters to the
-    mean-variance scheme, which needs it to turn scores into alphas."""
+    mean-variance scheme, which needs it to turn scores into alphas; the same
+    scheme is the only one that can honour `current` + `turnover_penalty`
+    (the other schemes have no objective to trade the cost off against)."""
     n = len(scores)
     if n == 0:
         return np.zeros(0)
@@ -315,14 +364,14 @@ def construct(
     if scheme == "mean_variance":
         vols = np.sqrt(np.clip(np.diag(cov), 1e-12, None))
         alpha = grinold_alpha(scores, vols, ic if ic is not None else 0.02)
-        return mean_variance_weights(alpha, cov, cap)
+        return mean_variance_weights(alpha, cov, cap, current=current, turnover_penalty=turnover_penalty)
     raise ValueError(f"unknown weighting scheme: {scheme}")
 
 
 def vol_scale(weights: np.ndarray, trailing_returns: np.ndarray, target_vol: float, ann: int) -> float:
     """Exposure multiplier in (0, 1] that brings trailing realised portfolio
     vol down to `target_vol` (annualised, decimal). Never levers up."""
-    if target_vol is None or target_vol <= 0 or weights.sum() <= _EPS:
+    if target_vol is None or target_vol <= 0 or np.abs(weights).sum() <= _EPS:
         return 1.0
     port = np.nan_to_num(trailing_returns) @ weights
     realised = float(np.std(port, ddof=1)) * np.sqrt(ann) if len(port) > 2 else 0.0
@@ -445,8 +494,9 @@ def calendar_returns(net: pd.Series, bench: pd.Series) -> tuple[list[dict], list
 
 
 def effective_n(weights: np.ndarray) -> float:
-    """1 / Herfindahl of the invested part — how many names you *really* hold."""
-    w = np.asarray(weights, dtype=float)
+    """1 / Herfindahl of the invested part — how many names you *really* hold
+    (gross, so a long-short book counts both legs)."""
+    w = np.abs(np.asarray(weights, dtype=float))
     total = w.sum()
     if total <= _EPS:
         return 0.0
