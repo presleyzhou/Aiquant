@@ -153,3 +153,27 @@ def test_clean_panel_drops_thin_and_insane_names():
     assert list(panel["close"].columns) == ["GOOD"]
     with pytest.raises(LookupError):
         pp.clean_panel(pp._assemble(frames), "t", min_symbols=2)
+
+
+def test_yahoo_fallback_gaps_are_filled_by_coingecko(monkeypatch):
+    """Binance down (geo-blocked), Yahoo lacks two pairs → CoinGecko fills them."""
+    _fake_settings(monkeypatch)
+    idx = pd.date_range("2024-01-01", periods=300, freq="D")
+    frame = lambda: pd.DataFrame({c: np.linspace(1, 2, 300) for c in ("Open", "High", "Low", "Close", "Volume")}, index=idx)  # noqa: E731
+    syms = ["BTC-USD", "DOGE-USD", "UNI-USD"]
+
+    def boom(symbols, period):
+        raise LookupError("binance: 451 unavailable for legal reasons")
+
+    monkeypatch.setattr(pp, "binance_frames", boom)
+    monkeypatch.setattr(pp, "yahoo_frames", lambda symbols, period: {"BTC-USD": frame()})
+    calls = {}
+
+    def gecko(symbols, period):
+        calls["asked"] = list(symbols)
+        return {s: frame() for s in symbols}
+
+    monkeypatch.setattr(pp, "coingecko_frames", gecko)
+    frames, used = pp._crypto_frames(syms, "3y", "binance")
+    assert set(frames) == set(syms)
+    assert used == ["yahoo", "coingecko"] and calls["asked"] == ["DOGE-USD", "UNI-USD"]

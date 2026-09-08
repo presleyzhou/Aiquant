@@ -323,6 +323,20 @@ def _crypto_frames(symbols: list[str], period: str, provider: str) -> tuple[dict
     else:
         frames = yahoo_frames(symbols, period)
         used = ["yahoo"]
+    # Whatever chain served the bulk, give names still missing one last try at
+    # CoinGecko — Binance is geo-blocked from US serverless regions and Yahoo
+    # lacks several mid-cap pairs, so this is the path that actually fills
+    # DOGE / UNI / APT-style gaps in production.
+    missing = [s for s in symbols if s not in frames]
+    if missing and frames and _settings().coingecko_fill and "coingecko" not in used:
+        try:
+            filled = coingecko_frames(missing, period)
+        except Exception as exc:  # optional fill; the panel is still usable without it
+            log.info("coingecko fill failed: %s", exc)
+            filled = {}
+        if filled:
+            frames.update(filled)
+            used.append("coingecko")
     return frames, used
 
 
