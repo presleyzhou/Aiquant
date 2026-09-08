@@ -25,7 +25,14 @@ MAX_STATE_BYTES = 400_000
 
 @router.get("/config")
 async def config():
+    from app.config import get_settings
+
+    st = get_settings()
+    # The anon key is public by design (it ships in every Supabase frontend);
+    # exposing it here lets one bundle serve every deployment without VITE_ vars.
     return {"enabled": auth.enabled(), "provider": "supabase" if auth.enabled() else None,
+            "supabase_url": st.supabase_url if auth.enabled() else None,
+            "anon_key": st.supabase_anon_key if auth.enabled() else None,
             "persistence": kvstore.mode(), "sync_keys": sorted(STATE_KEYS)}
 
 

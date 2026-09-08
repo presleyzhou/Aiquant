@@ -18,13 +18,11 @@ import {
   updateFactor,
 } from "../store";
 import { buildFactorShare, takeFactorShare, buildPipelineShare } from "../share";
-import { deployPaper } from "../store";
-import { DeployButton } from "./DeployButton";
 import { EquityChart } from "./EquityChart";
 import { EvolveLab } from "./EvolveLab";
-import { ExplainButton } from "./ExplainButton";
-import { FactorReportButton } from "./FactorReport";
 import { LectureTour } from "./LectureTour";
+import { FactorLibraryRow } from "./FactorLibraryRow";
+import { decayState } from "./factorLibUtils";
 import { ShareButton } from "./ShareButton";
 
 /** One evaluated candidate (or a failed parse). */
@@ -438,19 +436,6 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
     }
   };
 
-  /** Sign-aligned decay verdict: recent IC in the direction the factor was
-   * accepted with, below the loose bar = suspected decay. */
-  const decayState = (f: SavedFactor, h: FactorCheck): "ok" | "decayed" => {
-    const aligned = h.recent_ic * Math.sign(f.is_ic || 1);
-    return aligned < 0.01 ? "decayed" : "ok";
-  };
-
-  const transferState = (f: SavedFactor, h: FactorCheck): "ok" | "fail" => {
-    const aligned = h.is_ic * Math.sign(f.is_ic || 1);
-    const alignedOos = h.oos_ic * Math.sign(f.is_ic || 1);
-    return aligned > 0.01 && alignedOos > 0 ? "ok" : "fail";
-  };
-
   return (
     <div className="lab" style={hidden ? { display: "none" } : undefined}>
       <div className="lab__inner">
@@ -780,138 +765,29 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                     <ul className="lab-saved">
                       {computeVisible().map((f) => {
                         const k = key(f);
-                        const h = health[k];
-                        const tr = transfer[k];
                         return (
-                          <li key={k} className="lab-saved__row fl-zoo-row">
-                            <input
-                              type="checkbox"
-                              className="fl-zoo-row__check"
-                              checked={selected.has(k)}
-                              onChange={() => toggleSelect(f)}
-                              aria-label={t("fl.cp.select")}
-                            />
-                            <div style={{ minWidth: 0, flex: 1 }}>
-                              <code style={{ fontSize: 11, wordBreak: "break-all" }}>
-                                {f.expression}
-                              </code>
-                              <div className="dim" style={{ fontSize: 11 }}>
-                                {f.market === "crypto" ? t("fl.market.crypto") : t("fl.market.us")} ·{" "}
-                                IC {fmt(f.is_ic)} · OOS {fmt(f.oos_ic)} · {f.savedAt.slice(0, 10)}
-                              </div>
-                              {h && h !== "pending" && h !== "failed" && (
-                                <div
-                                  className={`fl-badge ${decayState(f, h) === "ok" ? "fl-badge--ok" : "fl-badge--warn"}`}
-                                >
-                                  {decayState(f, h) === "ok"
-                                    ? t("fl.hc.ok", { v: fmt(h.recent_ic) })
-                                    : t("fl.hc.decayed", { v: fmt(h.recent_ic) })}
-                                </div>
-                              )}
-                              {h === "pending" && <div className="fl-badge dim">…</div>}
-                              {tr && tr !== "pending" && tr !== "failed" && (
-                                <div
-                                  className={`fl-badge ${transferState(f, tr) === "ok" ? "fl-badge--ok" : "fl-badge--warn"}`}
-                                >
-                                  {t(
-                                    transferState(f, tr) === "ok" ? "fl.tr.ok" : "fl.tr.fail",
-                                    {
-                                      m: tr.market === "crypto" ? t("fl.tr.crypto") : t("fl.tr.us"),
-                                      a: fmt(tr.is_ic),
-                                      b: fmt(tr.oos_ic),
-                                    },
-                                  )}
-                                </div>
-                              )}
-                              {tr === "pending" && <div className="fl-badge dim">⇄ …</div>}
-                              <ExplainButton expression={f.expression} market={f.market} enabled={aiEnabled} />
-                              <span data-tour="report" style={{ display: "contents" }}>
-                              <FactorReportButton
-                                expression={f.expression}
-                                market={f.market}
-                                horizon={f.horizon}
-                                costBps={costTouched ? costBps : (costs[f.market] ?? null)}
-                                onBestHorizon={(h) => {
-                                  if (h !== (f.best_horizon ?? f.horizon)) setSaved(updateFactor(f.market, f.expression, { best_horizon: h }));
-                                }}
-                              />
-                              </span>
-                              {serverHealth[key(f)] && (() => {
-                                const sh = serverHealth[key(f)];
-                                const g = sh.grades;
-                                return (
-                                  <div className={`fl-badge ${sh.decayed ? "fl-badge--warn" : ""}`} title={t("fl.sh.title", { d: sh.as_of })}>
-                                    ☁ {t("fl.sh.badge", { d: new Date(sh.checked_at * 1000).toLocaleDateString(), g: `${g.predictive}${g.stability}${g.robustness}${g.tradability}${g.significance}` })}
-                                    {sh.decayed ? ` · ${t("fl.sh.decayed")}` : ""}
-                                  </div>
-                                );
-                              })()}
-                              {f.prune_verdict && f.prune_verdict !== "keep" && (
-                                <div className={`fl-badge ${(f.prune_strikes ?? 0) >= 2 ? "fl-badge--warn" : ""}`} title={t("fl.pr.badgeTitle")}>
-                                  {(f.prune_strikes ?? 0) >= 2 ? t("fl.pr.retire") : t(`fl.pr.${f.prune_verdict}` as "fl.pr.watch")}
-                                </div>
-                              )}
-                              {f.best_horizon !== undefined && f.best_horizon !== f.horizon && (
-                                <div className="fl-badge" title={t("fl.bh.title")}>{t("fl.bh.badge", { h: String(f.best_horizon) })}</div>
-                              )}
-                              {(() => {
-                                const mg = marginal[key(f)];
-                                if (!mg) return null;
-                                if (mg === "pending") return <div className="fl-badge dim">Δ …</div>;
-                                if (mg === "failed") return <div className="fl-badge fl-badge--warn">Δ {t("fl.mg.failed")}</div>;
-                                const cls = mg.verdict === "adds" ? "fl-badge--ok" : mg.verdict === "hurts" ? "fl-badge--warn" : "";
-                                return (
-                                  <div className={`fl-badge ${cls}`} title={t("fl.mg.title", { a: mg.without.sharpe.toFixed(2), b: mg.with.sharpe.toFixed(2), n: String(mg.n_others) })}>
-                                    {t(`fl.mg.${mg.verdict}` as "fl.mg.adds", { d: `${mg.sharpe_delta >= 0 ? "+" : ""}${mg.sharpe_delta.toFixed(2)}` })}
-                                  </div>
-                                );
-                              })()}
-                            </div>
-                            <div className="lab-saved__actions" data-tour="deploy">
-                              <button
-                                className="btn btn--mini"
-                                disabled={btFor === f.expression}
-                                onClick={() => runFactorBacktest(f)}
-                              >
-                                {btFor === f.expression ? "…" : "▶"}
-                              </button>
-                              <DeployButton
-                                onDeploy={() =>
-                                  deployPaper("factor", f.expression.slice(0, 40), {
-                                    expression: f.expression,
-                                    market: f.market,
-                                    top_n: 5,
-                                    rebalance: f.best_horizon ?? f.horizon,
-                                    invert: f.is_ic < 0,
-                                  })
-                                }
-                              />
-                              <button
-                                className="btn btn--mini"
-                                title={t("fl.tr.title")}
-                                onClick={() => runTransfer(f)}
-                              >
-                                ⇄
-                              </button>
-                              {saved.filter((o) => o.market === f.market).length >= 2 && (
-                                <button
-                                  className="btn btn--mini"
-                                  title={t("fl.mg.button")}
-                                  disabled={marginal[key(f)] === "pending"}
-                                  onClick={() => runMarginal(f)}
-                                >
-                                  Δ
-                                </button>
-                              )}
-                              <button
-                                className="watch-row__x"
-                                title={t("lab.mine.del")}
-                                onClick={() => setSaved(deleteFactor(f.market, f.expression))}
-                              >
-                                ×
-                              </button>
-                            </div>
-                          </li>
+                          <FactorLibraryRow
+                            key={k}
+                            f={f}
+                            k={k}
+                            health={health[k]}
+                            transfer={transfer[k]}
+                            serverHealth={serverHealth[k]}
+                            marginal={marginal[k]}
+                            selected={selected.has(k)}
+                            aiEnabled={aiEnabled}
+                            costBps={costTouched ? costBps : (costs[f.market] ?? null)}
+                            backtesting={btFor === f.expression}
+                            canMarginal={saved.filter((o) => o.market === f.market).length >= 2}
+                            onToggleSelect={() => toggleSelect(f)}
+                            onBacktest={() => runFactorBacktest(f)}
+                            onTransfer={() => runTransfer(f)}
+                            onMarginal={() => runMarginal(f)}
+                            onRemove={() => setSaved(deleteFactor(f.market, f.expression))}
+                            onBestHorizon={(h) => {
+                              if (h !== (f.best_horizon ?? f.horizon)) setSaved(updateFactor(f.market, f.expression, { best_horizon: h }));
+                            }}
+                          />
                         );
                       })}
                     </ul>

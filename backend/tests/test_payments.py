@@ -215,6 +215,7 @@ def test_account_endpoints_without_login_and_claim(monkeypatch):
     client = TestClient(app)
     cfg = client.get("/api/account/config").json()
     assert cfg["enabled"] is False and "aiquant.factors.zoo" in cfg["sync_keys"]
+    assert cfg["supabase_url"] is None and cfg["anon_key"] is None  # only published when enabled
     assert client.get("/api/account/me").json() == {"signed_in": False}
     assert client.get("/api/account/state").status_code == 401
     assert client.post("/api/wallet", json={}).status_code == 401  # no token, no secret
