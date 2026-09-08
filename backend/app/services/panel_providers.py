@@ -326,6 +326,9 @@ def _crypto_frames(symbols: list[str], period: str, provider: str) -> tuple[dict
     return frames, used
 
 
+MAX_STOOQ_FILL = 12
+
+
 def _equity_frames(symbols: list[str], period: str, provider: str, min_symbols: int) -> tuple[dict[str, pd.DataFrame], list[str]]:
     use_ak = provider == "akshare" or (provider == "auto" and akshare_available())
     if use_ak:
@@ -336,7 +339,28 @@ def _equity_frames(symbols: list[str], period: str, provider: str, min_symbols: 
             if len(frames) >= min(min_symbols, len(symbols)):
                 return frames, ["akshare"]
             log.warning("akshare returned %d/%d symbols; falling back to yahoo", len(frames), len(symbols))
-    return yahoo_frames(symbols, period), ["yahoo"]
+    frames = yahoo_frames(symbols, period)
+    used = ["yahoo"]
+    missing = [s for s in symbols if s not in frames]
+    if missing and _settings().stooq_fill:
+        # Names Yahoo skipped (renamed / throttled) get one more chance at
+        # Stooq before they silently vanish from the cross-section.
+        from app.services import fallback_data
+
+        filled = 0
+        for sym in missing[:MAX_STOOQ_FILL]:
+            try:
+                df = fallback_data.stooq_daily(sym, period)
+                idx = pd.to_datetime(df.index)
+                df.index = (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
+                frames[sym] = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+                filled += 1
+            except Exception as exc:  # unavailable there too — reported via coverage
+                log.info("stooq fill failed for %s: %s", sym, exc)
+        if filled:
+            used.append("stooq")
+            log.info("stooq filled %d/%d missing US names", filled, len(missing))
+    return frames, used
 
 
 def download_panel(tickers: list[str], period: str, label: str, min_symbols: int = 8,
@@ -365,8 +389,12 @@ def download_panel(tickers: list[str], period: str, label: str, min_symbols: int
         raise LookupError(f"could not download the {label} universe")
     panel = clean_panel(_assemble(frames), label, min_symbols)
     tag = "+".join(dict.fromkeys(used))
+    kept = set(panel["close"].columns)
+    missing = [t for t in tickers if t not in kept]
     for field in panel.values():
         field.attrs["provider"] = tag
+        field.attrs["requested"] = len(tickers)
+        field.attrs["missing"] = missing
     log.info("panel %s: %d symbols via %s", label, panel["close"].shape[1], tag)
     return panel
 
@@ -376,3 +404,19 @@ def provider_of(panel: dict[str, pd.DataFrame]) -> str:
         return str(panel["close"].attrs.get("provider") or "yahoo")
     except Exception:
         return "yahoo"
+
+
+def coverage_of(panel: dict[str, pd.DataFrame]) -> dict:
+    """How complete this panel is versus what was asked for."""
+    close = panel["close"]
+    attrs = getattr(close, "attrs", {}) or {}
+    requested = int(attrs.get("requested") or close.shape[1])
+    return {
+        "symbols": int(close.shape[1]),
+        "requested": requested,
+        "missing": list(attrs.get("missing") or []),
+        "provider": provider_of(panel),
+        "bars": int(len(close)),
+        "first": str(close.index[0].date()) if len(close) else None,
+        "last": str(close.index[-1].date()) if len(close) else None,
+    }

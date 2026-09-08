@@ -441,6 +441,19 @@ async function mockApi(page: Page) {
     if (path === "/api/admin/withdrawals") return json({ withdrawals: [{ id: "wd_1", account: "abcdef123456", amount: 4, method: "crypto", address: "0xabc", status: "pending", at: 1_700_000_000 }] });
     if (path === "/api/admin/orders") return json({ orders: [] });
     if (path === "/api/admin/listings") return json({ listings: [] });
+    if (path === "/api/admin/integrations")
+      return json({ version: "e2e", checked_at: 1_700_000_000, counts: { green: 2, amber: 1, red: 1, off: 1 }, integrations: [
+        { name: "kv", status: "amber", detail: "file store (ephemeral)" },
+        { name: "supabase", status: "off", detail: "set SUPABASE_URL" },
+        { name: "stripe", status: "green", detail: "test key ok; webhook secret set" },
+        { name: "coinbase", status: "red", detail: "/charges → HTTP 401" },
+        { name: "market_data", status: "green", detail: "us: yahoo (+stooq fill)" } ] });
+    if (path === "/api/factors/panel-status")
+      return json({ market: "us", symbols: 116, requested: 118, missing: ["MMC", "XYZ"], provider: "yahoo+stooq", bars: 754, first: "2023-09-05", last: "2026-09-04" });
+    if (path.startsWith("/api/payments/orders/stripe/"))
+      return json({ order_id: "cs_test_ok", provider: "stripe", status: "confirmed", demo: false, item_id: "trend-sniper-pro", token: "tok.stripe" });
+    if (path.startsWith("/api/fake-supabase/auth/v1/otp")) return json({});
+    if (path.startsWith("/api/fake-supabase/auth/v1/")) return json({ session: null, user: null });
     // anything unmocked answers empty-but-valid, never hangs
     return json({});
   });
@@ -1408,4 +1421,50 @@ test("admin console: token gate, overview stats and pending withdrawal", async (
   expect(opsToken).toBe("e2e-token");
   await expect.poll(() => overviewCalls).toBeGreaterThanOrEqual(1);
   await expect(page.getByTestId("adm-ops-run")).toHaveText("立即运行");
+});
+
+test("factor lab: panel coverage line and library filters", async ({ page }) => {
+  await page.addInitScript(() => {
+    const f = (e: string, m: string, ic: number) => ({ expression: e, market: m, horizon: 10, is_ic: ic, is_icir: 0.2, oos_ic: ic / 2, savedAt: "2024-01-01" });
+    localStorage.setItem("aiquant.factors.zoo", JSON.stringify([f("rank(delta(close, 5))", "us", 0.03), f("rank(ts_std(close, 10))", "us", 0.01), f("rank(delta(close, 20))", "crypto", 0.02), f("rank(ts_mean(volume, 5))", "crypto", 0.015)]));
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "因子挖掘" }).click();
+  await expect(page.getByTestId("fl-coverage")).toContainText("116 / 118");
+  await expect(page.getByTestId("fl-coverage")).toContainText("MMC");
+  const bar = page.getByTestId("fl-libbar");
+  await expect(bar).toContainText("显示 4 / 4");
+  await bar.locator("select").first().selectOption("crypto");
+  await expect(bar).toContainText("显示 2 / 4");
+  await expect(page.locator(".lab-saved__row")).toHaveCount(2);
+});
+
+test("payments: Stripe return link verifies the order and unlocks the item", async ({ page }) => {
+  await page.goto("/?view=market&provider=stripe&item=trend-sniper-pro&order=cs_test_ok");
+  await expect(page.getByText("支付已确认，内容已解锁 ✓")).toBeVisible();
+  const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("aiquant.purchases") ?? "{}"));
+  expect(stored["trend-sniper-pro"]).toMatchObject({ provider: "stripe", demo: false, token: "tok.stripe" });
+  await page.locator(".mk-card", { hasText: "趋势狙击" }).first().click();
+  await expect(page.getByRole("button", { name: /在回测中运行/ })).toBeVisible();
+});
+
+test("accounts: runtime-configured Supabase shows sign-in and sends a magic link", async ({ page }) => {
+  await page.route("**/api/account/config", (route) =>
+    route.fulfill({ json: { enabled: true, provider: "supabase", persistence: "file", sync_keys: [], supabase_url: "http://127.0.0.1:4173/api/fake-supabase", anon_key: "anon-e2e" } }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.getByPlaceholder("you@example.com").fill("lecture@example.com");
+  await page.getByRole("button", { name: "发送登录链接" }).click();
+  await expect(page.getByText(/登录链接已发送到 lecture@example.com/)).toBeVisible();
+});
+
+test("admin console: integration self-check traffic lights", async ({ page }) => {
+  await page.goto("/?admin=1");
+  await page.locator("input[type=password]").fill("e2e-token");
+  await page.getByRole("button", { name: "进入" }).click();
+  const box = page.getByTestId("adm-integrations");
+  await expect(box).toContainText("银行卡支付 Stripe");
+  await expect(box.locator(".adm-int__dot--green")).toHaveCount(2);
+  await expect(box.locator(".adm-int__dot--red")).toHaveCount(1);
+  await expect(box).toContainText("/charges → HTTP 401");
 });

@@ -8,7 +8,7 @@ const AXES = ["predictive", "stability", "robustness", "tradability", "significa
 /** "🩺 体检" — practitioner report card for one factor: quantile spread,
  * IC decay by horizon, turnover / cost-adjusted spread, walk-forward folds,
  * bull/bear split and a horizon-adjusted t-stat, each graded A/B/C. */
-export function FactorReportButton({ expression, market, horizon, onBestHorizon }: { expression: string; market: string; horizon: number; onBestHorizon?: (h: number) => void }) {
+export function FactorReportButton({ expression, market, horizon, costBps, onBestHorizon }: { expression: string; market: string; horizon: number; costBps?: number | null; onBestHorizon?: (h: number) => void }) {
   const { t } = useT();
   const [report, setReport] = useState<Report | null>(null);
   const [open, setOpen] = useState(false);
@@ -24,7 +24,7 @@ export function FactorReportButton({ expression, market, horizon, onBestHorizon 
     setBusy(true);
     setError(null);
     try {
-      const r = await api.factorAnalyze(expression, market, horizon, 5, 10, factorTrials());
+      const r = await api.factorAnalyze(expression, market, horizon, 5, costBps ?? null, factorTrials());
       setReport(r);
       setOpen(true);
       onBestHorizon?.(r.best_horizon);
@@ -126,7 +126,10 @@ function ReportBody({ r }: { r: Report }) {
           <li key={s.code}>{t(`fr.s.${s.code}` as MsgKey, { v: String(s.value ?? "") })}</li>
         ))}
       </ul>
-      <div className="dim" style={{ fontSize: 10.5 }}>{t("fr.foot", { d: r.as_of, n: String(r.days) })}</div>
+      <div className="dim" style={{ fontSize: 10.5 }}>
+        {t("fr.foot2", { d1: r.data_as_of ?? r.as_of, d2: r.as_of, h: String(r.horizon), n: String(r.days) })}
+        {r.panel ? ` · ${t("fr.panel", { s: String(r.panel.symbols), r: String(r.panel.requested), p: r.panel.provider })}` : ""}
+      </div>
     </div>
   );
 }

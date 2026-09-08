@@ -1,23 +1,36 @@
-/** Supabase Auth wrapper. Absent VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY the
- * app keeps its browser-held identities and every helper here is a no-op. */
+/** Supabase Auth wrapper, configured at RUNTIME from /api/account/config
+ * (the backend already holds SUPABASE_URL and the public anon key), so no
+ * VITE_* build variables are needed and the same bundle works on every
+ * deployment. Until the config says `enabled`, every helper is a no-op. */
 import { createClient, type Session, type SupabaseClient } from "@supabase/supabase-js";
 
-const URL_ = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-const KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
-
-export const authEnabled = Boolean(URL_ && KEY);
 let client: SupabaseClient | null = null;
 let session: Session | null = null;
+let enabled = false;
+let ready: Promise<boolean> | null = null;
 const listeners = new Set<(s: Session | null) => void>();
 
-export function supabase(): SupabaseClient | null {
-  if (!authEnabled) return null;
-  if (!client) {
-    client = createClient(URL_!, KEY!, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
-    client.auth.getSession().then(({ data }) => setSession(data.session));
-    client.auth.onAuthStateChange((_e, s) => setSession(s));
-  }
-  return client;
+export interface AuthConfig { enabled: boolean; supabase_url?: string | null; anon_key?: string | null }
+
+/** Resolve once: fetch the config and build the client if configured. */
+export function initAuth(): Promise<boolean> {
+  if (ready) return ready;
+  ready = fetch("/api/account/config")
+    .then((r) => (r.ok ? (r.json() as Promise<AuthConfig>) : Promise.reject(new Error(String(r.status)))))
+    .then((cfg) => {
+      if (!cfg.enabled || !cfg.supabase_url || !cfg.anon_key) return false;
+      client = createClient(cfg.supabase_url, cfg.anon_key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
+      client.auth.getSession().then(({ data }) => setSession(data.session));
+      client.auth.onAuthStateChange((_e, s) => setSession(s));
+      enabled = true;
+      return true;
+    })
+    .catch(() => false);
+  return ready;
+}
+
+export function authEnabled(): boolean {
+  return enabled;
 }
 
 function setSession(s: Session | null) {
@@ -46,12 +59,11 @@ export function authHeaders(): Record<string, string> {
 }
 
 export async function signInWithEmail(email: string): Promise<void> {
-  const c = supabase();
-  if (!c) throw new Error("auth not configured");
-  const { error } = await c.auth.signInWithOtp({ email, options: { emailRedirectTo: `${window.location.origin}${window.location.pathname}` } });
+  if (!client) throw new Error("auth not configured");
+  const { error } = await client.auth.signInWithOtp({ email, options: { emailRedirectTo: `${window.location.origin}${window.location.pathname}` } });
   if (error) throw new Error(error.message);
 }
 
 export async function signOut(): Promise<void> {
-  await supabase()?.auth.signOut();
+  await client?.auth.signOut();
 }

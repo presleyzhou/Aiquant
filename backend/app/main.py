@@ -93,6 +93,16 @@ async def _validation_error(_request: Request, exc: RequestValidationError) -> J
     return JSONResponse(status_code=422, content={"detail": _finite(jsonable_encoder(exc.errors()))})
 
 
+APP_VERSION = "2026.09.08"
+APP_FEATURES = ["kronos_hourly", "factor_report", "wallet", "accounts", "admin", "panel_coverage", "integrations"]
+
+
+@app.get("/api/version")
+async def version() -> dict:
+    """Build fingerprint — the Kronos remote check compares it to its own."""
+    return {"version": APP_VERSION, "features": APP_FEATURES}
+
+
 @app.get("/api/health")
 async def health():
     from app.services.llm import analyst

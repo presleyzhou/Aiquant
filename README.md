@@ -262,6 +262,8 @@ DeMiguel-Garlappi-Uppal (2009)、Ledoit & Wolf (2008)、Harvey-Liu-Zhu (2016)、
 目标持仓较上次变化（需调仓）、数据超过 5 天未更新、无法重算。报告存 KV 供「模拟持仓」页展示；用户在页内填写 Slack / Discord /
 Telegram webhook 后，**新出现**的提醒会推送一次（同一提醒不重复打扰）。webhook 仅接受 https 公网地址。需在 GitHub Secrets 配置与后端一致的 `ADMIN_TOKEN`。
 
+**集成状态自检、面板覆盖率、可配成本与两个日期。** 站长后台顶部新增「集成状态自检」（`GET /api/admin/integrations`）：KV、Supabase、Stripe、Coinbase、Sentry、Anthropic、Kronos 远端、行情数据源、站长令牌、凭证密钥逐项探测并标绿 / 黄 / 红 / 未配置，Kronos 远端通过新的 `/api/version` 构建指纹判断是否为旧版本。登录配置改为运行时从 `/api/account/config` 下发（后端持有 Supabase URL 与公开 anon key），不再需要 VITE_ 构建变量。面板加载对 Yahoo 缺失的美股名字自动补拉 Stooq，并在 `close.attrs` 记录 requested / missing；`GET /api/factors/panel-status` 与因子挖掘页显示「本次面板 116 / 118 · 数据源 · 缺失」。交易成本假设改为市场级默认（美股 10 bp、加密 15 bp，`COST_BPS_US` / `COST_BPS_CRYPTO`）并可在挖掘表单逐次覆盖，挖掘、进化、体检共用。体检与健康检查同时返回「行情截至」与「最后一个已知 h 日后收益的日期」两个日期并解释差别。因子库上限 40 → 120，新增市场 / 状态筛选与按 IC、留出 IC、Δ 增量、持有期排序。英文词典改为按需加载，KV 写入、支付 webhook、重检失败统一上报 Sentry（配置 DSN 后生效）。
+
 **课堂演示模式与质量门禁。** 因子挖掘页标题旁的「📚 课堂演示」按 15 分钟讲义顺序走 8 步，每步高亮对应控件并标出幻灯片页码；因子库与合成、体检、上线等功能不再依赖 AI key（仅挖掘表单与循环日志需要）。模拟持仓中的因子部署显示服务器体检徽标。后端接入 ruff 规则集并进入 CI（E/F/I/B/UP/RUF/DTZ 等，风格类规则显式豁免），Playwright 冒烟测试扩展到 13 条，覆盖体检徽标、瘦身检查、课堂模式与站长后台。
 
 **服务器定时再体检与站长后台。** 每日 ops 任务的第二步调用 `_recheck_blocking`（也可单独 `POST /api/admin/recheck`，需 `ADMIN_TOKEN`），对所有已上架的因子和已同步账号因子库里的因子重跑健康检查与体检评级，结果写入 KV；前端因子库与卖家面板通过 `POST /api/factors/health` 读取并显示「服务器体检」徽标（日期、五项评级、衰减标记）。站长后台（页面 `?admin=1`，请求头 `X-Admin-Token`）提供总览（上架、订单、钱包负债、同步账号数、上次重检）、提现申请标记已付 / 拒绝（拒绝自动退回余额）、订单与上架列表、手动触发重检。因子库新增「→ Pipeline」：把本市场因子一键作为端到端量化 Pipeline 的信号来源打开，两条线共用同一份因子。

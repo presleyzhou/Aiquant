@@ -37,7 +37,7 @@ import pandas as pd
 import yfinance as yf  # noqa: F401 - re-exported for tests that patch factor_mine.yf
 
 from app.config import get_settings
-from app.services import disk_cache, factor_dsl
+from app.services import disk_cache, factor_dsl, panel_providers
 from app.services.llm import ClaudeUnavailable, analyst
 
 log = logging.getLogger("aiquant.factors")
@@ -50,7 +50,7 @@ UNIVERSES: dict[str, list[str]] = {
         "AAPL", "MSFT", "NVDA", "AVGO", "CRM", "AMD", "ORCL", "ADBE", "CSCO", "INTC", "QCOM", "TXN", "IBM",
         "NOW", "INTU", "AMAT", "MU", "LRCX", "KLAC", "ADI", "PANW", "SNPS", "CDNS", "ANET", "PLTR",
         # communication services
-        "GOOG", "META", "NFLX", "DIS", "CMCSA", "TMUS", "VZ", "T", "EA", "TTWO",
+        "GOOG", "META", "NFLX", "DIS", "CMCSA", "TMUS", "VZ", "T", "CHTR", "TTWO",
         # consumer discretionary
         "AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "BKNG", "TJX", "CMG", "ORLY", "MAR", "GM", "F",
         # consumer staples
@@ -82,7 +82,7 @@ MIN_ABS_IC = 0.015          # "standard" in-sample bar (kept for tests/back-comp
 MAX_ZOO_CORR = 0.7          # redundancy ceiling vs accepted factors
 MAX_COMPLEXITY = 24         # AST nodes — AlphaAgent-style regularizer
 BOOK_TOP_N = 5              # tradability proxy: Top-5 book at the rebalance horizon
-COST_BPS = 10.0             # one-way cost assumption for the tradability gate
+COST_BPS = 10.0             # legacy default; see cost_bps_for()
 T_BAR_BASE, T_BAR_CAP = 2.0, 3.0  # trials-aware significance bar (Harvey–Liu–Zhu spirit)
 MIN_MARGINAL_SHARPE = -0.05  # a new factor may not drag the blend's Sharpe below this delta
 MIN_COVERAGE = 0.55         # fraction of days with a computable cross-section
@@ -166,6 +166,16 @@ def _daily_rank_ic(factor: pd.DataFrame, fwd: pd.DataFrame) -> pd.Series:
     return ic[both.sum(axis=1) >= 6]
 
 
+def cost_bps_for(market: str, override: float | None = None) -> float:
+    """One-way cost assumption (bp): request override → market default."""
+    if override is not None:
+        return float(max(0.0, min(100.0, override)))
+    from app.config import get_settings
+
+    st = get_settings()
+    return float(st.cost_bps_crypto if market == "crypto" else st.cost_bps_us)
+
+
 def _book_turnover(ranked: pd.DataFrame, horizon: int, top_n: int, sign: float) -> float:
     """Fraction of the Top-N book replaced at each rebalance (horizon bars)."""
     n_sym = ranked.notna().sum(axis=1).clip(lower=1)
@@ -200,6 +210,7 @@ def evaluate_candidate(
     panel: dict[str, pd.DataFrame],
     horizon: int,
     zoo_values: list[pd.DataFrame],
+    cost_bps: float = COST_BPS,
 ) -> dict:
     """All the numbers one candidate gets judged by. Raises FactorError."""
     values, node = factor_dsl.compute(expression, panel)
@@ -244,7 +255,7 @@ def evaluate_candidate(
     turnover = _book_turnover(ranked, horizon, BOOK_TOP_N, sign)
     q_ret = _quintile_returns(ranked, fwd)
     spread = (q_ret[-1] - q_ret[0]) * sign
-    spread_after_cost = spread - turnover * 2 * COST_BPS / 100
+    spread_after_cost = spread - turnover * 2 * cost_bps / 100
     t_stat = float(ic.mean() / max(float(ic.std()), 1e-6) * np.sqrt(len(ic)))
 
     # Robustness: how many of 4 time folds agree with the overall sign, and
@@ -273,6 +284,7 @@ def evaluate_candidate(
         "turnover": round(turnover, 3),
         "spread_pct": round(spread, 3),
         "spread_after_cost_pct": round(spread_after_cost, 3),
+        "cost_bps": cost_bps,
         "t_stat": round(t_stat, 2),
         "positive_folds": positive_folds,
         "regime_ok": regime_ok,
@@ -293,7 +305,7 @@ def _verdict(m: dict, mode: str = "standard", trials: int = 0) -> tuple[bool, li
     spread_ac = m.get("spread_after_cost_pct")
     if spread_ac is not None and spread_ac < 0:
         reasons.append(
-            f"not tradable: long-short spread {spread_ac:+.2f}%/period after {COST_BPS:.0f} bp costs "
+            f"not tradable: long-short spread {spread_ac:+.2f}%/period after {m.get('cost_bps', COST_BPS):.0f} bp costs "
             f"(turnover {m.get('turnover', 0):.0%}) — smooth the signal (ts_mean) or use a longer window"
         )
     if mode == "strict":
@@ -490,6 +502,7 @@ async def mine_stream(
     per_round: int,
     mode: str = "standard",
     memory: dict | None = None,
+    cost_bps: float | None = None,
 ) -> AsyncIterator[dict]:
     """The loop engine. Yields NDJSON-able progress events.
 
@@ -507,6 +520,7 @@ async def mine_stream(
     per_round = max(2, min(6, per_round))
     mode = mode if mode in MODES else "standard"
     memory = memory or {}
+    cost = cost_bps_for(market, cost_bps)
     try:
         trials = max(0, int(memory.get("trials", 0) or 0))
     except (TypeError, ValueError):
@@ -523,6 +537,8 @@ async def mine_stream(
     symbols = list(panel["close"].columns)
     yield {
         "type": "start",
+        "cost_bps": cost,
+        "panel": panel_providers.coverage_of(panel),
         "market": market,
         "horizon": horizon,
         "rounds": rounds,
@@ -583,7 +599,7 @@ async def mine_stream(
                    "hypothesis": cand["hypothesis"]}
             try:
                 metrics = await asyncio.to_thread(
-                    evaluate_candidate, expr, panel, horizon, zoo_values
+                    evaluate_candidate, expr, panel, horizon, zoo_values, cost
                 )
             except factor_dsl.FactorError as exc:
                 results.append({"expression": expr, "error": str(exc)})
@@ -890,6 +906,7 @@ def check_factor_blocking(expression: str, market: str, horizon: int) -> dict:
         "recent_days": len(recent),
         "days": len(ic),
         "as_of": str(ic.index[-1].date()),
+        "data_as_of": str(panel["close"].index[-1].date()),
     }
 
 
@@ -929,7 +946,7 @@ def multiple_testing_report(t_adj: float, trials: int) -> dict:
 
 
 def analyze_factor_blocking(
-    expression: str, market: str, horizon: int, top_n: int = 5, cost_bps: float = 10.0, trials: int = 0
+    expression: str, market: str, horizon: int, top_n: int = 5, cost_bps: float | None = None, trials: int = 0
 ) -> dict:
     """Practitioner's report card for one factor — the diagnostics that
     AlphaEval / Alphalens-style workflows run before anything is traded:
@@ -946,6 +963,7 @@ def analyze_factor_blocking(
     market = market if market in UNIVERSES else "us"
     horizon = max(1, min(30, horizon))
     top_n = max(2, min(20, top_n))
+    cost_bps = cost_bps_for(market, cost_bps)
     ann = 252 if market == "us" else 365
 
     panel = _load_panel_blocking(market)
@@ -1064,7 +1082,11 @@ def analyze_factor_blocking(
         "cost_bps": cost_bps,
         "sign": int(sign),
         "days": len(ic),
+        # two dates on purpose: the panel's last close, and the last day whose
+        # h-bar forward return is already known (= where the IC series ends)
+        "data_as_of": str(close.index[-1].date()),
         "as_of": str(ic.index[-1].date()),
+        "panel": panel_providers.coverage_of(panel),
         "complexity": factor_dsl.complexity(node),
         "mean_ic": round(mean_ic, 4),
         "icir": round(icir, 3),

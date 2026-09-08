@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     panel_provider_us: str = "auto"
     panel_provider_crypto: str = "binance"
     coingecko_fill: bool = True
+    # Retry US names Yahoo skipped at Stooq (daily bars) before dropping them.
+    stooq_fill: bool = True
     # Optional CoinGecko demo/pro key → higher rate limits and longer history.
     coingecko_api_key: str | None = None
     # Optional Financial Modeling Prep key → quarterly fundamentals (market
@@ -98,6 +100,10 @@ class Settings(BaseSettings):
     monitor_drawdown_pct: float = 10.0
     rl_monitor_per_hour: int = 12
     rl_account_per_hour: int = 120
+
+    # --- factor research cost assumptions (one-way bp; overridable per request) ---
+    cost_bps_us: float = 10.0
+    cost_bps_crypto: float = 15.0
 
     # --- market data ---
     quote_cache_seconds: int = 15

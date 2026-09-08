@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.services import payments
+from app.services import observe, payments
 from app.services.ratelimit import limiter
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
@@ -54,16 +54,26 @@ async def confirm_demo(order_id: str, req: DemoConfirm):
 async def stripe_webhook(request: Request):
     payload = await request.body()
     if not payments.verify_stripe_signature(payload, request.headers.get("stripe-signature")):
+        observe.capture(ValueError("stripe webhook signature invalid"), "webhook.stripe", ip=request.client.host if request.client else None)
         raise HTTPException(status_code=400, detail="invalid signature")
-    return {"result": payments.handle_stripe_event(await request.json())}
+    try:
+        return {"result": payments.handle_stripe_event(await request.json())}
+    except Exception as exc:
+        observe.capture(exc, "webhook.stripe.handle")
+        raise HTTPException(status_code=500, detail="webhook handling failed") from exc
 
 
 @router.post("/webhooks/coinbase")
 async def coinbase_webhook(request: Request):
     payload = await request.body()
     if not payments.verify_coinbase_signature(payload, request.headers.get("x-cc-webhook-signature")):
+        observe.capture(ValueError("coinbase webhook signature invalid"), "webhook.coinbase", ip=request.client.host if request.client else None)
         raise HTTPException(status_code=400, detail="invalid signature")
-    return {"result": payments.handle_coinbase_event(await request.json())}
+    try:
+        return {"result": payments.handle_coinbase_event(await request.json())}
+    except Exception as exc:
+        observe.capture(exc, "webhook.coinbase.handle")
+        raise HTTPException(status_code=500, detail="webhook handling failed") from exc
 
 
 class ConnectRequest(BaseModel):

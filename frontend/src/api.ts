@@ -67,6 +67,8 @@ export interface FactorReport {
   icir: number;
   t_stat: number;
   t_stat_adj: number;
+  data_as_of?: string;
+  panel?: PanelStatus;
   multiple_testing?: { trials: number; p_value: number; p_adjusted: number; expected_max_t: number; clears_noise_max: boolean; bar: number };
   quantiles: Array<{ q: number; ret_pct: number }>;
   spread_pct: number;
@@ -85,6 +87,17 @@ export interface FactorReport {
   suggestions: Array<{ code: string; value: number | string | null }>;
 }
 
+export interface PanelStatus {
+  market?: string;
+  symbols: number;
+  requested: number;
+  missing: string[];
+  provider: string;
+  bars: number;
+  first: string | null;
+  last: string | null;
+}
+
 export interface FactorHealth {
   market: string;
   expression: string;
@@ -99,6 +112,20 @@ export interface FactorHealth {
   best_horizon: number;
   spread_after_cost_ann_pct: number;
   decayed: boolean;
+}
+
+export interface IntegrationRow {
+  name: string;
+  status: "green" | "amber" | "red" | "off";
+  detail: string;
+  markets?: Record<string, unknown>;
+}
+
+export interface IntegrationsReport {
+  version: string;
+  checked_at: number;
+  counts: Record<"green" | "amber" | "red" | "off", number>;
+  integrations: IntegrationRow[];
 }
 
 export interface AdminOverview {
@@ -1182,12 +1209,16 @@ export const api = {
       body: JSON.stringify(body),
     }).then(json<CompositeResult>),
 
-  factorAnalyze: (expression: string, market: string, horizon: number, top_n = 5, cost_bps = 10, trials = 0) =>
+  factorAnalyze: (expression: string, market: string, horizon: number, top_n = 5, cost_bps: number | null = null, trials = 0) =>
     fetch("/api/factors/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ expression, market, horizon, top_n, cost_bps, trials }),
     }).then(json<FactorReport>),
+
+  factorsConfig: () =>
+    fetch("/api/factors/config").then(json<{ universes: Record<string, string[]>; costs_bps?: Record<string, number>; version?: string }>),
+  panelStatus: (market: string) => fetch(`/api/factors/panel-status?market=${encodeURIComponent(market)}`).then(json<PanelStatus>),
 
   factorHealth: (market: string, expressions: string[]) =>
     fetch("/api/factors/health", {
@@ -1198,6 +1229,7 @@ export const api = {
 
   admin: {
     overview: (token: string) => fetch("/api/admin/overview", { headers: { "X-Admin-Token": token } }).then(json<AdminOverview>),
+    integrations: (token: string) => fetch("/api/admin/integrations", { headers: { "X-Admin-Token": token } }).then(json<IntegrationsReport>),
     withdrawals: (token: string) => fetch("/api/admin/withdrawals", { headers: { "X-Admin-Token": token } }).then(json<{ withdrawals: AdminWithdrawal[] }>),
     updateWithdrawal: (token: string, id: string, status: "pending" | "paid" | "rejected", note: string) =>
       fetch(`/api/admin/withdrawals/${encodeURIComponent(id)}`, {
@@ -1390,7 +1422,7 @@ export const api = {
       body: JSON.stringify(body),
     }).then(json<PipelineMemo>),
 
-  accountConfig: () => fetch("/api/account/config").then(json<{ enabled: boolean; provider: string | null; persistence: string; sync_keys: string[] }>),
+  accountConfig: () => fetch("/api/account/config").then(json<{ enabled: boolean; provider: string | null; persistence: string; sync_keys: string[]; supabase_url?: string | null; anon_key?: string | null }>),
   accountMe: () => authFetch("/api/account/me").then(json<{ signed_in: boolean; email?: string; account?: string; state_updated_at?: number | null }>),
   accountState: () => authFetch("/api/account/state").then(json<{ data: Record<string, unknown>; updated_at: number | null }>),
   accountPutState: (data: Record<string, unknown>) =>

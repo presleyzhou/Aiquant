@@ -230,3 +230,111 @@ async def ops(max_factors: int = 60, monitor_limit: int = 10, recheck: bool = Tr
     await asyncio.to_thread(kvstore.put, "ops:last", report)
     await asyncio.to_thread(kvstore.put, "ops:history", history)
     return report
+
+
+# ------------------------------------------------------------ integrations
+
+INTEGRATION_TIMEOUT = 6.0
+
+
+async def _probe(fn):
+    try:
+        return await asyncio.wait_for(fn(), INTEGRATION_TIMEOUT)
+    except Exception as exc:  # the probe's failure IS the finding
+        return {"status": "red", "detail": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+
+@router.get("/integrations")
+async def integrations():
+    """One traffic-light row per integration: configured? reachable? current?
+    Green = works, amber = configured but degraded / demo, red = broken,
+    off = not configured (with what enabling it would unlock)."""
+    import httpx
+
+    from app.config import get_settings
+    from app.main import APP_VERSION
+    from app.services import panel_providers, provider_health
+
+    st = get_settings()
+
+    async def kv():
+        if kvstore.mode() != "kv":
+            return {"status": "amber", "detail": "file store (ephemeral on serverless) — set KV_REST_API_URL/TOKEN for durable wallets, listings, sync"}
+        probe = {"t": int(time.time())}
+        await asyncio.to_thread(kvstore.put, "probe:integrations", probe)
+        back = await asyncio.to_thread(kvstore.get, "probe:integrations")
+        return {"status": "green" if back == probe else "red", "detail": "Upstash REST round-trip ok" if back == probe else "round-trip mismatch"}
+
+    async def supabase():
+        if not auth.enabled():
+            return {"status": "off", "detail": "set SUPABASE_URL + SUPABASE_ANON_KEY to enable sign-in and cloud sync"}
+        async with httpx.AsyncClient(timeout=INTEGRATION_TIMEOUT) as c:
+            r = await c.get(f"{st.supabase_url.rstrip('/')}/auth/v1/settings", headers={"apikey": st.supabase_anon_key})
+        if r.status_code != 200:
+            return {"status": "red", "detail": f"/auth/v1/settings → HTTP {r.status_code}"}
+        ext = r.json().get("external", {})
+        return {"status": "green" if ext.get("email") else "amber", "detail": "reachable; email provider " + ("enabled" if ext.get("email") else "DISABLED in Supabase Auth settings")}
+
+    async def stripe():
+        if not st.stripe_secret_key:
+            return {"status": "off", "detail": "set STRIPE_SECRET_KEY to accept cards / Apple Pay (+ STRIPE_WEBHOOK_SECRET)"}
+        async with httpx.AsyncClient(timeout=INTEGRATION_TIMEOUT, auth=(st.stripe_secret_key, "")) as c:
+            r = await c.get("https://api.stripe.com/v1/balance")
+        if r.status_code != 200:
+            return {"status": "red", "detail": f"/v1/balance → HTTP {r.status_code}"}
+        live = not st.stripe_secret_key.startswith("sk_test")
+        hook = "webhook secret set" if st.stripe_webhook_secret else "no STRIPE_WEBHOOK_SECRET (polling only)"
+        return {"status": "green" if st.stripe_webhook_secret else "amber", "detail": f"{'LIVE' if live else 'test'} key ok; {hook}"}
+
+    async def coinbase():
+        if not st.coinbase_commerce_api_key:
+            return {"status": "off", "detail": "set COINBASE_COMMERCE_API_KEY to accept crypto (+ COINBASE_WEBHOOK_SECRET)"}
+        async with httpx.AsyncClient(timeout=INTEGRATION_TIMEOUT) as c:
+            r = await c.get("https://api.commerce.coinbase.com/charges?limit=1", headers={"X-CC-Api-Key": st.coinbase_commerce_api_key, "X-CC-Version": "2018-03-22"})
+        if r.status_code != 200:
+            return {"status": "red", "detail": f"/charges → HTTP {r.status_code}"}
+        return {"status": "green" if st.coinbase_webhook_secret else "amber", "detail": "API key ok; " + ("webhook secret set" if st.coinbase_webhook_secret else "no COINBASE_WEBHOOK_SECRET (polling only)")}
+
+    async def sentry():
+        return {"status": "green", "detail": "DSN set — errors from KV, webhooks and rechecks are reported"} if st.sentry_dsn else {"status": "off", "detail": "set SENTRY_DSN (backend) / VITE_SENTRY_DSN (frontend)"}
+
+    async def anthropic():
+        return {"status": "green", "detail": f"{st.claude_model} / light {st.claude_model_light}"} if st.anthropic_api_key else {"status": "off", "detail": "set ANTHROPIC_API_KEY for AI mining, chat and explanations"}
+
+    async def kronos():
+        if not st.kronos_remote_url:
+            return {"status": "amber" if st.kronos_enabled != "0" else "off", "detail": "no KRONOS_REMOTE_URL — forecasts only where torch is installed"}
+        base = st.kronos_remote_url.rstrip("/")
+        async with httpx.AsyncClient(timeout=INTEGRATION_TIMEOUT) as c:
+            status = await c.get(f"{base}/api/kronos/status")
+            ver = await c.get(f"{base}/api/version")
+        if status.status_code != 200:
+            return {"status": "red", "detail": f"remote status → HTTP {status.status_code}"}
+        if ver.status_code != 200:
+            return {"status": "amber", "detail": "remote reachable but runs an OLD build (no /api/version): hourly forecasts unavailable — update the Space Dockerfile and rebuild"}
+        rv = ver.json().get("version")
+        same = rv == APP_VERSION
+        return {"status": "green" if same else "amber", "detail": f"remote build {rv} vs local {APP_VERSION}" + ("" if same else " — restart the Space to pull the latest code")}
+
+    async def data():
+        ph = await asyncio.to_thread(provider_health.summary, 7)
+        markets = ph.get("markets", {})
+        us = panel_providers.effective_us_provider(st.panel_provider_us)
+        detail = f"us: {us}{' (+stooq fill)' if st.stooq_fill else ''} · crypto: {st.panel_provider_crypto}{' (+coingecko fill)' if st.coingecko_fill else ''}"
+        degraded = any((m.get("fallback_rate") or 0) > 0.5 for m in markets.values()) if markets else False
+        return {"status": "amber" if degraded else "green", "detail": detail + (" · heavy fallback use in the last 7 days" if degraded else ""), "markets": markets}
+
+    async def admin_token():
+        return {"status": "green", "detail": "ADMIN_TOKEN set"}
+
+    async def secret():
+        return {"status": "green", "detail": "MARKETPLACE_SECRET set — entitlements survive restarts"} if st.marketplace_secret else {"status": "amber", "detail": "MARKETPLACE_SECRET unset — entitlement tokens die on cold start"}
+
+    probes = {
+        "kv": kv, "supabase": supabase, "stripe": stripe, "coinbase": coinbase, "sentry": sentry, "anthropic": anthropic,
+        "kronos_remote": kronos, "market_data": data, "admin_token": admin_token, "marketplace_secret": secret,
+    }
+    results = await asyncio.gather(*(_probe(fn) for fn in probes.values()))
+    rows = [{"name": name, **res} for name, res in zip(probes, results, strict=True)]
+    counts = {k: sum(1 for r in rows if r["status"] == k) for k in ("green", "amber", "red", "off")}
+    return {"version": APP_VERSION, "checked_at": int(time.time()), "counts": counts, "integrations": rows}

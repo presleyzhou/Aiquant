@@ -715,3 +715,24 @@ def test_multiple_testing_report_and_prune(monkeypatch):
     assert body["n"] == 3 and len(body["members"]) == 3
     assert all(m["verdict"] in {"keep", "watch", "retire"} for m in body["members"])
     assert client.post("/api/factors/prune", json={"factors": [{"expression": "rank(close)"}], "market": "us"}).status_code == 422
+
+
+def test_cost_defaults_dates_and_panel_status(monkeypatch):
+    from app.services import factor_mine
+
+    assert factor_mine.cost_bps_for("us") == 10.0 and factor_mine.cost_bps_for("crypto") == 15.0
+    assert factor_mine.cost_bps_for("crypto", 3) == 3.0 and factor_mine.cost_bps_for("us", 500) == 100.0
+    panel = _panel(n_days=400, n_syms=12)
+    panel["close"].attrs["requested"] = 14
+    panel["close"].attrs["missing"] = ["ZZZ", "YYY"]
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    rep = factor_mine.analyze_factor_blocking("rank(delta(close, 5))", "crypto", 10)
+    assert rep["cost_bps"] == 15.0 and rep["data_as_of"] > rep["as_of"]
+    assert rep["panel"]["symbols"] == 12 and rep["panel"]["missing"] == ["ZZZ", "YYY"]
+    client = TestClient(app)
+    cfg = client.get("/api/factors/config").json()
+    assert cfg["costs_bps"] == {"us": 10.0, "crypto": 15.0} and cfg["version"]
+    ps = client.get("/api/factors/panel-status?market=us").json()
+    assert ps["symbols"] == 12 and ps["requested"] == 14 and ps["missing"] == ["ZZZ", "YYY"]
+    m = factor_mine.evaluate_candidate("rank(delta(close, 5))", panel, 10, [], cost_bps=25)
+    assert m["cost_bps"] == 25

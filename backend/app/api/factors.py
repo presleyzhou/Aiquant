@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -44,6 +44,7 @@ class MineRequest(BaseModel):
     per_round: int = Field(4, ge=2, le=6)
     mode: str = Field("standard", description="strict | standard | loose")
     memory: MineMemory | None = None
+    cost_bps: float | None = Field(default=None, ge=0, le=100, description="one-way cost assumption; default per market")
 
 
 class FactorBacktestRequest(BaseModel):
@@ -77,6 +78,7 @@ class EvolveRequest(BaseModel):
     seeds: list[str] = Field(default_factory=list, max_length=10)  # warm-start zoo factors
     seed: int | None = Field(default=None, description="RNG seed for reproducibility")
     objective: str = Field("multi", pattern="^(ic|multi)$")
+    cost_bps: float | None = Field(default=None, ge=0, le=100)
 
 
 class ExplainRequest(BaseModel):
@@ -92,10 +94,16 @@ class CheckRequest(BaseModel):
 
 @router.get("/config")
 async def factors_config() -> dict:
+    from app.config import get_settings
+    from app.main import APP_VERSION
+
+    st = get_settings()
     return {
         "universes": {k: v for k, v in UNIVERSES.items()},
         "defaults": {"horizon": 10, "rounds": 3, "per_round": 4, "mode": "standard"},
         "modes": {k: {"min_ic": v[0], "min_icir": v[1]} for k, v in MODES.items()},
+        "costs_bps": {"us": st.cost_bps_us, "crypto": st.cost_bps_crypto},
+        "version": APP_VERSION,
     }
 
 
@@ -108,7 +116,8 @@ async def mine(req: MineRequest) -> StreamingResponse:
         try:
             memory = req.memory.model_dump() if req.memory else None
             async for event in mine_stream(
-                req.market, req.horizon, req.rounds, req.per_round, req.mode, memory
+                req.market, req.horizon, req.rounds, req.per_round, req.mode, memory,
+                cost_bps=req.cost_bps,
             ):
                 yield json.dumps(event, default=str) + "\n"
         except Exception as exc:
@@ -187,6 +196,7 @@ async def evolve(req: EvolveRequest) -> StreamingResponse:
             async for event in evolve_stream(
                 req.market, req.horizon, req.population, req.generations, req.mode,
                 [s[:240] for s in req.seeds], req.seed, req.objective,
+                cost_bps=req.cost_bps,
             ):
                 yield json.dumps(event, default=str) + "\n"
         except Exception as exc:
@@ -268,7 +278,7 @@ async def explain_factor(req: ExplainRequest) -> dict:
 
 class AnalyzeRequest(CheckRequest):
     top_n: int = Field(5, ge=2, le=20)
-    cost_bps: float = Field(10.0, ge=0, le=100)
+    cost_bps: float | None = Field(default=None, ge=0, le=100)
     trials: int = Field(0, ge=0, le=1_000_000)
 
 
@@ -352,3 +362,18 @@ async def factor_health(req: HealthLookup) -> dict:
         return out
 
     return {"health": await asyncio.to_thread(load), "meta": await asyncio.to_thread(kvstore.get, "health:meta") or {}}
+
+
+@router.get("/panel-status")
+async def panel_status(market: str = Query("us", pattern="^(us|crypto)$")) -> dict:
+    """Coverage of the daily panel behind factor mining: how many of the
+    requested names made it, which are missing, which provider chain served
+    it, and the date range. Loads (and therefore warms) the panel."""
+    from app.services import panel_providers
+    from app.services.factor_mine import _load_panel_blocking
+
+    try:
+        panel = await asyncio.to_thread(_load_panel_blocking, market)
+    except LookupError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"market": market, **panel_providers.coverage_of(panel)}

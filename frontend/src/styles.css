@@ -4773,3 +4773,20 @@ tbody tr:hover td {
 .lt-card__body { margin: 0 0 10px; font-size: 12.5px; line-height: 1.55; color: var(--fg); }
 .lt-card__foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .lt-highlight { outline: 2px solid var(--accent) !important; outline-offset: 4px; border-radius: 10px; box-shadow: 0 0 0 6px rgba(59,224,255,0.15), 0 0 24px rgba(59,224,255,0.35) !important; transition: box-shadow 0.3s; }
+
+/* ---- admin integrations ------------------------------------------------- */
+.adm-int { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 6px 14px; }
+.adm-int__row { display: grid; grid-template-columns: 12px auto 1fr; gap: 8px; align-items: baseline; font-size: 12px; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.02); }
+.adm-int__row b { white-space: nowrap; }
+.adm-int__detail { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.adm-int__dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; box-shadow: 0 0 8px currentColor; }
+.adm-int__dot--green { background: var(--up, #3be0a0); color: var(--up, #3be0a0); }
+.adm-int__dot--amber { background: var(--amber, #f0a500); color: var(--amber, #f0a500); }
+.adm-int__dot--red { background: var(--dn, #ff6384); color: var(--dn, #ff6384); }
+.adm-int__dot--off { background: #4a5568; color: transparent; }
+
+/* ---- factor lab: coverage + library bar ---------------------------------- */
+.fl-coverage { font-size: 11px; color: var(--muted); margin: 6px 0 2px; }
+.fl-coverage--partial { color: var(--amber, #f0a500); }
+.fl-libbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 8px; font-size: 11px; }
+.fl-libbar .select { font-size: 11px; padding: 3px 6px; }

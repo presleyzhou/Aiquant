@@ -40,6 +40,7 @@ from app.services.factor_mine import (
     _load_panel_blocking,
     _portfolio_from_values,
     _verdict,
+    cost_bps_for,
     evaluate_candidate,
     marginal_contribution_blocking,
 )
@@ -226,6 +227,7 @@ def evolve_blocking(
     rng_seed: int | None,
     emit,
     objective: str = "multi",
+    cost_bps: float | None = None,
 ) -> dict:
     """Run the GA synchronously, calling `emit(event)` after each generation.
     Returns the final report (also emitted as the `done` event by the caller)."""
@@ -239,6 +241,7 @@ def evolve_blocking(
     rng = random.Random(rng_seed)
 
     panel = _load_panel_blocking(market)
+    cost = cost_bps_for(market, cost_bps)
     started = time.time()
     warnings.simplefilter("ignore", RuntimeWarning)  # degenerate all-NaN slices in odd genomes
 
@@ -248,7 +251,7 @@ def evolve_blocking(
     def fitness_of(expr: str, hof_values: list[pd.DataFrame]) -> tuple[float, dict | None]:
         if expr not in cache:
             try:
-                cache[expr] = evaluate_candidate(expr, panel, horizon, [])
+                cache[expr] = evaluate_candidate(expr, panel, horizon, [], cost)
             except Exception:
                 cache[expr] = None
         m = cache[expr]
@@ -486,6 +489,7 @@ async def evolve_stream(
     seeds: list[str],
     rng_seed: int | None = None,
     objective: str = "multi",
+    cost_bps: float | None = None,
 ) -> AsyncIterator[dict]:
     """Bridge the synchronous GA to an NDJSON stream via a worker thread + queue."""
     import asyncio
@@ -500,8 +504,7 @@ async def evolve_stream(
         try:
             report = evolve_blocking(
                 market, horizon, population_size, generations, mode, seeds, rng_seed, emit,
-                objective,
-            )
+                objective, cost_bps=cost_bps)
             emit(report)
         except Exception as exc:  # surface, don't hang the stream
             emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})

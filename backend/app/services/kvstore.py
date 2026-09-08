@@ -90,8 +90,14 @@ def get(key: str) -> dict | None:
 
 def put(key: str, value: dict) -> None:
     if mode() == "kv":
-        _kv("SET", key, json.dumps(value, ensure_ascii=False))
-        _kv("SADD", f"idx:{_ns(key)}", key)
+        try:
+            _kv("SET", key, json.dumps(value, ensure_ascii=False))
+            _kv("SADD", f"idx:{_ns(key)}", key)
+        except Exception as exc:
+            from app.services.observe import capture
+
+            capture(exc, "kvstore.put", key=key)
+            raise
         return
     with _lock:
         doc = _file_read()

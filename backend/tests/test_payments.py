@@ -281,3 +281,21 @@ def test_admin_endpoints_require_token_and_recheck_writes_health(monkeypatch):
     health = client.post("/api/factors/health", json={"market": "us", "expressions": ["rank(delta(close, 5))"]}).json()
     assert "rank(delta(close, 5))" in health["health"] and "grades" in health["health"]["rank(delta(close, 5))"]
     assert health["meta"]["done"] >= 1
+
+
+def test_integrations_and_version(monkeypatch):
+    from app.config import get_settings
+
+    client = TestClient(app)
+    v = client.get("/api/version").json()
+    assert v["version"] and "integrations" in v["features"]
+    assert client.get("/api/admin/integrations").status_code == 403
+    monkeypatch.setattr(get_settings(), "admin_token", "secret-admin")
+    body = client.get("/api/admin/integrations", headers={"X-Admin-Token": "secret-admin"}).json()
+    names = {r["name"]: r for r in body["integrations"]}
+    assert {"kv", "supabase", "stripe", "coinbase", "sentry", "anthropic", "kronos_remote", "market_data", "admin_token", "marketplace_secret"} <= set(names)
+    assert names["kv"]["status"] == "amber"          # file store in tests
+    assert names["stripe"]["status"] == "off" and names["supabase"]["status"] == "off"
+    assert all(r["status"] in {"green", "amber", "red", "off"} for r in body["integrations"])
+    assert sum(body["counts"].values()) == len(body["integrations"])
+    monkeypatch.setattr(get_settings(), "admin_token", None)

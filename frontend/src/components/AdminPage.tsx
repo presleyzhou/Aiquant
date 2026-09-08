@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type AdminOpsRun, type AdminOverview, type AdminWithdrawal, type MarketItem } from "../api";
+import { api, type AdminOpsRun, type AdminOverview, type AdminWithdrawal, type MarketItem, type IntegrationsReport } from "../api";
 import { useT } from "../i18n";
 import { fallbackTone } from "./pipeline/format";
 
@@ -12,6 +12,7 @@ export function AdminPage() {
   const [token, setToken] = useState<string>(() => sessionStorage.getItem(TOKEN_KEY) ?? "");
   const [draft, setDraft] = useState("");
   const [overview, setOverview] = useState<AdminOverview | null>(null);
+  const [integ, setInteg] = useState<IntegrationsReport | null>(null);
   const [withdrawals, setWithdrawals] = useState<AdminWithdrawal[]>([]);
   const [orders, setOrders] = useState<Array<Record<string, unknown>>>([]);
   const [listings, setListings] = useState<Array<MarketItem & { status: string; seller: string }>>([]);
@@ -23,6 +24,7 @@ export function AdminPage() {
     try {
       const [ov, wd, od, ls] = await Promise.all([api.admin.overview(tok), api.admin.withdrawals(tok), api.admin.orders(tok), api.admin.listings(tok)]);
       setOverview(ov); setWithdrawals(wd.withdrawals); setOrders(od.orders); setListings(ls.listings);
+      api.admin.integrations(tok).then(setInteg).catch(() => setInteg(null));
       sessionStorage.setItem(TOKEN_KEY, tok);
       setToken(tok);
     } catch (err) {
@@ -74,6 +76,26 @@ export function AdminPage() {
         <p className="lab-hero__sub">{t("adm.persist", { p: overview.persistence })}{overview.persistence === "file" ? ` — ${t("sell.persistFile")}` : ""}</p>
       </section>
       {error && <div className="mk-notice"><span>{error}</span><button className="mk-close" onClick={() => setError(null)}>✕</button></div>}
+      <section className="panel mk-mine" data-testid="adm-integrations">
+        <div className="panel__head">
+          <span className="panel__title">{t("adm.int.title")}</span>
+          <span className="panel__meta">
+            {integ ? t("adm.int.meta", { v: integ.version, g: String(integ.counts.green), a: String(integ.counts.amber), r: String(integ.counts.red), o: String(integ.counts.off) }) : "…"}
+            <button className="ghost" style={{ marginLeft: 8 }} disabled={busy} onClick={() => { setBusy(true); api.admin.integrations(token).then(setInteg).catch((e) => setError((e as Error).message)).finally(() => setBusy(false)); }}>{t("adm.int.refresh")}</button>
+          </span>
+        </div>
+        {!integ ? <div className="empty" style={{ padding: 14 }}>{t("adm.int.loading")}</div> : (
+          <ul className="adm-int">
+            {integ.integrations.map((r) => (
+              <li key={r.name} className={`adm-int__row adm-int__row--${r.status}`}>
+                <span className={`adm-int__dot adm-int__dot--${r.status}`} aria-label={r.status} />
+                <b>{t(`adm.int.${r.name}` as "adm.int.kv")}</b>
+                <span className="adm-int__detail">{r.detail}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
       <div className="stat-grid" style={{ marginBottom: 14 }}>
         {[["adm.c.listings", `${c.active_listings} / ${c.listings}`], ["adm.c.orders", `${c.real_orders} / ${c.orders}`], ["adm.c.gross", `$${overview.gross_usd.toFixed(2)}`], ["adm.c.liab", `$${overview.wallet_liabilities_usd.toFixed(2)}`], ["adm.c.accounts", String(c.accounts_synced)], ["adm.c.pending", String(c.withdrawals_pending)]].map(([k, v]) => (
           <div className="stat" key={k}><div className="stat__label">{t(k as "adm.c.listings")}</div><div className="stat__value">{v}</div></div>

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { api } from "../api";
-import { authEnabled, onAuth, signInWithEmail, signOut, supabase } from "../auth";
+import { initAuth, onAuth, signInWithEmail, signOut } from "../auth";
 import { useT } from "../i18n";
 import { sellerSecret } from "../store";
 import { startSync, stopSync } from "../sync";
@@ -18,17 +18,23 @@ export function AccountMenu() {
   const [sync, setSync] = useState<string>("");
   const [busy, setBusy] = useState(false);
 
+  const [enabled, setEnabled] = useState(false);
+
   useEffect(() => {
-    if (!authEnabled) return;
-    supabase();
-    return onAuth((s) => {
-      setSession(s);
-      if (s) void startSync(setSync);
-      else stopSync();
+    let off: (() => void) | undefined;
+    void initAuth().then((ok) => {
+      setEnabled(ok);
+      if (!ok) return;
+      off = onAuth((s) => {
+        setSession(s);
+        if (s) void startSync(setSync);
+        else stopSync();
+      });
     });
+    return () => off?.();
   }, []);
 
-  if (!authEnabled) return null;
+  if (!enabled) return null;
 
   const sendLink = async (e: React.FormEvent) => {
     e.preventDefault();

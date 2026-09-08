@@ -94,7 +94,7 @@ SECTORS: dict[str, str] = {
     **{s: "utilities_realestate" for s in ("NEE", "DUK", "AMT", "PLD")},
     # universe expansion (~120 US names)
     **{s: "tech" for s in ("NOW", "INTU", "AMAT", "MU", "LRCX", "KLAC", "ADI", "PANW", "SNPS", "CDNS", "ANET", "PLTR")},
-    **{s: "communication" for s in ("CMCSA", "TMUS", "VZ", "T", "EA", "TTWO")},
+    **{s: "communication" for s in ("CMCSA", "TMUS", "VZ", "T", "CHTR", "TTWO")},
     **{s: "consumer" for s in ("BKNG", "TJX", "CMG", "ORLY", "MAR", "GM", "F")},
     **{s: "staples" for s in ("MO", "MDLZ", "CL", "KMB")},
     **{s: "financials" for s in ("WFC", "C", "SCHW", "SPGI", "CB", "PGR", "AON")},

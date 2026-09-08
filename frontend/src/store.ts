@@ -202,7 +202,7 @@ export function saveFactors(factors: SavedFactor[]): SavedFactor[] {
   const existing = savedFactors();
   const known = new Set(existing.map((f) => `${f.market}|${f.expression}`));
   const fresh = factors.filter((f) => !known.has(`${f.market}|${f.expression}`));
-  const merged = [...fresh, ...existing].slice(0, 40);
+  const merged = [...fresh, ...existing].slice(0, 120);
   localStorage.setItem(FACTORS_KEY, JSON.stringify(merged));
   return merged;
 }

@@ -4,7 +4,7 @@ import {
   streamNDJSON,
   type CompositeResult,
   type FactorBacktestResult,
-  type FactorCheck, type MarginalResult, type PruneResult, type FactorHealth } from "../api";
+  type FactorCheck, type MarginalResult, type PruneResult, type FactorHealth, type PanelStatus } from "../api";
 import { useT } from "../i18n";
 import {
   deleteFactor,
@@ -81,6 +81,28 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   const [marginal, setMarginal] = useState<Record<string, MarginalResult | "pending" | "failed">>({});
   const [pruning, setPruning] = useState(false);
   const [lecture, setLecture] = useState(false);
+  const [costs, setCosts] = useState<Record<string, number>>({ us: 10, crypto: 15 });
+  const [costBps, setCostBps] = useState<number>(10);
+  const [costTouched, setCostTouched] = useState(false);
+  const [coverage, setCoverage] = useState<PanelStatus | null>(null);
+  const [libMarket, setLibMarket] = useState<"all" | "us" | "crypto">("all");
+  const [libStatus, setLibStatus] = useState<"all" | "attention" | "clean">("all");
+  const [libSort, setLibSort] = useState<"recent" | "ic" | "oos" | "marginal" | "horizon">("recent");
+
+  // Market-level cost defaults from the server; user edits win until the market changes.
+  useEffect(() => {
+    api.factorsConfig().then((c) => { if (c.costs_bps) setCosts(c.costs_bps); }).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    if (!costTouched) setCostBps(costs[market] ?? 10);
+  }, [market, costs, costTouched]);
+
+  // Panel coverage for the selected market (also warms the shared cache).
+  useEffect(() => {
+    if (hidden) return;
+    setCoverage(null);
+    api.panelStatus(market).then(setCoverage).catch(() => setCoverage(null));
+  }, [market, hidden]);
   const [serverHealth, setServerHealth] = useState<Record<string, FactorHealth>>({});
 
   // Server-side recheck results (daily GitHub Action) for the library.
@@ -174,7 +196,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
       };
       await streamNDJSON(
         "/api/factors/mine",
-        { market, horizon, rounds, per_round: perRound, mode, memory },
+        { market, horizon, rounds, per_round: perRound, mode, memory, cost_bps: costBps },
         (event) => {
           const e = event as Record<string, unknown> & { type: string };
           switch (e.type) {
@@ -265,6 +287,30 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   };
 
   const key = (f: SavedFactor) => `${f.market}|${f.expression}`;
+
+  /** Library view: market / attention filters and a sort — `saved` stays the
+   * source of truth for every action. Evaluated at render (after all consts). */
+  const computeVisible = () => {
+    let list = saved.filter((f) => libMarket === "all" || f.market === libMarket);
+    if (libStatus !== "all") {
+      const attention = (f: SavedFactor) => {
+        const sh = serverHealth[key(f)];
+        const h = health[key(f)];
+        const decayed = (sh?.decayed ?? false) || (h !== undefined && typeof h === "object" && decayState(f, h) === "decayed");
+        return decayed || (f.prune_verdict !== undefined && f.prune_verdict !== "keep");
+      };
+      list = list.filter((f) => (libStatus === "attention" ? attention(f) : !attention(f)));
+    }
+    const mg = (f: SavedFactor) => { const m = marginal[key(f)]; return m && typeof m === "object" ? m.sharpe_delta : -Infinity; };
+    const sorters: Record<typeof libSort, (a: SavedFactor, b: SavedFactor) => number> = {
+      recent: (a, b) => (b.savedAt ?? "").localeCompare(a.savedAt ?? ""),
+      ic: (a, b) => Math.abs(b.is_ic) - Math.abs(a.is_ic),
+      oos: (a, b) => Math.abs(b.oos_ic) - Math.abs(a.oos_ic),
+      marginal: (a, b) => mg(b) - mg(a),
+      horizon: (a, b) => (a.best_horizon ?? a.horizon) - (b.best_horizon ?? b.horizon),
+    };
+    return [...list].sort(sorters[libSort]);
+  };
 
   const toggleSelect = (f: SavedFactor) => {
     setSelected((prev) => {
@@ -446,6 +492,12 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
         ) : (
           <>
             {!aiEnabled && <div className="notice" style={{ maxWidth: 560 }}>{t("lab.aiOff")}</div>}
+            {coverage && (
+              <div className={`fl-coverage ${coverage.missing.length ? "fl-coverage--partial" : ""}`} data-testid="fl-coverage">
+                {t("fl.coverage", { s: String(coverage.symbols), r: String(coverage.requested), p: coverage.provider, d: coverage.last ?? "—" })}
+                {coverage.missing.length > 0 && ` · ${t("fl.coverage.missing", { m: coverage.missing.slice(0, 8).join(", ") })}`}
+              </div>
+            )}
             {aiEnabled && (
             <div className="lab-form panel" data-tour="form">
               <div className="control-grid" style={{ borderBottom: "none" }}>
@@ -518,6 +570,19 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                     <option value="standard">{t("fl.mode.standard")}</option>
                     <option value="loose">{t("fl.mode.loose")}</option>
                   </select>
+                </label>
+                <label className="field" title={t("fl.cost.title")}>
+                  <span className="field__label">{t("fl.cost")}</span>
+                  <input
+                    className="select"
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={costBps}
+                    disabled={running}
+                    onChange={(e) => { setCostTouched(true); setCostBps(Number(e.target.value)); }}
+                  />
                 </label>
                 <label className="field">
                   <span className="field__label">&nbsp;</span>
@@ -685,13 +750,35 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                       )}
                     </span>
                   </div>
+                  {saved.length >= 4 && (
+                    <div className="fl-libbar" data-testid="fl-libbar">
+                      <select className="select" value={libMarket} onChange={(e) => setLibMarket(e.target.value as "all" | "us" | "crypto")}>
+                        <option value="all">{t("fl.lib.allMarkets")}</option>
+                        <option value="us">{t("fl.market.us")}</option>
+                        <option value="crypto">{t("fl.market.crypto")}</option>
+                      </select>
+                      <select className="select" value={libStatus} onChange={(e) => setLibStatus(e.target.value as "all" | "attention" | "clean")}>
+                        <option value="all">{t("fl.lib.allStatus")}</option>
+                        <option value="attention">{t("fl.lib.attention")}</option>
+                        <option value="clean">{t("fl.lib.clean")}</option>
+                      </select>
+                      <select className="select" value={libSort} onChange={(e) => setLibSort(e.target.value as typeof libSort)}>
+                        <option value="recent">{t("fl.lib.sort.recent")}</option>
+                        <option value="ic">{t("fl.lib.sort.ic")}</option>
+                        <option value="oos">{t("fl.lib.sort.oos")}</option>
+                        <option value="marginal">{t("fl.lib.sort.marginal")}</option>
+                        <option value="horizon">{t("fl.lib.sort.horizon")}</option>
+                      </select>
+                      <span className="dim">{t("fl.lib.count", { v: String(computeVisible().length), n: String(saved.length) })}</span>
+                    </div>
+                  )}
                   {saved.length === 0 ? (
                     <div className="empty" style={{ padding: 18 }}>{t("fl.mine.empty")}</div>
                   ) : (
                     <>
                     {pruneMsg && <div className="dim" style={{ fontSize: 11, margin: "4px 0 6px" }}>{pruneMsg}</div>}
                     <ul className="lab-saved">
-                      {saved.map((f) => {
+                      {computeVisible().map((f) => {
                         const k = key(f);
                         const h = health[k];
                         const tr = transfer[k];
@@ -743,6 +830,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                                 expression={f.expression}
                                 market={f.market}
                                 horizon={f.horizon}
+                                costBps={costTouched ? costBps : (costs[f.market] ?? null)}
                                 onBestHorizon={(h) => {
                                   if (h !== (f.best_horizon ?? f.horizon)) setSaved(updateFactor(f.market, f.expression, { best_horizon: h }));
                                 }}
