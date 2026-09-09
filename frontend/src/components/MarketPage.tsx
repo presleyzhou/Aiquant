@@ -132,7 +132,9 @@ export function MarketPage({ onRunStrategy }: Props) {
         .then((st) => {
           if (st.status === "confirmed") {
             setNotice(t("wallet.topupDone", { a: topup }));
-            loadWallet();
+            // the settlement response already carries the credited wallet
+            if (st.wallet) setWallet(st.wallet);
+            else loadWallet();
             setShowWallet(true);
           } else if (st.status === "pending") setNotice(t("pay.pendingReturn"));
           else setNotice(t("pay.expired"));

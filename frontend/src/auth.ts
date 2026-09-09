@@ -2,7 +2,7 @@
  * (the backend already holds SUPABASE_URL and the public anon key), so no
  * VITE_* build variables are needed and the same bundle works on every
  * deployment. Until the config says `enabled`, every helper is a no-op. */
-import { createClient, type Session, type SupabaseClient } from "@supabase/supabase-js";
+import type { Session, SupabaseClient } from "@supabase/supabase-js";
 
 let client: SupabaseClient | null = null;
 let session: Session | null = null;
@@ -17,8 +17,10 @@ export function initAuth(): Promise<boolean> {
   if (ready) return ready;
   ready = fetch("/api/account/config")
     .then((r) => (r.ok ? (r.json() as Promise<AuthConfig>) : Promise.reject(new Error(String(r.status)))))
-    .then((cfg) => {
+    .then(async (cfg) => {
       if (!cfg.enabled || !cfg.supabase_url || !cfg.anon_key) return false;
+      // The SDK (~40 KB gzip) only ships to browsers whose deployment has auth on.
+      const { createClient } = await import("@supabase/supabase-js");
       client = createClient(cfg.supabase_url, cfg.anon_key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
       client.auth.getSession().then(({ data }) => setSession(data.session));
       client.auth.onAuthStateChange((_e, s) => setSession(s));

@@ -406,6 +406,9 @@ async function mockApi(page: Page) {
     if (path.startsWith("/api/marketplace/listings/c_e2e/payload"))
       return json({ id: "c_e2e", integration: { backtest: { strategy: "sma_cross", fast: 20, slow: 50 } } });
     if (path === "/api/wallet") return json({ balance_usd: 0, demo_usd: 0, entries: [] });
+    if (path === "/api/wallet/topup" && route.request().postDataJSON()?.method === "card")
+      return json({ kind: "topup", order_id: "cs_topup_1", provider: "stripe", method: "card", status: "pending", demo: false,
+        amount: "25.00", currency: "USD", hosted_url: "/?view=market&provider=stripe&topup=25.00&order=cs_topup_1" });
     if (path === "/api/wallet/topup")
       return json({ kind: "topup", order_id: "demo_top", provider: "demo", method: "card", status: "pending", demo: true,
         amount: "25.00", currency: "USD", hosted_url: null });
@@ -450,6 +453,9 @@ async function mockApi(page: Page) {
         { name: "market_data", status: "green", detail: "us: yahoo (+stooq fill)" } ] });
     if (path === "/api/factors/panel-status")
       return json({ market: "us", symbols: 116, requested: 118, missing: ["MMC", "XYZ"], provider: "yahoo+stooq", bars: 754, first: "2023-09-05", last: "2026-09-04" });
+    if (path.startsWith("/api/payments/orders/stripe/cs_topup_1"))
+      return json({ order_id: "cs_topup_1", provider: "stripe", status: "confirmed", demo: false, kind: "topup", amount: "25.00",
+        wallet: { balance_usd: 25, demo_usd: 0, entries: [{ id: "e9", kind: "topup", amount: 25, demo: false, ref: "cs_topup_1", note: "stripe", at: 1_700_000_000 }] } });
     if (path.startsWith("/api/payments/orders/stripe/"))
       return json({ order_id: "cs_test_ok", provider: "stripe", status: "confirmed", demo: false, item_id: "trend-sniper-pro", token: "tok.stripe" });
     if (path.startsWith("/api/fake-supabase/auth/v1/otp")) return json({});
@@ -1467,4 +1473,20 @@ test("admin console: integration self-check traffic lights", async ({ page }) =>
   await expect(box.locator(".adm-int__dot--green")).toHaveCount(2);
   await expect(box.locator(".adm-int__dot--red")).toHaveCount(1);
   await expect(box).toContainText("/charges → HTTP 401");
+});
+
+test("wallet: card top-up goes through the hosted checkout and credits on return", async ({ page }) => {
+  // a deployment with Stripe configured: the chooser shows the card rail
+  await page.route("**/api/payments/config", (route) =>
+    route.fulfill({ json: { methods: { card: true, crypto: false }, providers: { card: "stripe", crypto: null }, demo: false, connect: true,
+      platform_fee_pct: 10, persistence: "kv", note: "Stripe", provider: "stripe", real: true } }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "市场" }).click();
+  await page.getByRole("button", { name: "充值", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "钱包充值" });
+  await expect(dialog.getByText("演示模式")).toHaveCount(0);
+  await dialog.getByRole("button", { name: /银行卡 \/ Apple Pay/ }).click();
+  // the mocked hosted checkout is a same-origin return link → verification → credit
+  await expect(page.getByText("充值 $25.00 已到账 ✓")).toBeVisible({ timeout: 15000 });
+  await expect(page.locator(".mk-wallet b")).toHaveText("$25.00");
 });

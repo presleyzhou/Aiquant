@@ -4790,3 +4790,10 @@ tbody tr:hover td {
 .fl-coverage--partial { color: var(--amber, #f0a500); }
 .fl-libbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 8px; font-size: 11px; }
 .fl-libbar .select { font-size: 11px; padding: 3px 6px; }
+
+@media (max-width: 640px) {
+  .adm-int__row { grid-template-columns: 12px 1fr; }
+  .adm-int__row .adm-int__detail { grid-column: 2; overflow-wrap: anywhere; }
+  .lab .panel__head { flex-wrap: wrap; row-gap: 6px; }
+  .lab .panel__meta { flex-wrap: wrap; justify-content: flex-end; }
+}

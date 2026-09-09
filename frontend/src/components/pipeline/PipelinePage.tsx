@@ -28,7 +28,6 @@ import {
   TURNOVER_PENALTY_RANGE,
   WATCHLIST_KEYS,
 } from "./constants";
-import { exportPipelineWorkbook } from "./excel";
 import {
   formFromDefaults,
   formFromShare,
@@ -430,7 +429,7 @@ export function PipelinePage({ hidden }: Props) {
     if (!result || xlsx === "busy") return;
     setXlsx("busy");
     try {
-      await exportPipelineWorkbook(result, t, reportNames(result));
+      await (await import("./excel")).exportPipelineWorkbook(result, t, reportNames(result));
       setXlsx("ok");
     } catch {
       setXlsx("fail");

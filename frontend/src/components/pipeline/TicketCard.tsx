@@ -3,7 +3,6 @@ import { api, ApiError, type PipelineOrder, type PipelineOrders, type PipelineRu
 import { useT } from "../../i18n";
 import { copyText } from "./clipboard";
 import { MIN_TRADE_RANGE } from "./constants";
-import { exportTicketWorkbook } from "./excel";
 import { parseHoldings } from "./form";
 import { money, price } from "./format";
 
@@ -66,7 +65,7 @@ export function TicketCard({
     if (!ticket || xlsx === "busy") return;
     setXlsx("busy");
     try {
-      await exportTicketWorkbook(ticket, spec, t, sectorLabel);
+      await (await import("./excel")).exportTicketWorkbook(ticket, spec, t, sectorLabel);
       setXlsx("ok");
     } catch {
       setXlsx("fail");
