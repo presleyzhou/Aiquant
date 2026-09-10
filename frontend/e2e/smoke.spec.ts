@@ -461,6 +461,13 @@ async function mockApi(page: Page) {
       return json({ kv: "file", warmed: {
         us: { symbols: 116, requested: 118, missing: ["MMC", "EA"], provider: "yahoo+stooq", bars: 754, first: "2023-09-05", last: "2026-09-04", seconds: 12.3, shared: false },
         crypto: { symbols: 40, requested: 40, missing: [], provider: "yahoo+coingecko", bars: 1090, first: "2023-09-05", last: "2026-09-08", seconds: 4.1, shared: false } } });
+    if (path === "/api/factors/regimes")
+      return json({ market: "us", window: "quarter", bar: 0.01, windows: ["2024Q1", "2024Q2", "2024Q3"], note: "",
+        factors: [{ expression: "rank(delta(close, 5))", sign: 1, pass_rate: 0.67, overall_ic: 0.02,
+          cells: { "2024Q1": { ic: 0.03, n: 60, pass: true }, "2024Q2": { ic: -0.01, n: 61, pass: false }, "2024Q3": { ic: 0.02, n: 62, pass: true } } }] });
+    if (path === "/api/factors/families")
+      return json({ market: "us", threshold: 0.5, expressions: ["rank(delta(close, 5))", "rank(ts_std(close, 10))"], corr: [[1, 0.1], [0.1, 1]], n_families: 2,
+        families: [{ id: 0, label: "momentum", members: ["rank(delta(close, 5))"], mean_abs_corr: null }, { id: 1, label: "volatility", members: ["rank(ts_std(close, 10))"], mean_abs_corr: null }] });
     // anything unmocked answers empty-but-valid, never hangs
     return json({});
   });
@@ -1364,6 +1371,12 @@ test("factor library: server health badge, prune check strikes, lecture mode", a
   await page.getByRole("button", { name: "瘦身检查" }).click();
   await expect(page.getByText(/建议下线（连续两次）/)).toBeVisible();
   await expect(page.getByText(/已检查 2 个因子/)).toBeVisible();
+  // regime heatmap + family badges
+  await page.getByTestId("fl-regimes").click();
+  await expect(page.getByTestId("regime-heatmap")).toContainText("2024Q2");
+  await expect(page.getByTestId("regime-heatmap")).toContainText("67%");
+  await page.getByTestId("fl-families").click();
+  await expect(page.getByText(/波动族 · 2/)).toBeVisible();
   // lecture mode walks 8 steps and highlights anchors
   await page.getByRole("button", { name: /课堂演示/ }).click();
   await expect(page.getByRole("dialog", { name: "课堂演示模式" })).toBeVisible();

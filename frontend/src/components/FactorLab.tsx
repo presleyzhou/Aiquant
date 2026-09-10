@@ -4,7 +4,7 @@ import {
   streamNDJSON,
   type CompositeResult,
   type FactorBacktestResult,
-  type FactorCheck, type MarginalResult, type PruneResult, type FactorHealth, type PanelStatus } from "../api";
+  type FactorCheck, type MarginalResult, type PruneResult, type FactorHealth, type PanelStatus, type RegimesResult } from "../api";
 import { useT } from "../i18n";
 import {
   deleteFactor,
@@ -23,6 +23,7 @@ import { EvolveLab } from "./EvolveLab";
 import { LectureTour } from "./LectureTour";
 import { FactorLibraryRow } from "./FactorLibraryRow";
 import { decayState } from "./factorLibUtils";
+import { RegimeHeatmap } from "./RegimeHeatmap";
 import { ShareButton } from "./ShareButton";
 
 /** One evaluated candidate (or a failed parse). */
@@ -125,6 +126,47 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
     window.location.assign(url);
   };
   const [pruneMsg, setPruneMsg] = useState<string | null>(null);
+  const [regimes, setRegimes] = useState<RegimesResult | null>(null);
+  const [regimesBusy, setRegimesBusy] = useState(false);
+  const [families, setFamilies] = useState<Record<string, string>>({});
+  const [familiesBusy, setFamiliesBusy] = useState(false);
+
+  /** The library subset the analysis buttons act on: the filtered market, or the
+   * market of the first saved factor when the filter is "all". */
+  const analysisGroup = () => {
+    const mk = libMarket === "all" ? saved[0]?.market ?? "us" : libMarket;
+    return { market: mk, factors: saved.filter((f) => f.market === mk).slice(0, 12) };
+  };
+
+  const runRegimes = async () => {
+    const { market: mk, factors } = analysisGroup();
+    if (factors.length === 0 || regimesBusy) return;
+    setRegimesBusy(true);
+    try {
+      setRegimes(await api.factorRegimes({ factors: factors.map((f) => ({ expression: f.expression, invert: f.is_ic < 0, horizon: f.best_horizon ?? f.horizon })), market: mk }));
+    } catch (err) {
+      setPruneMsg((err as Error).message);
+    } finally {
+      setRegimesBusy(false);
+    }
+  };
+
+  const runFamilies = async () => {
+    const { market: mk, factors } = analysisGroup();
+    if (factors.length < 2 || familiesBusy) return;
+    setFamiliesBusy(true);
+    try {
+      const res = await api.factorFamilies({ factors: factors.map((f) => ({ expression: f.expression, invert: f.is_ic < 0, horizon: f.horizon })), market: mk });
+      const next: Record<string, string> = {};
+      for (const fam of res.families) for (const e of fam.members) next[`${mk}|${e}`] = `${fam.label}#${fam.id + 1}`;
+      setFamilies((prev) => ({ ...prev, ...next }));
+      setPruneMsg(t("fl.fam.done", { n: String(res.n_families), m: String(factors.length) }));
+    } catch (err) {
+      setPruneMsg((err as Error).message);
+    } finally {
+      setFamiliesBusy(false);
+    }
+  };
   const [compositeResult, setCompositeResult] = useState<CompositeResult | null>(null);
   const [compositing, setCompositing] = useState(false);
   const [health, setHealth] = useState<Record<string, FactorCheck | "pending" | "failed">>({});
@@ -732,6 +774,12 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                           >
                             {pruning ? "…" : t("fl.pr.button")}
                           </button>
+                          <button className="btn btn--mini" style={{ marginLeft: 6 }} disabled={regimesBusy} onClick={runRegimes} title={t("fl.rg.title")} data-testid="fl-regimes">
+                            {regimesBusy ? "…" : t("fl.rg.button")}
+                          </button>
+                          <button className="btn btn--mini" style={{ marginLeft: 6 }} disabled={familiesBusy || saved.length < 2} onClick={runFamilies} title={t("fl.fam.title")} data-testid="fl-families">
+                            {familiesBusy ? "…" : t("fl.fam.button")}
+                          </button>
                         </>
                       )}
                     </span>
@@ -764,6 +812,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                   ) : (
                     <>
                     {pruneMsg && <div className="dim" style={{ fontSize: 11, margin: "4px 0 6px" }}>{pruneMsg}</div>}
+                    {regimes && <RegimeHeatmap r={regimes} />}
                     <ul className="lab-saved">
                       {computeVisible().map((f) => {
                         const k = key(f);
@@ -776,6 +825,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                             transfer={transfer[k]}
                             serverHealth={serverHealth[k]}
                             marginal={marginal[k]}
+                            family={families[k]}
                             selected={selected.has(k)}
                             aiEnabled={aiEnabled}
                             costBps={costTouched ? costBps : (costs[f.market] ?? null)}
@@ -805,6 +855,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                         <option value="ic">{t("fl.cp.ic")}</option>
                         <option value="equal">{t("fl.cp.equal")}</option>
                         <option value="rolling">{t("fl.cp.rolling")}</option>
+                        <option value="family">{t("fl.cp.family")}</option>
                       </select>
                       <button className="btn" onClick={() => openInPipeline(saved[0]?.market ?? "us")} title={t("fl.pl.title")}>
                         {t("fl.pl.button")}
@@ -825,7 +876,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                       <div className="fl-bt__head dim">
                         {t("fl.cp.head", {
                           n: String(compositeResult.components.length),
-                          w: compositeResult.weighting === "ic" ? t("fl.cp.ic") : compositeResult.weighting === "rolling" ? t("fl.cp.rolling") : t("fl.cp.equal"),
+                          w: compositeResult.weighting === "ic" ? t("fl.cp.ic") : compositeResult.weighting === "rolling" ? t("fl.cp.rolling") : compositeResult.weighting === "family" ? t("fl.cp.family") : t("fl.cp.equal"),
                           c: compositeResult.max_pair_corr.toFixed(2),
                         })}
                       </div>

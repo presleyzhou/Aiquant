@@ -850,7 +850,7 @@ def composite_backtest_blocking(
     if len(factors) > 8:
         raise factor_dsl.FactorError("composite supports at most 8 factors")
     market = normalize_market(market)
-    weighting = weighting if weighting in ("equal", "ic", "rolling") else "ic"
+    weighting = weighting if weighting in ("equal", "ic", "rolling", "family") else "ic"
 
     panel = _load_panel_blocking(market)
     close = panel["close"]
@@ -909,6 +909,8 @@ def composite_backtest_blocking(
             raw = [abs(c["is_ic"]) for c in components]
             total = sum(raw)
             weights = [r / total if total > 1e-9 else 1 / n for r in raw]
+        elif weighting == "family":
+            weights = family_weights(factors, market)
         else:
             weights = [1 / n] * n
         combined = sum(r * w for r, w in zip(ranked_list, weights, strict=False))
@@ -1268,3 +1270,134 @@ def prune_library_blocking(factors: list[dict], market: str, top_n: int = 5, reb
             "decayed": decayed, "verdict": verdict, "reason": reason,
         })
     return {"market": market, "blend_sharpe": round(full, 3), "n": len(factors), "members": out}
+
+
+# --------------------------------------------------------- regime heatmap
+
+
+def regimes_blocking(factors: list[dict], market: str) -> dict:
+    """Period-by-period validity of a set of factors — the forward-looking
+    version of decay monitoring. Daily markets are cut into calendar quarters,
+    hourly ones into ISO weeks; each cell is the mean sign-aligned IC in that
+    window and whether it clears the loose bar. Nothing is re-fitted here: the
+    expressions are fixed, only the evaluation window moves."""
+    market = normalize_market(market)
+    factors = [f for f in factors if str(f.get("expression", "")).strip()][:12]
+    if not factors:
+        raise factor_dsl.FactorError("regimes needs at least one factor")
+    panel = _load_panel_blocking(market)
+    close = panel["close"]
+    hourly = is_hourly(market)
+    freq = "W" if hourly else "Q"
+    bar = 0.005 if hourly else MODES["loose"][0]
+    min_bars = 24 * 3 if hourly else 20
+
+    rows = []
+    all_labels: set[str] = set()
+    for f in factors:
+        expr = str(f["expression"])
+        h = max(1, min(30, int(f.get("horizon", 10) or 10)))
+        values, _ = factor_dsl.compute(expr, panel)
+        fwd = close.pct_change(h).shift(-h)
+        ic = _daily_rank_ic(values, fwd)
+        if len(ic) < min_bars:
+            rows.append({"expression": expr, "cells": {}, "pass_rate": None, "sign": 1, "overall_ic": None})
+            continue
+        sign = -1.0 if bool(f.get("invert")) else (1.0 if float(ic.mean()) >= 0 else -1.0)
+        cells = {}
+        for period, part in ic.groupby(ic.index.to_period(freq)):
+            if len(part) < min_bars:
+                continue
+            m = float(part.mean()) * sign
+            label = str(period)
+            all_labels.add(label)
+            cells[label] = {"ic": round(m, 4), "n": int(len(part)), "pass": bool(m >= bar)}
+        passes = [c["pass"] for c in cells.values()]
+        rows.append({
+            "expression": expr, "sign": int(sign), "cells": cells,
+            "pass_rate": round(sum(passes) / len(passes), 2) if passes else None,
+            "overall_ic": round(float(ic.mean()) * sign, 4),
+        })
+    return {"market": market, "window": "week" if hourly else "quarter", "bar": bar, "windows": sorted(all_labels), "factors": rows,
+            "note": "cells are mean sign-aligned IC per window; pass = at or above the loose bar"}
+
+
+# ------------------------------------------------------------ factor families
+
+FAMILY_CORR = 0.5  # single-linkage threshold on |rank-value correlation|
+
+
+def _family_label(expression: str, sign: int) -> str:
+    e = expression.lower()
+    if "volume" in e or "vwap" in e:
+        return "volume"
+    if "ts_std" in e or "abs(" in e:
+        return "volatility"
+    if "high" in e or "low" in e:
+        return "range"
+    if "delta" in e or "ts_rank" in e or "delay" in e or "ts_mean" in e:
+        return "reversal" if sign < 0 else "momentum"
+    return "mixed"
+
+
+def families_blocking(factors: list[dict], market: str) -> dict:
+    """Cluster a library into families by |correlation| of rank values
+    (single linkage at 0.5), name each family from its members' operators,
+    and report the pairwise matrix. Used to keep composites from being one
+    idea written five ways."""
+    market = normalize_market(market)
+    factors = [f for f in factors if str(f.get("expression", "")).strip()][:12]
+    if len(factors) < 2:
+        raise factor_dsl.FactorError("families need at least 2 factors")
+    panel = _load_panel_blocking(market)
+    ranked = []
+    for f in factors:
+        values, _ = factor_dsl.compute(str(f["expression"]), panel)
+        if bool(f.get("invert")):
+            values = -values
+        ranked.append(values.rank(axis=1, pct=True).stack())
+    n = len(ranked)
+    corr = [[1.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            pair = pd.concat([ranked[i], ranked[j]], axis=1).dropna()
+            c = float(pair.iloc[:, 0].corr(pair.iloc[:, 1])) if len(pair) > 200 else 0.0
+            corr[i][j] = corr[j][i] = round(c if np.isfinite(c) else 0.0, 3)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if abs(corr[i][j]) >= FAMILY_CORR:
+                parent[find(i)] = find(j)
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    families = []
+    for k, members in enumerate(sorted(groups.values(), key=lambda m: -len(m))):
+        labels = [_family_label(str(factors[i]["expression"]), -1 if factors[i].get("invert") else 1) for i in members]
+        label = max(set(labels), key=labels.count)
+        intra = [abs(corr[a][b]) for a in members for b in members if a < b]
+        families.append({
+            "id": k, "label": label, "members": [str(factors[i]["expression"]) for i in members],
+            "mean_abs_corr": round(sum(intra) / len(intra), 3) if intra else None,
+        })
+    return {"market": market, "threshold": FAMILY_CORR, "expressions": [str(f["expression"]) for f in factors],
+            "corr": corr, "families": families, "n_families": len(families)}
+
+
+def family_weights(factors: list[dict], market: str) -> list[float]:
+    """Equal weight per family, equal within — five momentum variants share
+    one family's budget instead of dominating a composite."""
+    fam = families_blocking(factors, market)
+    of = {}
+    for f in fam["families"]:
+        for e in f["members"]:
+            of[e] = len(f["members"])
+    nf = fam["n_families"]
+    return [1.0 / (nf * of[str(f["expression"])]) for f in factors]

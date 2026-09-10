@@ -198,6 +198,25 @@ export interface AdminWithdrawal {
   settled_at?: number | null;
 }
 
+export interface RegimeCell { ic: number; n: number; pass: boolean }
+export interface RegimesResult {
+  market: string;
+  window: "quarter" | "week";
+  bar: number;
+  windows: string[];
+  factors: Array<{ expression: string; sign: number; cells: Record<string, RegimeCell>; pass_rate: number | null; overall_ic: number | null }>;
+  note: string;
+}
+
+export interface FamiliesResult {
+  market: string;
+  threshold: number;
+  expressions: string[];
+  corr: number[][];
+  families: Array<{ id: number; label: string; members: string[]; mean_abs_corr: number | null }>;
+  n_families: number;
+}
+
 export interface PruneResult {
   market: string;
   blend_sharpe: number;
@@ -1260,6 +1279,11 @@ export const api = {
     ops: (token: string) =>
       fetch("/api/admin/ops?max_factors=60&monitor_limit=10", { method: "POST", headers: { "X-Admin-Token": token } }).then(json<AdminOpsRun>),
   },
+
+  factorRegimes: (body: { factors: Array<{ expression: string; invert?: boolean; horizon?: number }>; market: string }) =>
+    fetch("/api/factors/regimes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<RegimesResult>),
+  factorFamilies: (body: { factors: Array<{ expression: string; invert?: boolean; horizon?: number }>; market: string }) =>
+    fetch("/api/factors/families", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<FamiliesResult>),
 
   factorPrune: (body: { factors: Array<{ expression: string; invert?: boolean; horizon?: number }>; market: string; top_n?: number; rebalance?: number }) =>
     fetch("/api/factors/prune", {

@@ -4797,3 +4797,14 @@ tbody tr:hover td {
   .lab .panel__head { flex-wrap: wrap; row-gap: 6px; }
   .lab .panel__meta { flex-wrap: wrap; justify-content: flex-end; }
 }
+
+/* ---- regime heatmap + family badge ------------------------------------- */
+.rh { margin: 4px 0 10px; }
+.rh__note { font-size: 11px; margin-bottom: 6px; }
+.rh__table { border-collapse: separate; border-spacing: 2px; font-size: 11px; }
+.rh__table th { color: var(--muted); font-weight: 500; padding: 2px 4px; white-space: nowrap; }
+.rh__win { font-family: var(--mono, ui-monospace, monospace); font-size: 10px; }
+.rh__expr { text-align: left; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rh__expr code { font-size: 10.5px; }
+.rh__cell { width: 34px; height: 22px; text-align: center; border-radius: 4px; color: rgba(0,0,0,0.65); font-weight: 700; }
+.fl-badge--family { color: var(--violet, #a78bfa); border-color: rgba(167,139,250,0.5); }

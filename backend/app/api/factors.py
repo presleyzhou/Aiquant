@@ -19,10 +19,12 @@ from app.services.factor_mine import (
     analyze_factor_blocking,
     check_factor_blocking,
     composite_backtest_blocking,
+    families_blocking,
     marginal_contribution_blocking,
     mine_stream,
     portfolio_backtest_blocking,
     prune_library_blocking,
+    regimes_blocking,
 )
 from app.services.ratelimit import limiter
 
@@ -65,7 +67,7 @@ class CompositeFactor(BaseModel):
 class CompositeRequest(BaseModel):
     factors: list[CompositeFactor] = Field(min_length=2, max_length=8)
     market: str = Field("us", pattern="^(us|crypto|crypto_1h)$")
-    weighting: str = Field("ic", pattern="^(ic|equal|rolling)$", description="ic | equal | rolling")
+    weighting: str = Field("ic", pattern="^(ic|equal|rolling|family)$", description="ic | equal | rolling | family")
     top_n: int = Field(5, ge=2, le=10)
     rebalance: int = Field(10, ge=1, le=30)
 
@@ -379,3 +381,35 @@ async def panel_status(market: str = Query("us", pattern="^(us|crypto|crypto_1h)
     except LookupError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"market": market, **panel_providers.coverage_of(panel)}
+
+
+class RegimesRequest(BaseModel):
+    factors: list[CompositeFactor] = Field(min_length=1, max_length=12)
+    market: str = Field("us", pattern="^(us|crypto|crypto_1h)$")
+
+
+@router.post("/regimes")
+async def factor_regimes(req: RegimesRequest) -> dict:
+    """Period-by-period IC heatmap (quarters for daily markets, weeks for hourly)."""
+    try:
+        return await asyncio.to_thread(regimes_blocking, [f.model_dump() for f in req.factors], req.market)
+    except factor_dsl.FactorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class FamiliesRequest(BaseModel):
+    factors: list[CompositeFactor] = Field(min_length=2, max_length=12)
+    market: str = Field("us", pattern="^(us|crypto|crypto_1h)$")
+
+
+@router.post("/families")
+async def factor_families(req: FamiliesRequest) -> dict:
+    """Cluster factors into families by rank-value correlation (single linkage at 0.5)."""
+    try:
+        return await asyncio.to_thread(families_blocking, [f.model_dump() for f in req.factors], req.market)
+    except factor_dsl.FactorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

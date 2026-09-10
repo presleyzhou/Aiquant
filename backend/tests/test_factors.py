@@ -10,13 +10,6 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services import factor_dsl
-
-
-@pytest.fixture(autouse=True)
-def _isolated_cache(tmp_path, monkeypatch):
-    """Never let a test's synthetic panel land in the real disk cache."""
-    monkeypatch.setenv("AIQUANT_CACHE_DIR", str(tmp_path))
-    yield
 from app.services.factor_mine import (
     MIN_ABS_IC,
     MODES,
@@ -28,6 +21,13 @@ from app.services.factor_mine import (
     evaluate_candidate,
     portfolio_backtest_blocking,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cache(tmp_path, monkeypatch):
+    """Never let a test's synthetic panel land in the real disk cache."""
+    monkeypatch.setenv("AIQUANT_CACHE_DIR", str(tmp_path))
+    yield
 
 
 def _panel(n_days: int = 400, n_syms: int = 12, seed: int = 7) -> dict[str, pd.DataFrame]:
@@ -791,3 +791,42 @@ def test_hourly_market_loads_through_the_hourly_chain(monkeypatch):
     factor_mine._load_panel_blocking("crypto_1h")
     assert seen == {"period": "90d", "market": "crypto", "interval": "1h", "n": len(factor_mine.UNIVERSES["crypto"])}
     factor_mine._PANEL_CACHE.pop("crypto_1h", None)
+
+
+def test_regime_heatmap_by_quarter(monkeypatch):
+    from app.services import factor_mine
+
+    panel = _panel(n_days=500, n_syms=12)
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    out = factor_mine.regimes_blocking([{"expression": "rank(delta(close, 5))", "horizon": 10}, {"expression": "rank(ts_std(close, 10))", "horizon": 10, "invert": True}], "us")
+    assert out["window"] == "quarter" and len(out["windows"]) >= 5
+    row = out["factors"][0]
+    assert set(row["cells"]) <= set(out["windows"]) and all("ic" in c and "pass" in c for c in row["cells"].values())
+    assert 0 <= row["pass_rate"] <= 1
+    client = TestClient(app)
+    r = client.post("/api/factors/regimes", json={"factors": [{"expression": "rank(delta(close, 5))", "horizon": 10}], "market": "us"})
+    assert r.status_code == 200 and r.json()["factors"][0]["expression"] == "rank(delta(close, 5))"
+    assert client.post("/api/factors/regimes", json={"factors": [], "market": "us"}).status_code == 422
+
+
+def test_factor_families_and_family_weighted_composite(monkeypatch):
+    from app.services import factor_mine
+
+    panel = _panel(n_days=500, n_syms=12)
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    factors = [
+        {"expression": "rank(delta(close, 5))", "horizon": 10},
+        {"expression": "rank(close / delay(close, 5))", "horizon": 10},   # same idea → same family
+        {"expression": "rank(ts_std(close, 10))", "horizon": 10},
+    ]
+    fam = factor_mine.families_blocking(factors, "us")
+    assert fam["n_families"] <= 2 and len(fam["corr"]) == 3
+    biggest = fam["families"][0]
+    assert set(biggest["members"]) >= {"rank(delta(close, 5))", "rank(close / delay(close, 5))"} and biggest["label"] == "momentum"
+    w = factor_mine.family_weights(factors, "us")
+    assert abs(sum(w) - 1) < 1e-9 and w[2] > w[0]  # the lone volatility factor gets a whole family's budget
+    out = factor_mine.composite_backtest_blocking(factors, "us", weighting="family", top_n=3, rebalance=10)
+    assert out["weighting"] == "family" and abs(sum(c["weight"] for c in out["components"]) - 1) < 0.01
+    client = TestClient(app)
+    r = client.post("/api/factors/families", json={"factors": factors, "market": "us"})
+    assert r.status_code == 200 and r.json()["n_families"] >= 1

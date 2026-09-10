@@ -17,6 +17,7 @@ interface Props {
   transfer: CheckState;
   serverHealth?: FactorHealth;
   marginal: MarginalState;
+  family?: string;
   selected: boolean;
   aiEnabled: boolean;
   costBps: number | null;
@@ -34,7 +35,7 @@ interface Props {
  * badges, report card, and the action strip (backtest, deploy, transfer,
  * increment, remove). Pure presentation — every mutation is a callback. */
 export function FactorLibraryRow({
-  f, k, health: h, transfer: tr, serverHealth: sh, marginal: mg, selected, aiEnabled, costBps, backtesting, canMarginal,
+  f, k, health: h, transfer: tr, serverHealth: sh, marginal: mg, family, selected, aiEnabled, costBps, backtesting, canMarginal,
   onToggleSelect, onBacktest, onTransfer, onMarginal, onRemove, onBestHorizon,
 }: Props) {
   const { t } = useT();
@@ -70,6 +71,7 @@ export function FactorLibraryRow({
             {sh.decayed ? ` · ${t("fl.sh.decayed")}` : ""}
           </div>
         )}
+        {family && <div className="fl-badge fl-badge--family" title={t("fl.fam.badgeTitle")}>{t(`fl.fam.${family.split("#")[0]}` as "fl.fam.momentum")} · {family.split("#")[1]}</div>}
         {f.prune_verdict && f.prune_verdict !== "keep" && (
           <div className={`fl-badge ${(f.prune_strikes ?? 0) >= 2 ? "fl-badge--warn" : ""}`} title={t("fl.pr.badgeTitle")}>
             {(f.prune_strikes ?? 0) >= 2 ? t("fl.pr.retire") : t(`fl.pr.${f.prune_verdict}` as "fl.pr.watch")}
