@@ -64,6 +64,12 @@ class BacktestRequest(BaseModel):
     initial_capital: float = Field(100_000.0, gt=0)
     commission_bps: float = Field(5.0, ge=0, le=100)
     slippage_bps: float = Field(2.0, ge=0, le=100)
+    # risk management (optional): exits decided on the previous close, filled next open
+    stop_loss_pct: float | None = Field(default=None, gt=0, le=90)
+    take_profit_pct: float | None = Field(default=None, gt=0, le=500)
+    trailing_stop_pct: float | None = Field(default=None, gt=0, le=90)
+    vol_target_pct: float | None = Field(default=None, gt=0, le=200, description="annualised target vol; sizes the position")
+    max_position: float = Field(1.0, ge=0.05, le=1.0)
     # kronos_signal: forecast horizon (= rebalance cadence, in bars)
     kronos_horizon: int = Field(14, ge=5, le=60)
 
@@ -89,6 +95,11 @@ async def run_backtest(req: BacktestRequest):
         commission_bps=req.commission_bps,
         slippage_bps=req.slippage_bps,
         kronos_horizon=req.kronos_horizon,
+        stop_loss_pct=req.stop_loss_pct,
+        take_profit_pct=req.take_profit_pct,
+        trailing_stop_pct=req.trailing_stop_pct,
+        vol_target_pct=req.vol_target_pct,
+        max_position=req.max_position,
     )
 
     want_long = None

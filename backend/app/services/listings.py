@@ -45,6 +45,32 @@ def _secret() -> bytes:
     return s.encode()
 
 
+def health_key(market: str, expression: str) -> str:
+    """KV key of the daily server recheck for one factor (shared with admin)."""
+    return "health:" + hashlib.sha1(f"{market}|{expression}".encode()).hexdigest()[:20]
+
+
+def listing_health(row: dict) -> dict | None:
+    """Latest server recheck for a factor listing → the buyer-facing summary:
+    days listed, recent (out-of-sample) IC in the accepted direction, grades."""
+    if row.get("type") != "factor":
+        return None
+    pl = row.get("payload") or {}
+    doc = kvstore.get(health_key(str(pl.get("market", "us")), str(pl.get("expression", ""))))
+    if not doc:
+        return None
+    direction = -1.0 if float(doc.get("is_ic") or 0) < 0 else 1.0
+    return {
+        "checked_at": doc.get("checked_at"),
+        "as_of": doc.get("as_of"),
+        "recent_ic": round(float(doc.get("recent_ic") or 0) * direction, 4),  # sign-aligned: >0 = still works
+        "oos_ic": doc.get("oos_ic"),
+        "grades": doc.get("grades"),
+        "decayed": bool(doc.get("decayed")),
+        "best_horizon": doc.get("best_horizon"),
+    }
+
+
 def seller_hash(seller_secret: str) -> str:
     return hashlib.sha256(seller_secret.encode()).hexdigest()
 
@@ -226,7 +252,9 @@ def serialize(row: dict, *, unlocked: bool = False) -> dict:
         "locked": not (free or unlocked),
         "payout_method": row["payout"]["method"],
         "created_at": row["created_at"],
+        "days_listed": int((time.time() - row["created_at"]) // 86400),
         "sales": sales_count(row["id"]),
+        "health": listing_health(row),
     }
 
 

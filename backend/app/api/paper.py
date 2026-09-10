@@ -46,6 +46,14 @@ class TrackRequest(BaseModel):
 # ------------------------------------------------------------- helpers
 
 
+def _opt_float(v) -> float | None:
+    try:
+        return float(v) if v not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        return None
+
+
+
 def _rebase(curve: list[dict], lo: int | None, hi: int | None) -> list[dict]:
     """Slice [lo, hi) by epoch and rebase to 100k at the first kept bar."""
     part = [p for p in curve if (lo is None or p["time"] >= lo) and (hi is None or p["time"] < hi)]
@@ -170,6 +178,11 @@ async def compute_track(kind: str, started_at: date, config: dict) -> dict:
             rsi_oversold=float(config.get("rsi_oversold", 30)),
             rsi_overbought=float(config.get("rsi_overbought", 70)),
             kronos_horizon=int(config.get("kronos_horizon", 14)),
+            stop_loss_pct=_opt_float(config.get("stop_loss_pct")),
+            take_profit_pct=_opt_float(config.get("take_profit_pct")),
+            trailing_stop_pct=_opt_float(config.get("trailing_stop_pct")),
+            vol_target_pct=_opt_float(config.get("vol_target_pct")),
+            max_position=float(config.get("max_position") or 1.0),
         )
         want_long = None
         if cfg.strategy == "kronos_signal":

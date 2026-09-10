@@ -90,8 +90,7 @@ async def all_listings():
 # --------------------------------------------------------- scheduled recheck
 
 def _health_key(market: str, expression: str) -> str:
-    import hashlib
-    return "health:" + hashlib.sha1(f"{market}|{expression}".encode()).hexdigest()[:20]
+    return listings.health_key(market, expression)
 
 
 def _recheck_blocking(max_factors: int, deadline: float | None = None) -> dict:

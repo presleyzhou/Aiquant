@@ -334,3 +334,19 @@ def test_admin_warm_reports_coverage_and_refresh_redownloads(monkeypatch):
     assert calls["downloads"] == n + 1
     monkeypatch.setattr(get_settings(), "admin_token", None)
     factor_mine._PANEL_CACHE.clear()
+
+
+def test_listing_health_badge_comes_from_recheck():
+    from app.services import kvstore
+
+    client = TestClient(app)
+    item = client.post("/api/marketplace/listings", json=_listing(type="factor", price_usd=0, payout={},
+                       payload={"expression": "rank(delta(close, 7))", "market": "us", "horizon": 10})).json()["item"]
+    assert item["health"] is None and item["days_listed"] == 0
+    kvstore.put(listings.health_key("us", "rank(delta(close, 7))"), {
+        "is_ic": -0.02, "oos_ic": -0.015, "recent_ic": -0.018, "as_of": "2026-09-01", "checked_at": 1_800_000_000,
+        "grades": {"predictive": "B", "stability": "B", "robustness": "A", "tradability": "C", "significance": "B"}, "decayed": False, "best_horizon": 20,
+    })
+    pub = next(i for i in client.get("/api/marketplace/items?type=factor").json()["items"] if i["id"] == item["id"])
+    assert pub["health"]["recent_ic"] == 0.018            # sign-aligned: the factor was accepted inverted
+    assert pub["health"]["grades"]["robustness"] == "A" and pub["health"]["decayed"] is False

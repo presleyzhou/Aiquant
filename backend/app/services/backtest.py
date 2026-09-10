@@ -32,6 +32,17 @@ class BacktestConfig:
     slippage_bps: float = 2.0  # 0.02% per side
     # kronos_signal: forecast horizon = rebalance cadence, in bars.
     kronos_horizon: int = 14
+    # --- risk management (all optional; None / 1.0 = off) -------------------
+    # Exits are decided on the PREVIOUS bar's close and filled at this bar's
+    # open, like every other signal here — no look-ahead.
+    stop_loss_pct: float | None = None       # exit when close ≤ entry × (1 − x%)
+    take_profit_pct: float | None = None     # exit when close ≥ entry × (1 + x%)
+    trailing_stop_pct: float | None = None   # exit when close ≤ running peak × (1 − x%)
+    # Position sizing: fraction of equity committed at entry. With a vol
+    # target the fraction is target / realised 20-bar vol (annualised),
+    # capped by max_position; without one it is max_position itself.
+    vol_target_pct: float | None = None
+    max_position: float = 1.0
 
 
 @dataclass
@@ -43,6 +54,7 @@ class Trade:
     exit_price: float | None = None
     pnl: float | None = None
     return_pct: float | None = None
+    exit_reason: str = "signal"
 
 
 @dataclass
@@ -126,6 +138,29 @@ def run(
     closes = df["Close"].to_numpy(dtype=float)
     times = [int(pd.Timestamp(ts).timestamp()) for ts in df.index]
     desired = want_long.to_numpy(dtype=bool)
+    # realised vol (annualised) of the trailing 20 closes, known at each bar
+    rets = pd.Series(closes).pct_change()
+    realised_vol = (rets.rolling(20).std() * np.sqrt(252)).to_numpy(dtype=float)
+    max_pos = max(0.05, min(1.0, float(cfg.max_position)))
+
+    peak_close = 0.0                 # running peak since entry (trailing stop)
+    blocked = False                  # after a risk exit, wait for the signal to reset
+
+    def close_position(i: int, fill: float, reason: str) -> None:
+        nonlocal cash, shares, open_trade
+        proceeds = shares * fill
+        cost = proceeds * cost_rate
+        cash += proceeds - cost
+        if open_trade:
+            open_trade.exit_time = times[i]
+            open_trade.exit_price = fill
+            open_trade.exit_reason = reason
+            gross_entry = open_trade.shares * open_trade.entry_price
+            open_trade.pnl = round(proceeds - cost - gross_entry, 2)
+            open_trade.return_pct = round((open_trade.pnl / gross_entry * 100) if gross_entry else 0.0, 3)
+            trades.append(open_trade)
+            open_trade = None
+        shares = 0.0
 
     for i in range(len(df)):
         # Act on the PREVIOUS bar's signal, filled at THIS bar's open.
@@ -135,29 +170,41 @@ def run(
             # float() rather than the raw numpy scalar: np.float64 propagates
             # through every derived figure and then fails JSON serialisation.
             fill = float(opens[i])
+            prev_close = float(closes[i - 1])
 
-            if target_long and shares == 0.0:
-                budget = cash / (1 + cost_rate)
+            # --- risk exits, evaluated on yesterday's close -----------------
+            if shares > 0.0 and open_trade is not None:
+                peak_close = max(peak_close, prev_close)
+                entry = open_trade.entry_price
+                reason = None
+                if cfg.stop_loss_pct and prev_close <= entry * (1 - cfg.stop_loss_pct / 100):
+                    reason = "stop_loss"
+                elif cfg.take_profit_pct and prev_close >= entry * (1 + cfg.take_profit_pct / 100):
+                    reason = "take_profit"
+                elif cfg.trailing_stop_pct and peak_close > 0 and prev_close <= peak_close * (1 - cfg.trailing_stop_pct / 100):
+                    reason = "trailing_stop"
+                if reason:
+                    close_position(i, fill, reason)
+                    blocked = True   # do not re-enter on the same signal leg
+
+            if blocked and not target_long:
+                blocked = False      # the signal reset; the next long leg may enter
+
+            if target_long and shares == 0.0 and not blocked:
+                frac = max_pos
+                if cfg.vol_target_pct:
+                    rv = realised_vol[i - 1]
+                    if np.isfinite(rv) and rv > 1e-9:
+                        frac = min(max_pos, (cfg.vol_target_pct / 100) / rv)
+                budget = cash * frac / (1 + cost_rate)
                 shares = budget / fill
                 cost = shares * fill * cost_rate
                 cash -= shares * fill + cost
                 open_trade = Trade(entry_time=times[i], entry_price=fill, shares=shares)
+                peak_close = fill
 
             elif not target_long and shares > 0.0:
-                proceeds = shares * fill
-                cost = proceeds * cost_rate
-                cash += proceeds - cost
-                if open_trade:
-                    open_trade.exit_time = times[i]
-                    open_trade.exit_price = fill
-                    gross_entry = open_trade.shares * open_trade.entry_price
-                    open_trade.pnl = round(proceeds - cost - gross_entry, 2)
-                    open_trade.return_pct = round(
-                        (open_trade.pnl / gross_entry * 100) if gross_entry else 0.0, 3
-                    )
-                    trades.append(open_trade)
-                    open_trade = None
-                shares = 0.0
+                close_position(i, fill, "signal")
 
         equity_curve.append(
             {"time": times[i], "value": round(cash + shares * float(closes[i]), 2)}
@@ -220,6 +267,7 @@ def _trade_dict(t: Trade) -> dict:
         "shares": round(t.shares, 6),
         "pnl": t.pnl,
         "return_pct": t.return_pct,
+        "exit_reason": t.exit_reason,
     }
 
 
@@ -269,6 +317,7 @@ def _stats(
         "sortino": round(float(sortino), 3),
         "max_drawdown_pct": round(max_dd, 3),
         "trade_count": len(closed),
+        "exits_by_reason": {r: sum(1 for t in closed if t.exit_reason == r) for r in sorted({t.exit_reason for t in closed})},
         "win_rate_pct": round(len(wins) / len(closed) * 100, 2) if closed else 0.0,
         "profit_factor": round(gross_win / gross_loss, 3) if gross_loss else None,
         "avg_win": round(gross_win / len(wins), 2) if wins else 0.0,
