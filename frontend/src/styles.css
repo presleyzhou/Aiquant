@@ -4811,3 +4811,11 @@ tbody tr:hover td {
 
 .mk-badge--live { color: var(--up, #3be0a0); border-color: rgba(59,224,160,0.45); }
 .mk-badge--warn { color: var(--amber, #f0a500); border-color: rgba(240,165,0,0.45); }
+
+/* refund / dispute box in the purchase detail modal */
+.mk-dispute { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); font-size: 12px; }
+.mk-dispute__btn { font-size: 11.5px; opacity: 0.8; }
+.mk-dispute__form textarea { width: 100%; resize: vertical; font: inherit; font-size: 12px; }
+.mk-dispute__status--open strong { color: var(--amber); }
+.mk-dispute__status--refunded strong { color: var(--up); }
+.mk-dispute__status--rejected strong { color: var(--dn); }

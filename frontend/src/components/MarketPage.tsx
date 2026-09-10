@@ -9,7 +9,7 @@ import {
   type PayMethod,
   type PaymentConfig,
   type Wallet,
-} from "../api";
+ type Dispute } from "../api";
 import {
   installedIds,
   isPurchased,
@@ -343,6 +343,7 @@ export function MarketPage({ onRunStrategy }: Props) {
           installed={installed.includes(selected.id)}
           owned={!selected.price || owned[selected.id] === true}
           ownedDemo={purchases()[selected.id]?.demo === true}
+          purchase={purchases()[selected.id]}
           onClose={() => setSelected(null)}
           onToggleInstall={() => handleToggleInstall(selected)}
           onRun={() => runStrategy(items.find((i) => i.id === selected.id) ?? selected)}
@@ -466,12 +467,13 @@ function FootBadge({ item }: { item: MarketItem }) {
 /* ------------------------------------------------------------------ modal */
 
 function DetailModal({
-  item, installed, owned, ownedDemo, onClose, onToggleInstall, onRun, onAddFactor, onBuy,
+  item, installed, owned, ownedDemo, purchase, onClose, onToggleInstall, onRun, onAddFactor, onBuy,
 }: {
   item: MarketItem;
   installed: boolean;
   owned: boolean;
   ownedDemo: boolean;
+  purchase?: PurchaseRecord;
   onClose: () => void;
   onToggleInstall: () => void;
   onRun: () => void;
@@ -627,7 +629,66 @@ function DetailModal({
             </>
           )}
         </div>
+        {owned && item.price && purchase?.chargeId && <DisputeBox orderId={purchase.chargeId} token={purchase.token} />}
       </div>
+    </div>
+  );
+}
+
+/** Refund / dispute entry point for a purchased item: shows the standing
+ *  dispute if one exists, otherwise a short reason form. Ownership is the
+ *  paying account or the entitlement token. */
+function DisputeBox({ orderId, token }: { orderId: string; token?: string }) {
+  const { t } = useT();
+  const [dispute, setDispute] = useState<Dispute | null | undefined>(undefined);
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [windowDays, setWindowDays] = useState<number | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api.disputeLookup(sellerSecret(), orderId, token)
+      .then((r) => { if (alive) { setDispute(r.dispute); setWindowDays(r.refund_window_days); } })
+      .catch(() => { if (alive) setDispute(null); });
+    return () => { alive = false; };
+  }, [orderId, token]);
+  const submit = async () => {
+    setBusy(true); setError(null);
+    try {
+      setDispute(await api.openDispute(sellerSecret(), orderId, reason.trim(), token));
+      setOpen(false);
+    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
+  if (dispute === undefined) return null;
+  const statusKey = dispute ? (`mk.dispute.s.${dispute.status}` as MsgKey) : null;
+  return (
+    <div className="mk-dispute" data-testid="mk-dispute">
+      {dispute ? (
+        <div className={`mk-dispute__status mk-dispute__status--${dispute.status}`} data-testid="mk-dispute-status">
+          <strong>{t(statusKey!)}</strong>
+          <span className="dim"> · {t("mk.dispute.opened", { d: new Date(dispute.at * 1000).toLocaleDateString() })}</span>
+          {dispute.note && <span className="dim"> · {dispute.note}</span>}
+          {dispute.refund?.mode === "wallet" && <span className="dim"> · {t("mk.dispute.refundWallet", { a: dispute.refund.amount.toFixed(2) })}</span>}
+          {dispute.refund?.mode === "manual" && <span className="dim"> · {t("mk.dispute.refundManual")}</span>}
+        </div>
+      ) : !open ? (
+        <button type="button" className="ghost mk-dispute__btn" onClick={() => setOpen(true)} data-testid="mk-dispute-open"
+          title={windowDays ? t("mk.dispute.window", { n: String(windowDays) }) : undefined}>
+          {t("mk.dispute.button")}
+        </button>
+      ) : (
+        <div className="mk-dispute__form">
+          <textarea className="select" rows={2} placeholder={t("mk.dispute.placeholder")} value={reason} maxLength={500}
+            onChange={(e) => setReason(e.target.value)} data-testid="mk-dispute-reason" aria-label={t("mk.dispute.button")} />
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+            <button type="button" className="btn btn--mini" disabled={busy || reason.trim().length < 4} onClick={submit} data-testid="mk-dispute-submit">{busy ? "…" : t("mk.dispute.submit")}</button>
+            <button type="button" className="ghost" onClick={() => setOpen(false)}>{t("mk.dispute.cancel")}</button>
+            {windowDays !== null && <span className="dim" style={{ fontSize: 11 }}>{t("mk.dispute.window", { n: String(windowDays) })}</span>}
+          </div>
+          {error && <div className="dn" style={{ fontSize: 11.5, marginTop: 4 }}>{error}</div>}
+        </div>
+      )}
     </div>
   );
 }
@@ -1405,6 +1466,7 @@ function WalletPanel({ wallet, onTopUp, onChanged }: { wallet: Wallet | null; on
 
   const KIND: Record<string, MsgKey> = {
     topup: "wallet.k.topup", purchase: "wallet.k.purchase", sale: "wallet.k.sale", withdraw: "wallet.k.withdraw",
+    refund: "wallet.k.refund", clawback: "wallet.k.clawback",
   };
 
   return (

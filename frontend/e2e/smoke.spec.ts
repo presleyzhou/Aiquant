@@ -443,6 +443,21 @@ async function mockApi(page: Page) {
         { step: "warm", ok: true, seconds: 12.0 }, { step: "recheck", ok: true, seconds: 5.0 }, { step: "monitor", ok: true, seconds: 3.0 } ] });
     if (path === "/api/admin/withdrawals") return json({ withdrawals: [{ id: "wd_1", account: "abcdef123456", amount: 4, method: "crypto", address: "0xabc", status: "pending", at: 1_700_000_000 }] });
     if (path === "/api/admin/orders") return json({ orders: [] });
+    if (path === "/api/admin/disputes")
+      return json({ refund_window_days: 14, disputes: [{ id: "dp_wal_1", order_id: "wal_1", item_id: "c_e2e", account: "abcdef123456", provider: "wallet", amount: "3.50", currency: "USD",
+        demo: false, reason: "策略无法加载", status: "open", at: 1_700_000_000, resolved_at: null, resolution: null, note: "", refund: null }] });
+    if (path.startsWith("/api/admin/disputes/"))
+      return json({ id: "dp_wal_1", order_id: "wal_1", item_id: "c_e2e", account: "abcdef123456", provider: "wallet", amount: "3.50", currency: "USD", demo: false,
+        reason: "策略无法加载", status: "refunded", at: 1_700_000_000, resolved_at: 1_700_000_500, resolution: "refund", note: "verified",
+        refund: { mode: "wallet", amount: 3.5, demo: false, clawback: { status: "done", amount: 3.15 } } });
+    if (path.startsWith("/api/admin/audit"))
+      return json({ cap: 2000, entries: [
+        { id: "1700000500000-0001-ab", at: 1_700_000_500, action: "dispute.refunded", actor: "admin", target: "wal_1", detail: { mode: "wallet", amount: 3.5, clawback: "done" } },
+        { id: "1700000000000-0000-aa", at: 1_700_000_000, action: "order.confirmed", actor: "account:abcdef123456", target: "wal_1", detail: { item: "c_e2e", amount: "3.50" } } ] });
+    if (path === "/api/wallet/disputes/lookup") return json({ dispute: null, refund_window_days: 14 });
+    if (path === "/api/wallet/disputes")
+      return json({ id: "dp_demo_e2e", order_id: "demo_e2e", item_id: "c_e2e", account: null, provider: "demo", amount: "3.50", currency: "USD", demo: true,
+        reason: route.request().postDataJSON().reason, status: "open", at: 1_700_000_000, resolved_at: null, resolution: null, note: "", refund: null });
     if (path === "/api/admin/listings") return json({ listings: [] });
     if (path === "/api/admin/integrations")
       return json({ version: "e2e", checked_at: 1_700_000_000, counts: { green: 2, amber: 1, red: 1, off: 1 }, integrations: [
@@ -706,6 +721,15 @@ test("marketplace: list a paid strategy, buy it in demo mode, payload unlocks", 
   // detail modal stays open; entitlement stored, payload merged → run button appears
   await expect(page.getByRole("button", { name: /在回测中运行/ })).toBeVisible();
   await expect(page.getByText("演示购买")).toBeVisible();
+  // refund / dispute entry point: reason form → open dispute shown in place of the button
+  let sent: Record<string, unknown> | null = null;
+  await page.route("**/api/wallet/disputes", async (route) => { sent = route.request().postDataJSON(); await route.fallback(); });
+  await page.getByTestId("mk-dispute-open").click();
+  await expect(page.getByTestId("mk-dispute-submit")).toBeDisabled();
+  await page.getByTestId("mk-dispute-reason").fill("策略无法加载，与描述不符");
+  await page.getByTestId("mk-dispute-submit").click();
+  await expect(page.getByTestId("mk-dispute-status")).toContainText("争议处理中");
+  expect(sent).toMatchObject({ order_id: "demo_e2e", reason: "策略无法加载，与描述不符", token: "tok.sig" });
 });
 
 test("wallet: demo top-up credits the balance and pays for an item", async ({ page }) => {
@@ -1553,4 +1577,32 @@ test("marketplace: live health badge shows days listed, recent IC and grades", a
   await expect(card.locator(".mk-badge--live")).toContainText("+0.031");
   await card.click();
   await expect(page.getByTestId("mk-health")).toContainText("ABBAB");
+});
+
+test("admin console: disputes can be refunded and the audit log lists money events", async ({ page }) => {
+  await page.goto("/?admin=1");
+  await page.locator("input[type=password]").fill("e2e-token");
+  await page.getByRole("button", { name: "进入" }).click();
+  const disputes = page.getByTestId("adm-disputes");
+  await expect(disputes).toContainText("争议与退款");
+  const row = disputes.locator("tr[data-dispute=wal_1]");
+  await expect(row).toContainText("策略无法加载");
+  await expect(row).toContainText("待处理");
+  let resolved: Record<string, unknown> | null = null;
+  await page.route("**/api/admin/disputes/wal_1", async (route) => { resolved = route.request().postDataJSON(); await route.fallback(); });
+  // after the refund the list reloads; return the resolved row from the list endpoint
+  await page.route("**/api/admin/disputes", (route) => route.request().method() === "GET" && resolved
+    ? route.fulfill({ json: { refund_window_days: 14, disputes: [{ id: "dp_wal_1", order_id: "wal_1", item_id: "c_e2e", account: "abcdef123456", provider: "wallet", amount: "3.50", currency: "USD", demo: false,
+        reason: "策略无法加载", status: "refunded", at: 1_700_000_000, resolved_at: 1_700_000_500, resolution: "refund", note: "verified", refund: { mode: "wallet", amount: 3.5, clawback: { status: "done", amount: 3.15 } } }] } })
+    : route.fallback());
+  page.once("dialog", (d) => d.accept("verified"));
+  await row.getByRole("button", { name: "退款", exact: true }).click();
+  await expect(row).toContainText("已退款");
+  await expect(row).toContainText("卖家扣回 done");
+  expect(resolved).toEqual({ action: "refund", note: "verified" });
+  const audit = page.getByTestId("adm-audit");
+  await expect(audit.locator("tbody tr")).toHaveCount(2);
+  await expect(audit.locator("tbody tr").first()).toContainText("dispute.refunded");
+  await expect(audit.locator("tbody tr").first()).toContainText("mode=wallet");
+  await expect(audit.locator("tbody tr").nth(1)).toContainText("account:abcdef123456");
 });

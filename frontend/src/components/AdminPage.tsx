@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type AdminOpsRun, type AdminOverview, type AdminWithdrawal, type MarketItem, type IntegrationsReport, type WarmedPanel } from "../api";
+import { api, type AdminOpsRun, type AdminOverview, type AdminWithdrawal, type MarketItem, type IntegrationsReport, type WarmedPanel , type Dispute, type AuditEntry } from "../api";
 import { useT } from "../i18n";
 import { fallbackTone } from "./pipeline/format";
 
@@ -30,6 +30,8 @@ export function AdminPage() {
   };
   const [withdrawals, setWithdrawals] = useState<AdminWithdrawal[]>([]);
   const [orders, setOrders] = useState<Array<Record<string, unknown>>>([]);
+  const [disputes, setDisputes] = useState<Dispute[]>([]);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [listings, setListings] = useState<Array<MarketItem & { status: string; seller: string }>>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -38,6 +40,8 @@ export function AdminPage() {
     setError(null);
     try {
       const [ov, wd, od, ls] = await Promise.all([api.admin.overview(tok), api.admin.withdrawals(tok), api.admin.orders(tok), api.admin.listings(tok)]);
+      api.admin.disputes(tok).then((r) => setDisputes(r.disputes)).catch(() => setDisputes([]));
+      api.admin.audit(tok).then((r) => setAudit(r.entries)).catch(() => setAudit([]));
       setOverview(ov); setWithdrawals(wd.withdrawals); setOrders(od.orders); setListings(ls.listings);
       api.admin.integrations(tok).then(setInteg).catch(() => setInteg(null));
       sessionStorage.setItem(TOKEN_KEY, tok);
@@ -54,6 +58,11 @@ export function AdminPage() {
     const note = window.prompt(t("adm.noteHint")) ?? "";
     setBusy(true);
     try { await api.admin.updateWithdrawal(token, id, status, note); await load(token); } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
+  const resolveDispute = async (orderId: string, action: "refund" | "reject") => {
+    const note = window.prompt(t(action === "refund" ? "adm.d.refundNote" : "adm.d.rejectNote")) ?? "";
+    setBusy(true); setError(null);
+    try { await api.admin.resolveDispute(token, orderId, action, note); await load(token); } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   };
   const recheck = async () => {
     setBusy(true);
@@ -144,7 +153,7 @@ export function AdminPage() {
         )}
       </section>
       <div className="stat-grid" style={{ marginBottom: 14 }}>
-        {[["adm.c.listings", `${c.active_listings} / ${c.listings}`], ["adm.c.orders", `${c.real_orders} / ${c.orders}`], ["adm.c.gross", `$${overview.gross_usd.toFixed(2)}`], ["adm.c.liab", `$${overview.wallet_liabilities_usd.toFixed(2)}`], ["adm.c.accounts", String(c.accounts_synced)], ["adm.c.pending", String(c.withdrawals_pending)]].map(([k, v]) => (
+        {[["adm.c.listings", `${c.active_listings} / ${c.listings}`], ["adm.c.orders", `${c.real_orders} / ${c.orders}`], ["adm.c.gross", `$${overview.gross_usd.toFixed(2)}`], ["adm.c.liab", `$${overview.wallet_liabilities_usd.toFixed(2)}`], ["adm.c.accounts", String(c.accounts_synced)], ["adm.c.pending", String(c.withdrawals_pending)], ["adm.c.disputes", String(c.disputes_open ?? 0)]].map(([k, v]) => (
           <div className="stat" key={k}><div className="stat__label">{t(k as "adm.c.listings")}</div><div className="stat__value">{v}</div></div>
         ))}
       </div>
@@ -215,6 +224,28 @@ export function AdminPage() {
           </tbody></table></div>
         )}
       </section>
+      <section className="panel mk-mine" data-testid="adm-disputes">
+        <div className="panel__head"><span className="panel__title">{t("adm.disputes")}</span><span className="panel__meta">{disputes.filter((d) => d.status === "open").length} / {disputes.length}</span></div>
+        <p className="dim" style={{ fontSize: 11.5, margin: "0 0 8px" }}>{t("adm.d.help")}</p>
+        {disputes.length === 0 ? <div className="empty" style={{ padding: 14 }}>{t("adm.none")}</div> : (
+          <div style={{ overflowX: "auto" }}><table className="pp-compare mk-mine__table"><thead><tr><th>{t("adm.w.when")}</th><th>{t("adm.o.item")}</th><th>{t("adm.w.amount")}</th><th>{t("adm.d.reason")}</th><th>{t("adm.w.status")}</th><th /></tr></thead><tbody>
+            {disputes.map((d) => (
+              <tr key={d.id} data-dispute={d.order_id}>
+                <td className="dim" style={{ textAlign: "left" }}>{when(d.at)}<br /><span style={{ fontSize: 10 }}>{d.order_id} · {d.provider}{d.demo ? " · demo" : ""}</span></td>
+                <td style={{ textAlign: "left", fontSize: 11 }}>{d.item_id ?? "—"}<br /><span className="dim" style={{ fontSize: 10 }}>{d.account ? d.account.slice(0, 10) : t("adm.d.anon")}</span></td>
+                <td>${Number(d.amount ?? 0).toFixed(2)}</td>
+                <td style={{ textAlign: "left", fontSize: 11, maxWidth: 260, whiteSpace: "normal" }}>{d.reason}</td>
+                <td className={d.status === "refunded" ? "up" : d.status === "rejected" ? "dn" : ""}>
+                  {t(`adm.d.s.${d.status}` as "adm.d.s.open")}
+                  {d.refund && <><br /><span className="dim" style={{ fontSize: 10 }}>{d.refund.mode}{d.refund.clawback ? ` · ${t("adm.d.clawback")} ${d.refund.clawback.status}` : ""}{d.refund.error ? ` · ${d.refund.error}` : ""}</span></>}
+                  {d.note ? <><br /><span className="dim" style={{ fontSize: 10 }}>{d.note}</span></> : null}
+                </td>
+                <td>{d.status === "open" && (<><button className="btn btn--mini" disabled={busy} onClick={() => resolveDispute(d.order_id, "refund")}>{t("adm.d.refund")}</button> <button className="btn btn--mini" disabled={busy} onClick={() => resolveDispute(d.order_id, "reject")}>{t("adm.d.reject")}</button></>)}</td>
+              </tr>
+            ))}
+          </tbody></table></div>
+        )}
+      </section>
       <section className="panel mk-mine">
         <div className="panel__head"><span className="panel__title">{t("adm.orders")}</span><span className="panel__meta">{orders.length}</span></div>
         <div style={{ overflowX: "auto" }}><table className="pp-compare mk-mine__table"><thead><tr><th>{t("adm.w.when")}</th><th>{t("adm.o.kind")}</th><th>{t("adm.o.item")}</th><th>{t("adm.w.amount")}</th><th>{t("adm.o.provider")}</th></tr></thead><tbody>
@@ -238,6 +269,23 @@ export function AdminPage() {
             </tr>
           ))}
         </tbody></table></div>
+      </section>
+      <section className="panel mk-mine" data-testid="adm-audit">
+        <div className="panel__head"><span className="panel__title">{t("adm.audit")}</span><span className="panel__meta">{audit.length}</span></div>
+        <p className="dim" style={{ fontSize: 11.5, margin: "0 0 8px" }}>{t("adm.audit.help")}</p>
+        {audit.length === 0 ? <div className="empty" style={{ padding: 14 }}>{t("adm.none")}</div> : (
+          <div style={{ overflowX: "auto" }}><table className="pp-compare mk-mine__table"><thead><tr><th>{t("adm.w.when")}</th><th>{t("adm.audit.action")}</th><th>{t("adm.audit.actor")}</th><th>{t("adm.audit.target")}</th><th>{t("adm.audit.detail")}</th></tr></thead><tbody>
+            {audit.map((e) => (
+              <tr key={e.id}>
+                <td className="dim" style={{ textAlign: "left" }}>{when(e.at)}</td>
+                <td style={{ textAlign: "left" }}><code style={{ fontSize: 11 }}>{e.action}</code></td>
+                <td className="dim" style={{ textAlign: "left", fontSize: 11 }}>{e.actor}</td>
+                <td style={{ textAlign: "left", fontSize: 11 }}>{e.target}</td>
+                <td className="dim" style={{ textAlign: "left", fontSize: 10.5, maxWidth: 320, whiteSpace: "normal" }}>{Object.entries(e.detail).map(([k, v]) => `${k}=${String(v)}`).join(" · ")}</td>
+              </tr>
+            ))}
+          </tbody></table></div>
+        )}
       </section>
       <p><button className="ghost" onClick={() => { sessionStorage.removeItem(TOKEN_KEY); setToken(""); setOverview(null); }}>{t("adm.logout")}</button></p>
     </div></div>

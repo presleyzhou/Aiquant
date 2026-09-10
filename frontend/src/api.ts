@@ -186,6 +186,34 @@ export interface AdminProviderHealth {
   markets: Record<string, AdminProviderMarket>;
 }
 
+export interface Dispute {
+  id: string;
+  order_id: string;
+  item_id: string | null;
+  account: string | null;
+  provider: string;
+  amount: string | null;
+  currency: string;
+  demo: boolean;
+  reason: string;
+  status: "open" | "refunded" | "rejected";
+  at: number;
+  resolved_at: number | null;
+  resolution: "refund" | "reject" | null;
+  note: string;
+  refund: { mode: string; amount: number; demo?: boolean; note?: string; pending?: boolean; error?: string; refund_id?: string;
+    clawback?: { status: string; amount?: number; note?: string } } | null;
+}
+
+export interface AuditEntry {
+  id: string;
+  at: number;
+  action: string;
+  actor: string;
+  target: string;
+  detail: Record<string, string | number | boolean>;
+}
+
 export interface AdminWithdrawal {
   id: string;
   account: string;
@@ -1287,6 +1315,12 @@ export const api = {
         method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token }, body: JSON.stringify({ status, note }),
       }).then(json<AdminWithdrawal>),
     orders: (token: string) => fetch("/api/admin/orders", { headers: { "X-Admin-Token": token } }).then(json<{ orders: Array<Record<string, unknown>> }>),
+    disputes: (token: string) => fetch("/api/admin/disputes", { headers: { "X-Admin-Token": token } }).then(json<{ disputes: Dispute[]; refund_window_days: number }>),
+    resolveDispute: (token: string, order_id: string, action: "refund" | "reject", note: string) =>
+      fetch(`/api/admin/disputes/${encodeURIComponent(order_id)}`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": token }, body: JSON.stringify({ action, note }),
+      }).then(json<Dispute>),
+    audit: (token: string, limit = 100) => fetch(`/api/admin/audit?limit=${limit}`, { headers: { "X-Admin-Token": token } }).then(json<{ entries: AuditEntry[]; cap: number }>),
     listings: (token: string) => fetch("/api/admin/listings", { headers: { "X-Admin-Token": token } }).then(json<{ listings: Array<MarketItem & { status: string; seller: string }> }>),
     recheck: (token: string) => fetch("/api/admin/recheck", { method: "POST", headers: { "X-Admin-Token": token } }).then(json<{ last_run: number; targets: number; done: number; failed: number }>),
     /** Ops layer: run the merged daily ops pass now (warm → recheck → monitor); returns the `ops_last` shape. */
@@ -1445,6 +1479,16 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ account_secret, item_id }),
     }).then(json<OrderStatus & { wallet: Wallet }>),
+
+  /** Buyer opens a refund dispute on a confirmed order; the entitlement token proves ownership for checkout buyers. */
+  openDispute: (account_secret: string, order_id: string, reason: string, token?: string) =>
+    authFetch("/api/wallet/disputes", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account_secret, order_id, reason, token }),
+    }).then(json<Dispute>),
+  disputeLookup: (account_secret: string, order_id: string, token?: string) =>
+    authFetch("/api/wallet/disputes/lookup", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account_secret, order_id, token }),
+    }).then(json<{ dispute: Dispute | null; refund_window_days: number }>),
 
   walletWithdraw: (account_secret: string, amount_usd: number, method: "crypto" | "bank", address: string) =>
     authFetch("/api/wallet/withdraw", {
