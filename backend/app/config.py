@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     # Platform take on community sales (Stripe Connect application fee, or
     # what the platform keeps when settling crypto payouts manually).
     platform_fee_pct: float = 10.0
+    # Buyers may open a refund dispute this many days after a confirmed purchase.
+    refund_window_days: int = 14
     # Public site URL used for payment return links when the client sends none.
     site_url: str = "https://aiquant-rust.vercel.app"
     # Upstash / Vercel KV REST credentials → durable listings + order ledger.

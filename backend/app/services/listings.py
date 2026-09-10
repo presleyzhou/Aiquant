@@ -20,7 +20,7 @@ import time
 from typing import Any
 
 from app.config import get_settings
-from app.services import factor_dsl, kvstore
+from app.services import audit, factor_dsl, kvstore
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +85,8 @@ def issue_entitlement(item_id: str, order_id: str, provider: str, *, demo: bool)
     return f"{raw}.{sig}"
 
 
-def verify_entitlement(token: str | None, item_id: str | None = None) -> dict | None:
+def verify_entitlement(token: str | None, item_id: str | None = None, *, check_revoked: bool = True) -> dict | None:
+    """Signed, item-matching and — unless `check_revoked=False` — not refunded."""
     if not token or "." not in token:
         return None
     raw, sig = token.rsplit(".", 1)
@@ -97,6 +98,8 @@ def verify_entitlement(token: str | None, item_id: str | None = None) -> dict | 
     except ValueError:
         return None
     if item_id is not None and body.get("item") != item_id:
+        return None
+    if check_revoked and body.get("order") and kvstore.get(f"revoked:{body['order']}") is not None:
         return None
     return body
 
@@ -202,6 +205,8 @@ def create(body: dict, seller: str | None = None) -> dict:
         "status": "active",
     }
     kvstore.put(f"listing:{listing['id']}", listing)
+    audit.record("listing.created", actor=audit.actor_for_account(seller), target=listing["id"],
+                 detail={"type": kind, "name": name, "price_usd": price})
     return listing
 
 
@@ -225,6 +230,7 @@ def remove(listing_id: str, seller: str) -> bool:
     if not hmac.compare_digest(row["seller"], seller):
         raise ListingError("not the owner of this listing")
     kvstore.delete(f"listing:{listing_id}")
+    audit.record("listing.removed", actor=audit.actor_for_account(seller), target=listing_id, detail={"name": row.get("name")})
     return True
 
 

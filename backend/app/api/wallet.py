@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.services import auth, payments, wallet
+from app.services import auth, disputes, payments, wallet
 from app.services.ratelimit import limiter
 
 router = APIRouter(prefix="/api/wallet", tags=["wallet"])
@@ -59,6 +59,50 @@ async def purchase(req: Purchase, request: Request):
         return payments.purchase_with_wallet(req.item_id, h)
     except payments.PaymentError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class DisputeOpen(Account):
+    order_id: str = Field(min_length=4, max_length=80)
+    reason: str = Field(min_length=4, max_length=disputes.REASON_MAX)
+    # entitlement token proves ownership for anonymous (checkout) buyers
+    token: str | None = Field(default=None, max_length=600)
+
+
+@router.post("/disputes", dependencies=[Depends(limiter("disputes", "rl_listings_per_day", 86_400))])
+async def open_dispute(req: DisputeOpen, request: Request):
+    h: str | None
+    try:
+        h, _ = await auth.resolve_account(request, req.account_secret)
+    except HTTPException:
+        h = None
+    try:
+        return disputes.open_dispute(req.order_id, reason=req.reason, account_hash=h, token=req.token)
+    except disputes.DisputeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class DisputeLookup(Account):
+    order_id: str = Field(min_length=4, max_length=80)
+    token: str | None = Field(default=None, max_length=600)
+
+
+@router.post("/disputes/lookup")
+async def lookup_dispute(req: DisputeLookup, request: Request):
+    try:
+        h, _ = await auth.resolve_account(request, req.account_secret)
+    except HTTPException:
+        h = None
+    try:
+        row = disputes.lookup(req.order_id, account_hash=h, token=req.token)
+    except disputes.DisputeError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return {"dispute": row, "refund_window_days": disputes.refund_window_days()}
+
+
+@router.post("/disputes/mine")
+async def my_disputes(req: Account, request: Request):
+    h, _ = await auth.resolve_account(request, req.account_secret)
+    return {"disputes": disputes.for_account(h), "refund_window_days": disputes.refund_window_days()}
 
 
 class Withdraw(Account):

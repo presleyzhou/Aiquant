@@ -11,7 +11,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.services import auth, kvstore, listings, provider_health, wallet
+from app.services import audit, auth, disputes, kvstore, listings, payments, provider_health, wallet
 from app.services.factor_mine import (
     UNIVERSES,
     analyze_factor_blocking,
@@ -37,6 +37,7 @@ async def overview():
                 "listings": len(listings_all), "active_listings": sum(1 for r in listings_all if r.get("status") == "active"),
                 "orders": len(orders), "real_orders": len(confirmed), "wallets": len(wallets), "accounts_synced": len(states),
                 "withdrawals_pending": sum(1 for w in withdrawals if w.get("status") == "pending"),
+                "disputes_open": sum(1 for d in kvstore.list_prefix("dispute") if d.get("status") == "open"),
             },
             "gross_usd": round(sum(float(o.get("amount") or 0) for o in confirmed), 2),
             "wallet_liabilities_usd": round(sum(float(w.get("balance_usd") or 0) for w in wallets), 2),
@@ -71,7 +72,47 @@ async def update_withdrawal(wid: str, req: WithdrawalUpdate):
         await asyncio.to_thread(wallet.credit, row["account"], float(row["amount"]), demo=False, ref=f"refund:{wid}", kind="topup", note="withdrawal rejected")
     row.update({"status": req.status, "note": req.note, "settled_at": int(time.time()) if req.status != "pending" else None})
     await asyncio.to_thread(kvstore.put, f"withdraw:{wid}", row)
+    audit.record(f"withdrawal.{req.status}", actor="admin", target=wid, detail={"amount": row.get("amount"), "note": req.note[:120]})
     return row
+
+
+# ------------------------------------------------------------- disputes
+
+
+@router.get("/disputes")
+async def list_disputes(status: str | None = None):
+    rows = await asyncio.to_thread(disputes.list_all, status)
+    return {"disputes": rows[:200], "refund_window_days": disputes.refund_window_days()}
+
+
+class DisputeResolve(BaseModel):
+    action: str = Field(pattern="^(refund|reject)$")
+    note: str = Field("", max_length=300)
+
+
+@router.post("/disputes/{order_id}")
+async def resolve_dispute(order_id: str, req: DisputeResolve):
+    try:
+        row = await asyncio.to_thread(disputes.resolve, order_id, req.action, req.note)
+    except disputes.DisputeError as exc:
+        raise HTTPException(status_code=404 if "not found" in str(exc) else 400, detail=str(exc)) from exc
+    refund = row.get("refund") or {}
+    if req.action == "refund" and refund.get("mode") == "provider" and refund.get("pending"):
+        try:
+            result = await payments.stripe_refund(order_id)
+        except Exception as exc:  # provider/network — keep the dispute refunded but flag for manual follow-up
+            result = {"mode": "manual", "error": str(exc)[:160]}
+        row = await asyncio.to_thread(disputes.mark_provider_refund, order_id, result)
+    return row
+
+
+# ---------------------------------------------------------------- audit
+
+
+@router.get("/audit")
+async def audit_log(limit: int = 200, action: str | None = None, target: str | None = None):
+    rows = await asyncio.to_thread(audit.recent, limit, action_prefix=action, target=target)
+    return {"entries": rows, "cap": audit.CAP}
 
 
 @router.get("/orders")
@@ -137,11 +178,13 @@ def _recheck_blocking(max_factors: int, deadline: float | None = None) -> dict:
 
 @router.post("/recheck")
 async def recheck(max_factors: int = 60):
+    audit.record("admin.recheck", actor="admin")
     return await asyncio.to_thread(_recheck_blocking, max(1, min(max_factors, 200)))
 
 
 @router.post("/warm")
 async def warm(markets: str = "us,crypto", refresh: bool = False):
+    audit.record("admin.warm", actor="admin")
     """Pre-load the built-in daily panels so the shared KV layer is populated
     before users arrive (run by the scheduled workflows). Reports provider,
     size and timing per market."""
@@ -176,6 +219,7 @@ OPS_BUDGET_SECONDS = 250
 
 @router.post("/ops")
 async def ops(max_factors: int = 60, monitor_limit: int = 10, recheck: bool = True):
+    audit.record("admin.ops", actor="admin")
     """The single daily operations pass: warm the shared panels → recheck
     listed / synced factors → run the deployment monitor. Each step is timed
     and isolated (one failing step does not stop the others); the report is

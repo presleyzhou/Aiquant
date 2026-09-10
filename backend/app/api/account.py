@@ -10,7 +10,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.services import auth, kvstore, listings, wallet
+from app.services import audit, auth, kvstore, listings, wallet
 from app.services.ratelimit import limiter
 
 router = APIRouter(prefix="/api/account", tags=["account"])
@@ -87,4 +87,5 @@ async def claim(req: Claim, request: Request):
     old, new = auth.secret_hash(req.account_secret), auth.user_hash(user["id"])
     w = await asyncio.to_thread(wallet.merge_into, old, new)
     n = await asyncio.to_thread(listings.reassign_seller, old, new)
+    audit.record("account.claimed", actor=audit.actor_for_account(new), target=old[:12], detail={"listings": n})
     return {"wallet": w, "listings_moved": n}

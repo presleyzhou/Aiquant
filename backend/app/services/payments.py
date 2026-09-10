@@ -29,7 +29,7 @@ from typing import Any
 import httpx
 
 from app.config import get_settings
-from app.services import listings, marketplace, wallet
+from app.services import audit, listings, marketplace, wallet
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +80,7 @@ def config() -> dict[str, Any]:
         "demo": demo,
         "connect": card,  # Stripe Connect onboarding available whenever Stripe is
         "platform_fee_pct": s.platform_fee_pct,
+        "refund_window_days": s.refund_window_days,
         "persistence": kvstore.mode(),
         "note": note,
         # legacy fields
@@ -222,6 +223,8 @@ def _confirm_topup(order_id: str, provider: str, account: str, amount: str | Non
                                "account": account, "amount": amount, "currency": "USD", "status": "confirmed", "demo": demo})
     except Exception as exc:
         log.warning("order ledger write failed: %s", exc)
+    audit.record("topup.confirmed", actor=audit.actor_for_account(account), target=order_id,
+                 detail={"amount": amount, "provider": provider, "demo": demo})
     return {"order_id": order_id, "provider": provider, "status": "confirmed", "demo": demo, "kind": "topup",
             "amount": amount, "wallet": w}
 
@@ -236,15 +239,20 @@ def _settle(meta: dict, order_id: str, provider: str, amount: str | None, fallba
     return None
 
 
-def _confirm(order_id: str, provider: str, item_id: str, amount: str | None, *, demo: bool) -> dict:
+def _confirm(order_id: str, provider: str, item_id: str, amount: str | None, *, demo: bool, account: str | None = None) -> dict:
     token = listings.issue_entitlement(item_id, order_id, provider, demo=demo)
     try:
-        listings.record_order({
+        order = {
             "order_id": order_id, "provider": provider, "item_id": item_id,
             "amount": amount, "currency": "USD", "status": "confirmed", "demo": demo,
-        })
+        }
+        if account:
+            order["account"] = account
+        listings.record_order(order)
     except Exception as exc:
         log.warning("order ledger write failed: %s", exc)
+    audit.record("order.confirmed", actor=audit.actor_for_account(account) if account else provider, target=order_id,
+                 detail={"item": item_id, "amount": amount, "provider": provider, "demo": demo})
     return {"order_id": order_id, "provider": provider, "status": "confirmed", "demo": demo,
             "item_id": item_id, "token": token}
 
@@ -327,13 +335,27 @@ def purchase_with_wallet(item_id: str, account_hash: str) -> dict:
         w, demo = wallet.debit(h, amount, ref=order_id, kind="purchase", note=item["name"][:60])
     except wallet.WalletError as exc:
         raise PaymentError(str(exc)) from exc
-    out = _confirm(order_id, "wallet", item_id, price["amount"], demo=demo)
+    out = _confirm(order_id, "wallet", item_id, price["amount"], demo=demo, account=h)
     if row is not None and not demo:
         try:
             wallet.seller_credit_for_sale(row["seller"], amount, ref=order_id, item_name=item["name"])
         except Exception as exc:
             log.warning("seller credit failed: %s", exc)
     return {**out, "wallet": w}
+
+
+async def stripe_refund(order_id: str) -> dict:
+    """Refund a paid Checkout Session in full. Returns {refund_id, status}."""
+    if not card_enabled():
+        raise PaymentError("Stripe is not configured")
+    session = await _stripe("GET", f"/checkout/sessions/{order_id}")
+    intent = session.get("payment_intent")
+    if not intent:
+        raise PaymentError("session has no payment_intent to refund")
+    if isinstance(intent, dict):
+        intent = intent.get("id")
+    ref = await _stripe("POST", "/refunds", {"payment_intent": str(intent)})
+    return {"refund_id": ref.get("id"), "status": ref.get("status"), "provider": "stripe"}
 
 
 # ------------------------------------------------------------- webhooks

@@ -20,7 +20,7 @@ import secrets
 import time
 
 from app.config import get_settings
-from app.services import kvstore
+from app.services import audit, kvstore
 
 MAX_TOPUP_USD = 2000.0
 MIN_TOPUP_USD = 1.0
@@ -121,6 +121,7 @@ def request_withdrawal(h: str, amount: float, method: str, address: str) -> dict
         "id": wid, "account": h, "amount": round(amount, 2), "method": method, "address": address,
         "status": "pending", "at": int(time.time()),
     })
+    audit.record("withdrawal.requested", actor=audit.actor_for_account(h), target=wid, detail={"amount": round(amount, 2), "method": method})
     return {"id": wid, "status": "pending", "amount": round(amount, 2), **view(h)}
 
 
