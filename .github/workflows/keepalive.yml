@@ -1,15 +1,35 @@
-name: Kronos Space keepalive
+name: Keepalive (Kronos Space + Vercel API)
 
 # Free HF Spaces sleep after ~48h without traffic; the next visitor then
 # waits 30-60s for the wake. Two pings a day keep the inference service warm
 # at zero cost. If the Space is renamed, update the URL here.
+#
+# Vercel serverless functions go cold after a few idle minutes; the first
+# request then pays for importing pandas/numpy (~3-6 s). A light ping every
+# 10 minutes keeps at least one instance warm in the primary region — free on
+# a public repo (scheduled runs may lag a few minutes; that is fine).
 on:
   schedule:
-    - cron: "17 2,14 * * *" # 02:17 & 14:17 UTC daily
+    - cron: "17 2,14 * * *" # Space: 02:17 & 14:17 UTC daily
+    - cron: "*/10 * * * *"  # Vercel: every 10 minutes
   workflow_dispatch:
 
 jobs:
+  vercel:
+    # every-10-minutes schedule + manual runs; skipped on the twice-daily Space cron
+    if: github.event.schedule != '17 2,14 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Vercel API (warm the function)
+        run: |
+          for path in /api/health /api/version; do
+            status=$(curl -s --max-time 60 -o /tmp/body -w '%{http_code}' \
+              "https://aiquant-rust.vercel.app$path" || echo "000")
+            echo "$path → HTTP $status"; head -c 300 /tmp/body || true; echo
+            [ "$status" = "200" ]
+          done
   ping:
+    if: github.event.schedule != '*/10 * * * *'
     runs-on: ubuntu-latest
     steps:
       - name: Ping inference Space

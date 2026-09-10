@@ -6,6 +6,7 @@ import {
 } from "lightweight-charts";
 import { useEffect, useRef } from "react";
 import type { Point } from "../api";
+import { chartKeyHandler, isoDay, pctChange, signed } from "../chartA11y";
 import { useT } from "../i18n";
 
 interface Props {
@@ -130,6 +131,19 @@ export function EquityChart({ equity, benchmark, drawdown }: Props) {
     };
   }, [equity, benchmark, drawdown]);
 
+  const first = equity[0];
+  const last = equity[equity.length - 1];
+  const bFirst = benchmark[0];
+  const bLast = benchmark[benchmark.length - 1];
+  const maxDd = drawdown.reduce((m, p) => Math.min(m, p.value), 0);
+  const summary = first && last
+    ? t("a11y.equity", {
+        n: String(equity.length), from: isoDay(first.time), to: isoDay(last.time),
+        ret: signed(pctChange(first.value, last.value)),
+        bench: bFirst && bLast ? signed(pctChange(bFirst.value, bLast.value)) : "—",
+        dd: `${maxDd.toFixed(1)}%`,
+      })
+    : t("a11y.empty");
   return (
     <div className="equity-chart">
       <div className="equity-chart__legend">
@@ -146,7 +160,17 @@ export function EquityChart({ equity, benchmark, drawdown }: Props) {
           {t("bt.legend.dd")}
         </span>
       </div>
-      <div ref={hostRef} />
+      <div
+        ref={hostRef}
+        className="chart-focusable"
+        role="img"
+        tabIndex={0}
+        aria-label={summary}
+        title={t("a11y.keys")}
+        onKeyDown={chartKeyHandler(() => chartRef.current)}
+        data-testid="equity-chart"
+      />
+      <p className="sr-only">{summary} {t("a11y.keys")}</p>
     </div>
   );
 }

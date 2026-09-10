@@ -1304,6 +1304,8 @@ export const api = {
 
   admin: {
     overview: (token: string) => fetch("/api/admin/overview", { headers: { "X-Admin-Token": token } }).then(json<AdminOverview>),
+    /** Tier of the presented credential: full admin or read-only operator. */
+    whoami: (token: string) => fetch("/api/admin/whoami", { headers: { "X-Admin-Token": token } }).then(json<{ role: "admin" | "readonly"; emails_configured: boolean; readonly_configured: boolean }>),
     warm: (token: string, refresh = false) =>
       fetch(`/api/admin/warm?markets=us,crypto&refresh=${refresh ? "true" : "false"}`, { method: "POST", headers: { "X-Admin-Token": token } }).then(
         json<{ warmed: Record<string, WarmedPanel>; kv: string }>,

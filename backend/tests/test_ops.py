@@ -254,3 +254,39 @@ def test_admin_token_rotation_accepts_both_values(monkeypatch, tmp_path):
     assert client.get("/api/admin/overview", headers={b"x-admin-token": "tok\xe9".encode("latin-1")}).status_code == 403  # non-ASCII → 403, not 500
     _admin(monkeypatch, None, None)
     assert client.get("/api/admin/overview", headers={"x-admin-token": ""}).status_code == 403
+
+
+def test_admin_tiers_readonly_token_and_email_allowlist(monkeypatch, tmp_path):
+    from app.services import auth
+
+    _file_store(monkeypatch, tmp_path)
+    _admin(monkeypatch, "full-token", None)
+    s = get_settings()
+    monkeypatch.setattr(s, "admin_readonly_token", "ro-token")
+    monkeypatch.setattr(s, "admin_emails", "Ops@Example.com, auditor@example.com")
+    ro = {"x-admin-token": "ro-token"}
+    full = {"x-admin-token": "full-token"}
+    # read-only: every GET works, role is reported, every mutation is refused with a specific message
+    assert client.get("/api/admin/overview", headers=ro).status_code == 200
+    who = client.get("/api/admin/whoami", headers=ro).json()
+    assert who == {"role": "readonly", "emails_configured": True, "readonly_configured": True}
+    assert client.get("/api/admin/audit", headers=ro).status_code == 200
+    r = client.post("/api/admin/withdrawals/wd_none", headers=ro, json={"status": "paid"})
+    assert r.status_code == 403 and "read-only" in r.json()["detail"]
+    assert client.post("/api/admin/recheck", headers=ro).status_code == 403
+    assert client.post("/api/admin/disputes/x", headers=ro, json={"action": "reject"}).status_code == 403
+    assert client.post("/api/paper/monitor/run", headers=ro).status_code == 403
+    # full token: whoami says admin; a missing withdrawal is a 404 (i.e. we got past the guard)
+    assert client.get("/api/admin/whoami", headers=full).json()["role"] == "admin"
+    assert client.post("/api/admin/withdrawals/wd_none", headers=full, json={"status": "paid"}).status_code == 404
+
+    # signed-in Supabase user on the allow-list (case-insensitive) is a full admin without any shared token
+    async def fake_verify(token):
+        return {"id": "u1", "email": "ops@example.com"} if token == "jwt-ops" else ({"id": "u2", "email": "someone@else.com"} if token == "jwt-other" else None)
+    monkeypatch.setattr(auth, "verify", fake_verify)
+    assert client.get("/api/admin/whoami", headers={"Authorization": "Bearer jwt-ops"}).json()["role"] == "admin"
+    assert client.get("/api/admin/overview", headers={"Authorization": "Bearer jwt-other"}).status_code == 403
+    assert client.get("/api/admin/overview", headers={"Authorization": "Bearer nope"}).status_code == 403
+    # allow-list empty → bearer JWTs are never admins
+    monkeypatch.setattr(s, "admin_emails", None)
+    assert client.get("/api/admin/overview", headers={"Authorization": "Bearer jwt-ops"}).status_code == 403

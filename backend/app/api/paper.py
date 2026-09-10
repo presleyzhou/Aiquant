@@ -336,5 +336,5 @@ async def monitor_run(request: Request, force: bool = False, limit: int = 20) ->
     Processes up to `limit` accounts per call and reports how many remain."""
     from app.services import auth, monitor
 
-    auth.require_admin(request)
+    await auth.require_admin_write(request)
     return await monitor.run_all(force=force, limit=max(1, min(limit, 100)))

@@ -100,6 +100,9 @@ vercel --prod   # 生产环境
 | `RL_CHAT_PER_HOUR` / `RL_STRATEGY_PER_DAY` / `RL_MINING_PER_DAY` / `RL_EVOLVE_PER_DAY` / `RL_MEMO_PER_DAY` | 20 / 5 / 5 / 20 / 20 | 每 IP 限流；`RL_GLOBAL_AI_PER_DAY`（500）为实例级每日 AI 调用熔断 |
 | `MONITOR_DRAWDOWN_PCT` / `RL_MONITOR_PER_HOUR` | `10` / `12` | 每日监控的回撤告警阈值（百分比）；「立即检查」与「测试推送」的每 IP 每小时限流 |
 | `ADMIN_TOKEN_NEXT` | 空 | 站长令牌轮换：新旧两个值同时有效，先在 Vercel 加 NEXT、再改 GitHub Secret、最后把 NEXT 提升为 `ADMIN_TOKEN` |
+| `ADMIN_READONLY_TOKEN` | 空 | 只读站长令牌：可查看 `/api/admin/*` 全部页面（总览、订单、争议、审计日志），不能结算提现、处理争议或触发任务 |
+| `ADMIN_EMAILS` | 空 | 逗号分隔的 Supabase 账号邮箱；这些用户登录后自动成为管理员（凭 bearer 令牌），无需粘贴共享密钥 |
+| `REFUND_WINDOW_DAYS` | `14` | 买家可对已确认购买提出退款争议的天数 |
 | `ALPHA_VANTAGE_KEY` | 空 | 仅供内嵌的 Alpha Vantage provider 使用；yfinance 无需 key |
 | `PANEL_PROVIDER_CRYPTO` | `binance` | 因子挖掘 / 流水线的数字货币日线面板：`binance` = Binance 公开 K 线为主源，Binance 未上币由 CoinGecko 补齐，Yahoo 兜底；`yahoo` 强制 Yahoo |
 | `PANEL_PROVIDER_US` | `auto` | 美股日线面板：`auto` = 装了 AkShare（新浪财经前复权数据）就用 AkShare，否则 Yahoo；`akshare` / `yahoo` 强制。AkShare 约 100MB 依赖，不进 Vercel 包，本地 / Docker 用 `uv pip install -e '.[akshare]'` |
@@ -261,6 +264,8 @@ DeMiguel-Garlappi-Uppal (2009)、Ledoit & Wolf (2008)、Harvey-Liu-Zhu (2016)、
 服务端重放每个账户云端同步的模拟持仓，按五条规则告警：回撤超过 `MONITOR_DRAWDOWN_PCT`（默认 10%）、边际衰减判定为 degraded、
 目标持仓较上次变化（需调仓）、数据超过 5 天未更新、无法重算。报告存 KV 供「模拟持仓」页展示；用户在页内填写 Slack / Discord /
 Telegram webhook 后，**新出现**的提醒会推送一次（同一提醒不重复打扰）。webhook 仅接受 https 公网地址。需在 GitHub Secrets 配置与后端一致的 `ADMIN_TOKEN`。
+
+**研究能力、市场运营与可靠性一轮十二项。** 研究：因子挖掘新增 `crypto_1h` 小时级市场（40 个币 × 约 90 天 1h K 线，Binance → Yahoo 1h → CoinGecko 链式补齐，年化因子 8760），挖掘 / 体检 / 进化 / 合成全部支持；「分期有效性」热图按季度（小时级按周）给每个因子的方向对齐 IC 上色，一眼看出哪段失效；「因子家族」按 |相关| ≥ 0.5 做单链接聚类并贴动量 / 反转 / 成交量 / 波动 / 区间标签，合成新增「按家族等权」避免同族因子重复计权。回测引擎加入止损、止盈、移动止损、目标波动仓位与最大仓位（上一根收盘判定、下一根开盘成交，离场后等信号复位再入场），结果按离场原因统计，模拟持仓的策略配置同样生效。市场：上架因子卡片显示「上线后成绩」徽标（上架天数、近 60 根方向对齐 IC、五项评级，服务器每日重检，卖家不可改）；买家可在退款窗口内对已确认购买提出争议（钱包购买凭账号、结账购买凭权益凭证），站长后台「争议与退款」一键退款或驳回 —— 退款立即撤销凭证、订单标为已退款、钱包购买原路退回钱包、Stripe 走供应商退款、Coinbase 无法链上撤销则记入买家钱包或标记人工处理，并从卖家余额扣回分成（余额不足时如实标记失败）；新增只追加的审计日志（订单成交、退款、提现及审批、上架 / 下架、账号合并、后台操作，执行者只记粗粒度身份）。工程：`tests/test_api_contract.py` 扫描 `frontend/src/api.ts` 与 Playwright mock 里的每个 `/api/...` 路径与方法，逐条核对 FastAPI 路由表，双端改名不同步会在 CI 直接失败；`keepalive.yml` 每 10 分钟 ping Vercel 的 `/api/health` 与 `/api/version` 避免函数冷启动；站长令牌分级（`ADMIN_READONLY_TOKEN` 只读、`ADMIN_EMAILS` 白名单登录即管理员，写操作按钮对只读令牌置灰）。体验：自选、因子库、模拟持仓的空状态各带一键示例数据（示例因子指标为 0，需体检 / 回测后才有真实数字）；三张图表（K 线、净值、Kronos）带屏幕阅读器可读的摘要、可聚焦并支持 ← → 平移、+ − 缩放、Home 复位。
 
 **面板预热与覆盖率、Pipeline 懒加载。** 站长后台新增「一键预热 / 强制重拉」：`POST /api/admin/warm?refresh=true` 会清空内存、磁盘与共享 KV 三层缓存后重新下载，表格逐市场显示拿到 / 请求标的数、缺失名单、数据源链、行情截至日期与耗时，用来直观确认 Stooq / CoinGecko 补齐是否生效。端到端 Pipeline 的结果阶段（宇宙、信号、回测、风险、目标持仓、交易单、备忘、对比、结论卡）改为按需加载，页面首包 104 → 61 KB；主包此前已从 667 KB 降到 456 KB。
 

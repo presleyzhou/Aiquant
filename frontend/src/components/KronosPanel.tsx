@@ -6,6 +6,7 @@ import {
 } from "lightweight-charts";
 import { useEffect, useRef, useState } from "react";
 import { api, type KronosEvaluation, type KronosForecast, type KronosStatus } from "../api";
+import { chartKeyHandler, pctChange, signed } from "../chartA11y";
 import { useT } from "../i18n";
 import { buildKronosShare, takeKronosShare } from "../share";
 import { ShareButton } from "./ShareButton";
@@ -280,6 +281,7 @@ const fmtSigned = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
 
 /** History close (solid) + forecast close (amber) + envelope edges (dashed). */
 function ForecastChart({ data }: { data: KronosForecast }) {
+  const { t } = useT();
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -385,7 +387,19 @@ function ForecastChart({ data }: { data: KronosForecast }) {
     };
   }, [data]);
 
-  return <div className="kr-chart" ref={hostRef} />;
+  const lastReal = data.history[data.history.length - 1];
+  const end = data.forecast[data.forecast.length - 1];
+  const label = lastReal && end
+    ? t("a11y.kronos", { symbol: data.symbol, h: String(data.horizon), last: lastReal.close.toFixed(2), end: end.close.toFixed(2),
+        chg: signed(pctChange(lastReal.close, end.close)), lo: end.low.toFixed(2), hi: end.high.toFixed(2) })
+    : t("a11y.empty");
+  return (
+    <>
+      <div className="kr-chart chart-focusable" ref={hostRef} role="img" tabIndex={0} aria-label={label} title={t("a11y.keys")}
+        onKeyDown={chartKeyHandler(() => chartRef.current)} data-testid="kronos-chart" />
+      <p className="sr-only">{label} {t("a11y.keys")}</p>
+    </>
+  );
 }
 
 function Stat({ label, value, tone }: { label: string; value: string; tone?: number }) {

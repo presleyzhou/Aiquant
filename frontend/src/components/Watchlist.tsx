@@ -78,7 +78,15 @@ export function Watchlist({
 
       <div className="panel__body panel__body--flush">
         {symbols.length === 0 ? (
-          <div className="empty">{t("watch.empty")}</div>
+          <div className="empty">
+            {t("watch.empty")}
+            <div style={{ marginTop: 8 }}>
+              <button type="button" className="btn btn--mini" data-testid="watch-sample-load"
+                onClick={() => (profile.id === "crypto" ? ["BTC-USD", "ETH-USD", "SOL-USD"] : ["AAPL", "MSFT", "NVDA", "SPY"]).forEach(onAdd)}>
+                {t("watch.sample.load")}
+              </button>
+            </div>
+          </div>
         ) : (
           <ul className="watch-list">
             {symbols.map((symbol) => {

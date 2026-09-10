@@ -87,11 +87,47 @@ async def resolve_account(request: Request, secret: str | None) -> tuple[str, di
     raise HTTPException(status_code=401, detail="sign in or provide an account secret")
 
 
-def require_admin(request: Request) -> None:
+def _token_matches(given: str, candidates: list[str | None]) -> bool:
+    g = given.encode("utf-8", "surrogateescape")   # bytes: a non-ASCII header is a 403, not a 500
+    return any(t and hmac.compare_digest(g, t.encode("utf-8")) for t in candidates)
+
+
+def admin_emails() -> set[str]:
+    raw = get_settings().admin_emails or ""
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+async def admin_role(request: Request) -> str | None:
+    """'admin' | 'readonly' | None. Order: shared tokens (X-Admin-Token or
+    bearer), then a signed-in Supabase user whose e-mail is allow-listed."""
     s = get_settings()
-    tok = request.headers.get("x-admin-token") or bearer(request) or ""
-    # two accepted values so a token can be rotated without a deploy window
-    valid = [t for t in (s.admin_token, s.admin_token_next) if t]
-    given = tok.encode("utf-8", "surrogateescape")   # bytes: a non-ASCII header is a 403, not a 500
-    if not valid or not any(hmac.compare_digest(given, t.encode("utf-8")) for t in valid):
+    header = request.headers.get("x-admin-token") or ""
+    tok = header or bearer(request) or ""
+    if tok:
+        # two accepted values so a token can be rotated without a deploy window
+        if _token_matches(tok, [s.admin_token, s.admin_token_next]):
+            return "admin"
+        if _token_matches(tok, [s.admin_readonly_token]):
+            return "readonly"
+    if not header and admin_emails():
+        user = await current_user(request)
+        if user and (user.get("email") or "").lower() in admin_emails():
+            return "admin"
+    return None
+
+
+async def require_admin(request: Request) -> str:
+    """Any operator (full or read-only). Stores the role on request.state."""
+    role = await admin_role(request)
+    if role is None:
         raise HTTPException(status_code=403, detail="admin token required")
+    request.state.admin_role = role
+    return role
+
+
+async def require_admin_write(request: Request) -> str:
+    """Mutating operator endpoints: full admins only."""
+    role = getattr(request.state, "admin_role", None) or await admin_role(request)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="read-only admin token: this action needs the full ADMIN_TOKEN")
+    return role

@@ -443,6 +443,7 @@ async function mockApi(page: Page) {
         { step: "warm", ok: true, seconds: 12.0 }, { step: "recheck", ok: true, seconds: 5.0 }, { step: "monitor", ok: true, seconds: 3.0 } ] });
     if (path === "/api/admin/withdrawals") return json({ withdrawals: [{ id: "wd_1", account: "abcdef123456", amount: 4, method: "crypto", address: "0xabc", status: "pending", at: 1_700_000_000 }] });
     if (path === "/api/admin/orders") return json({ orders: [] });
+    if (path === "/api/admin/whoami") return json({ role: "admin", emails_configured: false, readonly_configured: false });
     if (path === "/api/admin/disputes")
       return json({ refund_window_days: 14, disputes: [{ id: "dp_wal_1", order_id: "wal_1", item_id: "c_e2e", account: "abcdef123456", provider: "wallet", amount: "3.50", currency: "USD",
         demo: false, reason: "策略无法加载", status: "open", at: 1_700_000_000, resolved_at: null, resolution: null, note: "", refund: null }] });
@@ -1605,4 +1606,55 @@ test("admin console: disputes can be refunded and the audit log lists money even
   await expect(audit.locator("tbody tr").first()).toContainText("dispute.refunded");
   await expect(audit.locator("tbody tr").first()).toContainText("mode=wallet");
   await expect(audit.locator("tbody tr").nth(1)).toContainText("account:abcdef123456");
+});
+
+test("admin console: a read-only token sees everything but every write action is disabled", async ({ page }) => {
+  await page.route("**/api/admin/whoami", (route) => route.fulfill({ json: { role: "readonly", emails_configured: true, readonly_configured: true } }));
+  await page.goto("/?admin=1");
+  await page.locator("input[type=password]").fill("e2e-token");
+  await page.getByRole("button", { name: "进入" }).click();
+  await expect(page.getByTestId("adm-role")).toHaveText("只读");
+  await expect(page.getByRole("button", { name: "标记已付" })).toBeDisabled();
+  await expect(page.getByTestId("adm-disputes").getByRole("button", { name: "退款", exact: true })).toBeDisabled();
+  await expect(page.getByTestId("adm-ops-run")).toBeDisabled();
+  await expect(page.getByTestId("adm-warm-run")).toBeDisabled();
+  await expect(page.getByTestId("adm-audit").locator("tbody tr")).toHaveCount(2);
+});
+
+test("empty states offer sample data: watchlist, factor library, paper deployments", async ({ page }) => {
+  await page.goto("/");
+  // watchlist: clear then load samples
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  for (let i = 0; i < 12; i++) {
+    // both market views mount a watchlist; only act on the visible one. The × only shows on row hover.
+    const btn = page.locator(".watch-list:visible button[aria-label^=\"移除\"]").first();
+    if (!(await btn.count())) break;
+    await btn.click({ force: true });
+  }
+  await page.locator("[data-testid=watch-sample-load]:visible").click();
+  await expect(page.locator(".watch-list:visible li")).toHaveCount(4);
+  // factor library
+  await page.getByRole("button", { name: "因子挖掘" }).click();
+  await page.getByTestId("fl-sample-load").click();
+  await expect(page.getByText("rank(-delta(close, 5))")).toBeVisible();
+  await expect(page.getByTestId("fl-sample-load")).toHaveCount(0);
+  // paper deployments
+  await page.getByRole("button", { name: "模拟持仓" }).click();
+  await page.getByTestId("pp-sample-load").click();
+  await expect(page.getByText("示例 · SPY 均线 50/200")).toBeVisible();
+});
+
+test("charts expose a spoken summary and keyboard navigation", async ({ page }) => {
+  await page.goto("/");
+  const price = page.locator("[data-testid=price-chart]:visible"); // the crypto view's chart is mounted but hidden
+  await expect(price).toHaveAttribute("aria-label", /K 线图，\d+ 根/);
+  await expect(price).toHaveAttribute("tabindex", "0");
+  await price.focus();
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("Home");
+  await page.locator("button", { hasText: "运行回测" }).first().click();
+  const eq = page.getByTestId("equity-chart");
+  await expect(eq).toHaveAttribute("aria-label", /策略净值曲线，\d+ 个交易日/);
+  await expect(eq).toHaveAttribute("role", "img");
 });

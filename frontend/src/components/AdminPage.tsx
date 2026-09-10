@@ -35,11 +35,14 @@ export function AdminPage() {
   const [listings, setListings] = useState<Array<MarketItem & { status: string; seller: string }>>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [role, setRole] = useState<"admin" | "readonly">("admin");
+  const readonly = role === "readonly";
 
   const load = useCallback(async (tok: string) => {
     setError(null);
     try {
       const [ov, wd, od, ls] = await Promise.all([api.admin.overview(tok), api.admin.withdrawals(tok), api.admin.orders(tok), api.admin.listings(tok)]);
+      api.admin.whoami(tok).then((r) => setRole(r.role)).catch(() => setRole("admin"));
       api.admin.disputes(tok).then((r) => setDisputes(r.disputes)).catch(() => setDisputes([]));
       api.admin.audit(tok).then((r) => setAudit(r.entries)).catch(() => setAudit([]));
       setOverview(ov); setWithdrawals(wd.withdrawals); setOrders(od.orders); setListings(ls.listings);
@@ -82,7 +85,7 @@ export function AdminPage() {
   if (!overview) {
     return (
       <div className="lab"><div className="lab__inner">
-        <section className="lab-hero"><h1 className="lab-hero__title">{t("adm.title")}</h1><p className="lab-hero__sub">{t("adm.sub")}</p></section>
+        <section className="lab-hero"><h1 className="lab-hero__title">{t("adm.title")}</h1><p className="lab-hero__sub">{t("adm.sub")}</p><p className="dim" style={{ fontSize: 12 }}>{t("adm.tiers")}</p></section>
         <form className="mk-form__row" style={{ maxWidth: 520 }} onSubmit={(e) => { e.preventDefault(); void load(draft.trim()); }}>
           <label className="mk-field" style={{ flex: 3 }}><span>ADMIN_TOKEN</span><input type="password" value={draft} onChange={(e) => setDraft(e.target.value)} required /></label>
           <button className="btn btn--primary" type="submit" style={{ alignSelf: "flex-end" }}>{t("adm.enter")}</button>
@@ -124,7 +127,7 @@ export function AdminPage() {
         <div className="panel__head">
           <span className="panel__title">{t("adm.warm.title")}</span>
           <span className="panel__meta">
-            <button className="ghost" disabled={warming} onClick={() => runWarm(false)} data-testid="adm-warm-run">{warming ? "…" : t("adm.warm.run")}</button>
+            <button className="ghost" disabled={warming || readonly} onClick={() => runWarm(false)} data-testid="adm-warm-run">{warming ? "…" : t("adm.warm.run")}</button>
             <button className="ghost" style={{ marginLeft: 8 }} disabled={warming} onClick={() => runWarm(true)} title={t("adm.warm.refreshTitle")}>{t("adm.warm.refresh")}</button>
           </span>
         </div>
@@ -160,7 +163,7 @@ export function AdminPage() {
       <section className="panel mk-mine">
         <div className="panel__head"><span className="panel__title">{t("adm.recheck")}</span>
           <span className="panel__meta">{t("adm.lastRun", { d: when(overview.health_runs.last_run), n: String(overview.health_runs.done ?? 0), f: String(overview.health_runs.failed ?? 0) })}
-            <button className="ghost" style={{ marginLeft: 8 }} disabled={busy} onClick={recheck}>{busy ? "…" : t("adm.recheckNow")}</button></span></div>
+            <button className="ghost" style={{ marginLeft: 8 }} disabled={busy || readonly} onClick={recheck}>{busy ? "…" : t("adm.recheckNow")}</button></span></div>
       </section>
       <section className="panel mk-mine" data-testid="adm-ops">
         <div className="panel__head"><span className="panel__title">{t("adm.ops")}</span>
@@ -173,7 +176,7 @@ export function AdminPage() {
                 </span>
               </>
             )}
-            <button className="ghost" style={{ marginLeft: 8 }} disabled={busy} onClick={runOps} data-testid="adm-ops-run">{busy ? "…" : t("adm.ops.runNow")}</button>
+            <button className="ghost" style={{ marginLeft: 8 }} disabled={busy || readonly} onClick={runOps} data-testid="adm-ops-run">{busy ? "…" : t("adm.ops.runNow")}</button>
           </span></div>
         {!opsLast ? <div className="empty" style={{ padding: 14 }} data-testid="adm-ops-empty">{t("adm.ops.never")}</div> : (
           <div style={{ overflowX: "auto" }}><table className="pp-compare mk-mine__table" data-testid="adm-ops-steps"><thead><tr><th>{t("adm.ops.step")}</th><th>{t("adm.w.status")}</th><th>{t("adm.ops.seconds")}</th><th>{t("adm.ops.error")}</th></tr></thead><tbody>
@@ -218,7 +221,7 @@ export function AdminPage() {
                 <td>${w.amount.toFixed(2)}</td>
                 <td style={{ textAlign: "left", fontSize: 11 }}>{w.method} · {w.address}</td>
                 <td className={w.status === "paid" ? "up" : w.status === "rejected" ? "dn" : ""}>{w.status}{w.note ? ` · ${w.note}` : ""}</td>
-                <td>{w.status === "pending" && (<><button className="btn btn--mini" disabled={busy} onClick={() => settle(w.id, "paid")}>{t("adm.markPaid")}</button> <button className="btn btn--mini" disabled={busy} onClick={() => settle(w.id, "rejected")}>{t("adm.reject")}</button></>)}</td>
+                <td>{w.status === "pending" && (<><button className="btn btn--mini" disabled={busy || readonly} onClick={() => settle(w.id, "paid")}>{t("adm.markPaid")}</button> <button className="btn btn--mini" disabled={busy || readonly} onClick={() => settle(w.id, "rejected")}>{t("adm.reject")}</button></>)}</td>
               </tr>
             ))}
           </tbody></table></div>
@@ -240,7 +243,7 @@ export function AdminPage() {
                   {d.refund && <><br /><span className="dim" style={{ fontSize: 10 }}>{d.refund.mode}{d.refund.clawback ? ` · ${t("adm.d.clawback")} ${d.refund.clawback.status}` : ""}{d.refund.error ? ` · ${d.refund.error}` : ""}</span></>}
                   {d.note ? <><br /><span className="dim" style={{ fontSize: 10 }}>{d.note}</span></> : null}
                 </td>
-                <td>{d.status === "open" && (<><button className="btn btn--mini" disabled={busy} onClick={() => resolveDispute(d.order_id, "refund")}>{t("adm.d.refund")}</button> <button className="btn btn--mini" disabled={busy} onClick={() => resolveDispute(d.order_id, "reject")}>{t("adm.d.reject")}</button></>)}</td>
+                <td>{d.status === "open" && (<><button className="btn btn--mini" disabled={busy || readonly} onClick={() => resolveDispute(d.order_id, "refund")}>{t("adm.d.refund")}</button> <button className="btn btn--mini" disabled={busy || readonly} onClick={() => resolveDispute(d.order_id, "reject")}>{t("adm.d.reject")}</button></>)}</td>
               </tr>
             ))}
           </tbody></table></div>
@@ -287,7 +290,7 @@ export function AdminPage() {
           </tbody></table></div>
         )}
       </section>
-      <p><button className="ghost" onClick={() => { sessionStorage.removeItem(TOKEN_KEY); setToken(""); setOverview(null); }}>{t("adm.logout")}</button></p>
+      <p><span className={`pl-badge ${readonly ? "pl-badge--warn" : "pl-badge--ok"}`} data-testid="adm-role" title={t("adm.tiers")}>{t(readonly ? "adm.role.readonly" : "adm.role.admin")}</span>{" "}<button className="ghost" onClick={() => { sessionStorage.removeItem(TOKEN_KEY); setToken(""); setOverview(null); }}>{t("adm.logout")}</button></p>
     </div></div>
   );
 }

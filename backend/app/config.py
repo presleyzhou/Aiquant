@@ -98,6 +98,12 @@ class Settings(BaseSettings):
     admin_token: str | None = None
     # Second accepted admin token during rotation (set NEXT, switch clients, then move it to ADMIN_TOKEN).
     admin_token_next: str | None = None
+    # Read-only operator token: may GET every /api/admin/* view but cannot settle
+    # withdrawals, resolve disputes or trigger jobs (dashboards, auditors).
+    admin_readonly_token: str | None = None
+    # Comma-separated Supabase account e-mails that are full admins when signed
+    # in (bearer token) — no shared secret needs to be pasted into the console.
+    admin_emails: str | None = None
     # Daily deployment monitor: drawdown alert threshold (percent, positive number).
     monitor_drawdown_pct: float = 10.0
     rl_monitor_per_hour: int = 12

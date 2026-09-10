@@ -8,9 +8,10 @@ import asyncio
 import logging
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.config import get_settings
 from app.services import audit, auth, disputes, kvstore, listings, payments, provider_health, wallet
 from app.services.factor_mine import (
     UNIVERSES,
@@ -20,6 +21,14 @@ from app.services.factor_mine import (
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(auth.require_admin)])
+
+
+@router.get("/whoami")
+async def whoami(request: Request):
+    """Which tier the presented credential grants — the console greys out
+    write actions for read-only operators instead of letting them fail."""
+    return {"role": request.state.admin_role, "emails_configured": bool(auth.admin_emails()),
+            "readonly_configured": bool(get_settings().admin_readonly_token)}
 
 
 @router.get("/overview")
@@ -62,7 +71,7 @@ class WithdrawalUpdate(BaseModel):
     note: str = Field("", max_length=300)
 
 
-@router.post("/withdrawals/{wid}")
+@router.post("/withdrawals/{wid}", dependencies=[Depends(auth.require_admin_write)])
 async def update_withdrawal(wid: str, req: WithdrawalUpdate):
     row = await asyncio.to_thread(kvstore.get, f"withdraw:{wid}")
     if not row:
@@ -90,7 +99,7 @@ class DisputeResolve(BaseModel):
     note: str = Field("", max_length=300)
 
 
-@router.post("/disputes/{order_id}")
+@router.post("/disputes/{order_id}", dependencies=[Depends(auth.require_admin_write)])
 async def resolve_dispute(order_id: str, req: DisputeResolve):
     try:
         row = await asyncio.to_thread(disputes.resolve, order_id, req.action, req.note)
@@ -176,13 +185,13 @@ def _recheck_blocking(max_factors: int, deadline: float | None = None) -> dict:
     return meta
 
 
-@router.post("/recheck")
+@router.post("/recheck", dependencies=[Depends(auth.require_admin_write)])
 async def recheck(max_factors: int = 60):
     audit.record("admin.recheck", actor="admin")
     return await asyncio.to_thread(_recheck_blocking, max(1, min(max_factors, 200)))
 
 
-@router.post("/warm")
+@router.post("/warm", dependencies=[Depends(auth.require_admin_write)])
 async def warm(markets: str = "us,crypto", refresh: bool = False):
     audit.record("admin.warm", actor="admin")
     """Pre-load the built-in daily panels so the shared KV layer is populated
@@ -217,7 +226,7 @@ async def warm(markets: str = "us,crypto", refresh: bool = False):
 OPS_BUDGET_SECONDS = 250
 
 
-@router.post("/ops")
+@router.post("/ops", dependencies=[Depends(auth.require_admin_write)])
 async def ops(max_factors: int = 60, monitor_limit: int = 10, recheck: bool = True):
     audit.record("admin.ops", actor="admin")
     """The single daily operations pass: warm the shared panels → recheck

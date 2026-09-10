@@ -7,6 +7,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { chartKeyHandler, isoDay, pctChange, signed } from "../chartA11y";
 import { useT } from "../i18n";
 import { api, type Candle, type Point } from "../api";
 
@@ -63,6 +64,7 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
   const [timeframe, setTimeframe] = useState<Timeframe>("1d");
   const [enabled, setEnabled] = useState<OverlayKey[]>(["sma"]);
   const [meta, setMeta] = useState<{ bars: number; interval: string } | null>(null);
+  const [summary, setSummary] = useState<{ n: number; from: string; to: string; close: number; chg: number; hi: number; lo: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -178,6 +180,13 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
         );
         chartRef.current?.timeScale().fitContent();
         setMeta({ bars: res.candles.length, interval: res.interval });
+        const c0 = res.candles[0];
+        const cN = res.candles[res.candles.length - 1];
+        setSummary(c0 && cN ? {
+          n: res.candles.length, from: isoDay(c0.time), to: isoDay(cN.time), close: cN.close,
+          chg: pctChange(c0.close, cN.close),
+          hi: Math.max(...res.candles.map((c: Candle) => c.high)), lo: Math.min(...res.candles.map((c: Candle) => c.low)),
+        } : null);
       })
       .catch((err: Error) => {
         if (!cancelled) {
@@ -252,6 +261,10 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
   const toggle = (key: OverlayKey) =>
     setEnabled((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
 
+  const a11yLabel = summary
+    ? t("a11y.candles", { symbol, n: String(summary.n), from: summary.from, to: summary.to, close: summary.close.toFixed(2),
+        chg: signed(summary.chg), hi: summary.hi.toFixed(2), lo: summary.lo.toFixed(2) })
+    : t("a11y.loading", { symbol });
   return (
     <div className="panel panel--grow panel--chart">
       <div className="panel__head">
@@ -294,7 +307,17 @@ export function ChartPanel({ symbol, palette = DEFAULT_PALETTE }: Props) {
         ))}
       </div>
 
-      <div className="chart-host" ref={hostRef}>
+      <div
+        className="chart-host chart-focusable"
+        ref={hostRef}
+        role="figure"
+        tabIndex={0}
+        aria-label={a11yLabel}
+        title={t("a11y.keys")}
+        onKeyDown={chartKeyHandler(() => chartRef.current)}
+        data-testid="price-chart"
+      >
+        <p className="sr-only">{a11yLabel} {t("a11y.keys")}</p>
         {(loading || error) && (
           <div className="chart-overlay">
             {error ? (

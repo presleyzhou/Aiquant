@@ -4,7 +4,7 @@ import {
 } from "../api";
 import { onAuth } from "../auth";
 import { useT } from "../i18n";
-import { deletePaper, notifySettings, saveNotifySettings, savedPaper, updatePaperNote, type PaperDeployment } from "../store";
+import { deletePaper, notifySettings, saveNotifySettings, savedPaper, updatePaperNote, type PaperDeployment , deployPaper } from "../store";
 import { EquityChart } from "./EquityChart";
 
 interface Props {
@@ -161,7 +161,17 @@ export function PaperPage({ hidden }: Props) {
         <MonitorCard monitor={monitor} />
 
         {deployments.length === 0 ? (
-          <div className="notice" style={{ maxWidth: 620 }}>{t("pp.empty")}</div>
+          <div className="notice" style={{ maxWidth: 620 }}>
+            {t("pp.empty")}
+            <div style={{ marginTop: 10 }}>
+              <button type="button" className="btn btn--mini" data-testid="pp-sample-load" onClick={() => setDeployments(deployPaper("strategy", t("pp.sample.name"), {
+                symbol: "SPY", strategy: "sma_cross", fast: 50, slow: 200, rsi_period: 14, rsi_oversold: 30, rsi_overbought: 70, kronos_horizon: 14, sample: true,
+              }))}>
+                {t("pp.sample.load")}
+              </button>
+              <span className="dim" style={{ fontSize: 11, marginLeft: 8 }}>{t("pp.sample.note")}</span>
+            </div>
+          </div>
         ) : (
           <>
             {summary && (

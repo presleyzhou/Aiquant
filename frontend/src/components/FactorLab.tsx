@@ -63,6 +63,14 @@ interface Props {
  * expressions, a real cross-sectional evaluator scores them (rank IC vs
  * forward returns, holdout confirmation, redundancy vs the accepted zoo),
  * and the compressed feedback steers the next round — Chain-of-Alpha style. */
+/** Three textbook factors for an empty library. Metrics are left at zero on
+ *  purpose — nothing here is measured until the user runs 体检 / 回测. */
+const SAMPLE_FACTORS: Array<Omit<SavedFactor, "savedAt">> = [
+  { expression: "rank(-delta(close, 5))", hypothesis: "[示例] 短期反转：近 5 日跌得多的股票倾向反弹", market: "us", horizon: 5, is_ic: 0, is_icir: 0, oos_ic: 0 },
+  { expression: "rank(ts_mean(close, 20) / ts_mean(close, 60) - 1)", hypothesis: "[示例] 中期动量：20 日均线相对 60 日均线的偏离", market: "us", horizon: 10, is_ic: 0, is_icir: 0, oos_ic: 0 },
+  { expression: "rank(-ts_std(returns(close, 1), 20))", hypothesis: "[示例] 低波动异象：近 20 日波动越低越好", market: "crypto", horizon: 5, is_ic: 0, is_icir: 0, oos_ic: 0 },
+];
+
 export function FactorLab({ hidden, aiEnabled }: Props) {
   const { t } = useT();
   const [market, setMarket] = useState("us");
@@ -808,7 +816,15 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                     </div>
                   )}
                   {saved.length === 0 ? (
-                    <div className="empty" style={{ padding: 18 }}>{t("fl.mine.empty")}</div>
+                    <div className="empty" style={{ padding: 18 }}>
+                      {t("fl.mine.empty")}
+                      <div style={{ marginTop: 10 }}>
+                        <button type="button" className="btn btn--mini" data-testid="fl-sample-load" onClick={() => setSaved(saveFactors(SAMPLE_FACTORS.map((f) => ({ ...f, savedAt: new Date().toISOString() }))))}>
+                          {t("fl.sample.load")}
+                        </button>
+                        <div className="dim" style={{ fontSize: 11, marginTop: 6 }}>{t("fl.sample.note")}</div>
+                      </div>
+                    </div>
                   ) : (
                     <>
                     {pruneMsg && <div className="dim" style={{ fontSize: 11, margin: "4px 0 6px" }}>{pruneMsg}</div>}
