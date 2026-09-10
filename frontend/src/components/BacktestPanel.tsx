@@ -38,6 +38,18 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
   const [rsiOversold, setRsiOversold] = useState(30);
   const [rsiOverbought, setRsiOverbought] = useState(70);
   const [kronosHorizon, setKronosHorizon] = useState(14);
+  // risk management (empty = off); mirrors the pipeline's controls so both engines speak one language
+  const [stopLoss, setStopLoss] = useState<string>("");
+  const [takeProfit, setTakeProfit] = useState<string>("");
+  const [trailing, setTrailing] = useState<string>("");
+  const [volTarget, setVolTarget] = useState<string>("");
+  const [maxPos, setMaxPos] = useState<number>(100);
+  const [riskOpen, setRiskOpen] = useState(false);
+  const num = (v: string) => (v.trim() === "" ? null : Number(v));
+  const riskFields = () => ({
+    stop_loss_pct: num(stopLoss), take_profit_pct: num(takeProfit), trailing_stop_pct: num(trailing), vol_target_pct: num(volTarget),
+    max_position: Math.max(0.05, Math.min(1, maxPos / 100)),
+  });
   const [presetName, setPresetName] = useState<string | null>(null);
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [running, setRunning] = useState(false);
@@ -76,6 +88,7 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
       rsi_oversold: rsiOversold,
       rsi_overbought: rsiOverbought,
       kronos_horizon: kronosHorizon,
+      ...riskFields(),
     });
   };
 
@@ -95,6 +108,11 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
       if (typeof p.rsi_oversold === "number") setRsiOversold(p.rsi_oversold);
       if (typeof p.rsi_overbought === "number") setRsiOverbought(p.rsi_overbought);
       if (typeof p.kronos_horizon === "number") setKronosHorizon(p.kronos_horizon);
+      if (typeof p.stop_loss_pct === "number") setStopLoss(String(p.stop_loss_pct));
+      if (typeof p.take_profit_pct === "number") setTakeProfit(String(p.take_profit_pct));
+      if (typeof p.trailing_stop_pct === "number") setTrailing(String(p.trailing_stop_pct));
+      if (typeof p.vol_target_pct === "number") setVolTarget(String(p.vol_target_pct));
+      if (typeof p.max_position === "number") setMaxPos(Math.round(p.max_position * 100));
       setPresetName(preset.name);
       void execute({ symbol: symbolRef.current, ...p });
     };
@@ -254,6 +272,36 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
 
         <label className="field">
           <span className="field__label">&nbsp;</span>
+          <button type="button" className="btn" onClick={() => setRiskOpen((v) => !v)} title={t("bt.risk.title")} data-testid="bt-risk-toggle">
+            {riskOpen ? t("bt.risk.hide") : t("bt.risk.show")}
+          </button>
+        </label>
+        {riskOpen && (
+          <>
+            <label className="field" title={t("bt.risk.sl.title")}>
+              <span className="field__label">{t("bt.risk.sl")}</span>
+              <input className="select" type="number" min={0.5} max={90} step={0.5} placeholder="—" value={stopLoss} onChange={(e) => setStopLoss(e.target.value)} data-testid="bt-sl" />
+            </label>
+            <label className="field" title={t("bt.risk.tp.title")}>
+              <span className="field__label">{t("bt.risk.tp")}</span>
+              <input className="select" type="number" min={0.5} max={500} step={0.5} placeholder="—" value={takeProfit} onChange={(e) => setTakeProfit(e.target.value)} />
+            </label>
+            <label className="field" title={t("bt.risk.ts.title")}>
+              <span className="field__label">{t("bt.risk.ts")}</span>
+              <input className="select" type="number" min={0.5} max={90} step={0.5} placeholder="—" value={trailing} onChange={(e) => setTrailing(e.target.value)} />
+            </label>
+            <label className="field" title={t("bt.risk.vt.title")}>
+              <span className="field__label">{t("bt.risk.vt")}</span>
+              <input className="select" type="number" min={1} max={200} step={1} placeholder="—" value={volTarget} onChange={(e) => setVolTarget(e.target.value)} />
+            </label>
+            <label className="field" title={t("bt.risk.mp.title")}>
+              <span className="field__label">{t("bt.risk.mp")}</span>
+              <input className="select" type="number" min={5} max={100} step={5} value={maxPos} onChange={(e) => setMaxPos(Number(e.target.value))} />
+            </label>
+          </>
+        )}
+        <label className="field">
+          <span className="field__label">&nbsp;</span>
           <button className="btn btn--primary" onClick={run} disabled={running}>
             {running ? t("bt.running") : t("bt.run")}
           </button>
@@ -290,6 +338,12 @@ export function BacktestPanel({ symbol, marketId = "us", presetTarget = true }: 
             <Stat label={t("bt.trades")} value={String(s.trade_count)} />
             <Stat label={t("bt.bh")} value={pct(s.buy_hold_return_pct)} tone={s.buy_hold_return_pct} />
           </div>
+          {s.exits_by_reason && Object.keys(s.exits_by_reason).some((k) => k !== "signal") && (
+            <div className="dim" style={{ fontSize: 11.5, margin: "-4px 0 8px" }} data-testid="bt-exits">
+              {t("bt.risk.exits")}{" "}
+              {Object.entries(s.exits_by_reason).map(([k, v]) => `${t(`bt.risk.reason.${k}` as "bt.risk.reason.signal")} ${v}`).join(" · ")}
+            </div>
+          )}
 
           {result.trades.length > 0 && (
             <div className="table-scroll">

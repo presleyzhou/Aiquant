@@ -406,6 +406,7 @@ export interface BacktestStats {
   buy_hold_return_pct: number;
   excess_vs_buy_hold_pct: number;
   bars: number;
+  exits_by_reason?: Record<string, number>;
 }
 
 export interface BacktestResult {
@@ -453,6 +454,19 @@ export interface MarketItem {
   payout_method?: string;
   sales?: number;
   created_at?: number;
+  days_listed?: number;
+  /** Daily server recheck summary for factor listings (null until the first run). */
+  health?: ListingHealth | null;
+}
+
+export interface ListingHealth {
+  checked_at: number | null;
+  as_of: string | null;
+  recent_ic: number;
+  oos_ic: number | null;
+  grades: Record<string, "A" | "B" | "C"> | null;
+  decayed: boolean;
+  best_horizon: number | null;
 }
 
 export interface FactorPayload {

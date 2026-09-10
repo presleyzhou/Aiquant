@@ -4808,3 +4808,6 @@ tbody tr:hover td {
 .rh__expr code { font-size: 10.5px; }
 .rh__cell { width: 34px; height: 22px; text-align: center; border-radius: 4px; color: rgba(0,0,0,0.65); font-weight: 700; }
 .fl-badge--family { color: var(--violet, #a78bfa); border-color: rgba(167,139,250,0.5); }
+
+.mk-badge--live { color: var(--up, #3be0a0); border-color: rgba(59,224,160,0.45); }
+.mk-badge--warn { color: var(--amber, #f0a500); border-color: rgba(240,165,0,0.45); }

@@ -65,6 +65,9 @@ async function mockApi(page: Page) {
             risk: "medium",
             integration: { backtest: { strategy: "ema_cross", fast: 10, slow: 40 } },
             price: { amount: "4.99", currency: "USD" },
+            days_listed: 12,
+            health: { as_of: "2026-09-09", recent_ic: 0.031, decayed: false, best_horizon: 5,
+              grades: { predictive: "A", stability: "B", robustness: "B", tradability: "A", significance: "B" } },
           },
         ],
       });
@@ -1519,4 +1522,35 @@ test("admin console: warm-up shows per-market coverage and missing names", async
   await expect(table).toContainText("MMC, EA");
   await expect(table).toContainText("yahoo+coingecko");
   await expect(table).toContainText("40 / 40");
+});
+
+test("backtest panel: risk controls are sent with the request and exits are summarised", async ({ page }) => {
+  let sent: Record<string, unknown> | null = null;
+  await page.route("**/api/analytics/backtest", async (route) => {
+    sent = route.request().postDataJSON();
+    await route.fulfill({ json: {
+      symbol: "AAPL", strategy: "sma_cross", period: "2y",
+      stats: { total_return_pct: 5, excess_vs_buy_hold_pct: -1, cagr_pct: 2.5, sharpe: 0.5, sortino: 0.7, max_drawdown_pct: -8, win_rate_pct: 50,
+        profit_factor: 1.1, trade_count: 4, buy_hold_return_pct: 6, exits_by_reason: { signal: 2, stop_loss: 2 } },
+      equity_curve: Array.from({ length: 50 }, (_, i) => ({ time: 1_690_000_000 + i * 86_400, value: 100_000 + i * 100 })),
+      benchmark_curve: Array.from({ length: 50 }, (_, i) => ({ time: 1_690_000_000 + i * 86_400, value: 100_000 + i * 120 })),
+      drawdown_curve: Array.from({ length: 50 }, (_, i) => ({ time: 1_690_000_000 + i * 86_400, value: -1 })),
+      trades: [] } });
+  });
+  await page.goto("/");
+  await page.getByTestId("bt-risk-toggle").first().click();
+  await page.getByTestId("bt-sl").first().fill("8");
+  await page.locator("button", { hasText: "运行回测" }).first().click();
+  await expect(page.getByTestId("bt-exits").first()).toContainText("止损 2");
+  expect(sent).toMatchObject({ stop_loss_pct: 8, max_position: 1 });
+});
+
+test("marketplace: live health badge shows days listed, recent IC and grades", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "市场" }).click();
+  const card = page.locator(".mk-card", { hasText: "趋势狙击" }).first();
+  await expect(card.locator(".mk-badge--live")).toContainText("上架 12 天");
+  await expect(card.locator(".mk-badge--live")).toContainText("+0.031");
+  await card.click();
+  await expect(page.getByTestId("mk-health")).toContainText("ABBAB");
 });

@@ -416,6 +416,11 @@ function Card({ item, installed, onOpen }: { item: MarketItem; installed: boolea
               <span className="mk-badge mk-badge--price">${item.price.amount}</span>
             ))}
           {!item.price && item.community && <span className="mk-badge mk-badge--free">{t("mk.free")}</span>}
+          {item.health && (
+            <span className={`mk-badge ${item.health.decayed ? "mk-badge--warn" : "mk-badge--live"}`} title={t("mk.health.title", { d: item.health.as_of ?? "" })}>
+              {t("mk.health.badge", { n: String(item.days_listed ?? 0), ic: (item.health.recent_ic >= 0 ? "+" : "") + item.health.recent_ic.toFixed(3), g: item.health.grades ? `${item.health.grades.predictive}${item.health.grades.stability}${item.health.grades.robustness}${item.health.grades.tradability}${item.health.grades.significance}` : "—" })}
+            </span>
+          )}
           <span className="mk-badge" style={{ color: meta.color }}>
             {t(meta.labelKey)}
           </span>
@@ -508,6 +513,15 @@ function DetailModal({
         <div className="mk-modal__body">
           <p className="mk-desc">{item.description}</p>
 
+          {item.health && (
+            <div className="mk-section" data-testid="mk-health">
+              <div className="mk-section__title">{t("mk.health.section")}</div>
+              <p className="mk-desc" style={{ fontSize: 12 }}>
+                {t("mk.health.detail", { n: String(item.days_listed ?? 0), ic: (item.health.recent_ic >= 0 ? "+" : "") + item.health.recent_ic.toFixed(3), g: item.health.grades ? `${item.health.grades.predictive}${item.health.grades.stability}${item.health.grades.robustness}${item.health.grades.tradability}${item.health.grades.significance}` : "—", d: item.health.as_of ?? "—" })}
+                {item.health.decayed ? ` ${t("mk.health.decayed")}` : ""}
+              </p>
+            </div>
+          )}
           {item.community && (
             <p className="dim" style={{ fontSize: 11.5, margin: "0 0 10px" }}>
               {t("mk.communityNote", {
