@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type PipelineAlternative,
@@ -14,7 +14,6 @@ import { buildPipelineShare, takePipelineShare } from "../../share";
 import { deployPaper, savedFactors, type SavedFactor } from "../../store";
 import { SectorStack } from "./charts";
 import { copyText } from "./clipboard";
-import { CompareRuns } from "./CompareRuns";
 import {
   BORROW_RANGE,
   FALLBACK_CONFIG,
@@ -49,16 +48,19 @@ import {
   type PresetId,
 } from "./form";
 import { signed3 } from "./format";
-import { MemoCard } from "./MemoCard";
 import { markdownReport } from "./report";
-import { VerdictCard } from "./VerdictCard";
-import { BacktestResults } from "./stages/BacktestResults";
 import { PortfolioForm } from "./stages/PortfolioForm";
-import { RiskResults } from "./stages/RiskResults";
-import { SignalResult } from "./stages/SignalResult";
-import { TargetBook } from "./stages/TargetBook";
-import { UniverseResult } from "./stages/UniverseResult";
-import { TicketCard } from "./TicketCard";
+
+// Result stages load on demand: the pipeline page's first paint only needs the form.
+const CompareRuns = lazy(() => import("./CompareRuns").then((mod) => ({ default: mod.CompareRuns })));
+const MemoCard = lazy(() => import("./MemoCard").then((mod) => ({ default: mod.MemoCard })));
+const VerdictCard = lazy(() => import("./VerdictCard").then((mod) => ({ default: mod.VerdictCard })));
+const BacktestResults = lazy(() => import("./stages/BacktestResults").then((mod) => ({ default: mod.BacktestResults })));
+const RiskResults = lazy(() => import("./stages/RiskResults").then((mod) => ({ default: mod.RiskResults })));
+const SignalResult = lazy(() => import("./stages/SignalResult").then((mod) => ({ default: mod.SignalResult })));
+const TargetBook = lazy(() => import("./stages/TargetBook").then((mod) => ({ default: mod.TargetBook })));
+const UniverseResult = lazy(() => import("./stages/UniverseResult").then((mod) => ({ default: mod.UniverseResult })));
+const TicketCard = lazy(() => import("./TicketCard").then((mod) => ({ default: mod.TicketCard })));
 
 interface Props {
   hidden: boolean;
@@ -674,7 +676,7 @@ export function PipelinePage({ hidden }: Props) {
               )}
               <p className="dim pl-hint">{t("pl.uni.historyHint")}</p>
               {result && (
-                <UniverseResult result={result} universe={universe} history={form.history} sectorLabel={sectorLabel} />
+                <Suspense fallback={<div className="empty pl-lazy">…</div>}><UniverseResult result={result} universe={universe} history={form.history} sectorLabel={sectorLabel} /></Suspense>
               )}
             </div>
           </section>
@@ -767,7 +769,7 @@ export function PipelinePage({ hidden }: Props) {
                   ))}
                 </select>
               </label>
-              {result && <SignalResult result={result} weightingLabel={weightingLabel} />}
+              {result && <Suspense fallback={<div className="empty pl-lazy">…</div>}><SignalResult result={result} weightingLabel={weightingLabel} /></Suspense>}
             </div>
           </section>
         </div>
@@ -795,10 +797,10 @@ export function PipelinePage({ hidden }: Props) {
 
         {/* ------------------------------------------------ stage 4 */}
         {result && (
-          <VerdictCard result={result} mobile={mobile} expanded={expanded} onToggle={() => setExpanded((e) => !e)} />
+          <Suspense fallback={<div className="empty pl-lazy">…</div>}><VerdictCard result={result} mobile={mobile} expanded={expanded} onToggle={() => setExpanded((e) => !e)} /></Suspense>
         )}
         {pinned && result && comparable && !collapsed && (
-          <CompareRuns pinned={pinned} current={result} currentLabel={runLabel(result)} onSwap={swapPinned} onClear={clearPinned} />
+          <Suspense fallback={<div className="empty pl-lazy">…</div>}><CompareRuns pinned={pinned} current={result} currentLabel={runLabel(result)} onSwap={swapPinned} onClear={clearPinned} /></Suspense>
         )}
         <section className="panel pl-card" ref={setStageRef(3)} id="pl-stage-4" tabIndex={-1} hidden={collapsed}>
           <div className="panel__head">
@@ -888,7 +890,7 @@ export function PipelinePage({ hidden }: Props) {
             {!bt ? (
               <div className="empty">{t("pl.bt.empty")}</div>
             ) : (
-              <BacktestResults
+              <Suspense fallback={<div className="empty pl-lazy">…</div>}><BacktestResults
                 result={result}
                 bt={bt}
                 holdoutWarn={holdoutWarn}
@@ -897,7 +899,7 @@ export function PipelinePage({ hidden }: Props) {
                 sortedAlts={sortedAlts}
                 schemeName={schemeName}
                 patch={patch}
-              />
+              /></Suspense>
             )}
           </div>
         </section>
@@ -912,7 +914,7 @@ export function PipelinePage({ hidden }: Props) {
               {!result || !bt ? (
                 <div className="empty">{t("pl.bt.empty")}</div>
               ) : (
-                <RiskResults result={result} bt={bt} sectorLabel={sectorLabel} />
+                <Suspense fallback={<div className="empty pl-lazy">…</div>}><RiskResults result={result} bt={bt} sectorLabel={sectorLabel} /></Suspense>
               )}
             </div>
           </section>
@@ -939,7 +941,7 @@ export function PipelinePage({ hidden }: Props) {
                 <div className="empty">{t("pl.bt.empty")}</div>
               ) : (
                 <>
-                  <TargetBook result={result} longShort={longShort} hasSectors={hasSectors} groupOf={groupOf} sectorLabel={sectorLabel} />
+                  <Suspense fallback={<div className="empty pl-lazy">…</div>}><TargetBook result={result} longShort={longShort} hasSectors={hasSectors} groupOf={groupOf} sectorLabel={sectorLabel} /></Suspense>
 
                   {result.target_weights.groups && result.target_weights.groups.length > 0 && (
                     <>
@@ -976,9 +978,9 @@ export function PipelinePage({ hidden }: Props) {
                   </div>
                   <p className="dim pl-hint">{t("pl.deploy.note")}</p>
 
-                  <TicketCard spec={result.spec ?? buildRequest()} sectorLabel={sectorLabel} longShort={longShort} />
+                  <Suspense fallback={<div className="empty pl-lazy">…</div>}><TicketCard spec={result.spec ?? buildRequest()} sectorLabel={sectorLabel} longShort={longShort} /></Suspense>
 
-                  <MemoCard result={result} enabled={aiEnabled} lang={lang} />
+                  <Suspense fallback={<div className="empty pl-lazy">…</div>}><MemoCard result={result} enabled={aiEnabled} lang={lang} /></Suspense>
                 </>
               )}
             </div>

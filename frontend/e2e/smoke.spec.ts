@@ -406,9 +406,6 @@ async function mockApi(page: Page) {
     if (path.startsWith("/api/marketplace/listings/c_e2e/payload"))
       return json({ id: "c_e2e", integration: { backtest: { strategy: "sma_cross", fast: 20, slow: 50 } } });
     if (path === "/api/wallet") return json({ balance_usd: 0, demo_usd: 0, entries: [] });
-    if (path === "/api/wallet/topup" && route.request().postDataJSON()?.method === "card")
-      return json({ kind: "topup", order_id: "cs_topup_1", provider: "stripe", method: "card", status: "pending", demo: false,
-        amount: "25.00", currency: "USD", hosted_url: "/?view=market&provider=stripe&topup=25.00&order=cs_topup_1" });
     if (path === "/api/wallet/topup")
       return json({ kind: "topup", order_id: "demo_top", provider: "demo", method: "card", status: "pending", demo: true,
         amount: "25.00", currency: "USD", hosted_url: null });
@@ -460,6 +457,10 @@ async function mockApi(page: Page) {
       return json({ order_id: "cs_test_ok", provider: "stripe", status: "confirmed", demo: false, item_id: "trend-sniper-pro", token: "tok.stripe" });
     if (path.startsWith("/api/fake-supabase/auth/v1/otp")) return json({});
     if (path.startsWith("/api/fake-supabase/auth/v1/")) return json({ session: null, user: null });
+    if (path === "/api/admin/warm")
+      return json({ kv: "file", warmed: {
+        us: { symbols: 116, requested: 118, missing: ["MMC", "EA"], provider: "yahoo+stooq", bars: 754, first: "2023-09-05", last: "2026-09-04", seconds: 12.3, shared: false },
+        crypto: { symbols: 40, requested: 40, missing: [], provider: "yahoo+coingecko", bars: 1090, first: "2023-09-05", last: "2026-09-08", seconds: 4.1, shared: false } } });
     // anything unmocked answers empty-but-valid, never hangs
     return json({});
   });
@@ -1480,6 +1481,10 @@ test("wallet: card top-up goes through the hosted checkout and credits on return
   await page.route("**/api/payments/config", (route) =>
     route.fulfill({ json: { methods: { card: true, crypto: false }, providers: { card: "stripe", crypto: null }, demo: false, connect: true,
       platform_fee_pct: 10, persistence: "kv", note: "Stripe", provider: "stripe", real: true } }));
+  // in this deployment the top-up rail is real: a Stripe Checkout session (mocked hosted page = our own return link)
+  await page.route("**/api/wallet/topup", (route) =>
+    route.fulfill({ json: { kind: "topup", order_id: "cs_topup_1", provider: "stripe", method: "card", status: "pending", demo: false,
+      amount: "25.00", currency: "USD", hosted_url: "/?view=market&provider=stripe&topup=25.00&order=cs_topup_1" } }));
   await page.goto("/");
   await page.getByRole("button", { name: "市场" }).click();
   await page.getByRole("button", { name: "充值", exact: true }).click();
@@ -1489,4 +1494,16 @@ test("wallet: card top-up goes through the hosted checkout and credits on return
   // the mocked hosted checkout is a same-origin return link → verification → credit
   await expect(page.getByText("充值 $25.00 已到账 ✓")).toBeVisible({ timeout: 15000 });
   await expect(page.locator(".mk-wallet b")).toHaveText("$25.00");
+});
+
+test("admin console: warm-up shows per-market coverage and missing names", async ({ page }) => {
+  await page.goto("/?admin=1");
+  await page.locator("input[type=password]").fill("e2e-token");
+  await page.getByRole("button", { name: "进入" }).click();
+  await page.getByTestId("adm-warm-run").click();
+  const table = page.getByTestId("adm-warm-table");
+  await expect(table).toContainText("116 / 118");
+  await expect(table).toContainText("MMC, EA");
+  await expect(table).toContainText("yahoo+coingecko");
+  await expect(table).toContainText("40 / 40");
 });

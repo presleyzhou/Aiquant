@@ -114,6 +114,19 @@ export interface FactorHealth {
   decayed: boolean;
 }
 
+export interface WarmedPanel {
+  symbols?: number;
+  requested?: number;
+  missing?: string[];
+  provider?: string;
+  bars?: number;
+  first?: string | null;
+  last?: string | null;
+  seconds: number;
+  shared?: boolean;
+  error?: string;
+}
+
 export interface IntegrationRow {
   name: string;
   status: "green" | "amber" | "red" | "off";
@@ -1229,6 +1242,10 @@ export const api = {
 
   admin: {
     overview: (token: string) => fetch("/api/admin/overview", { headers: { "X-Admin-Token": token } }).then(json<AdminOverview>),
+    warm: (token: string, refresh = false) =>
+      fetch(`/api/admin/warm?markets=us,crypto&refresh=${refresh ? "true" : "false"}`, { method: "POST", headers: { "X-Admin-Token": token } }).then(
+        json<{ warmed: Record<string, WarmedPanel>; kv: string }>,
+      ),
     integrations: (token: string) => fetch("/api/admin/integrations", { headers: { "X-Admin-Token": token } }).then(json<IntegrationsReport>),
     withdrawals: (token: string) => fetch("/api/admin/withdrawals", { headers: { "X-Admin-Token": token } }).then(json<{ withdrawals: AdminWithdrawal[] }>),
     updateWithdrawal: (token: string, id: string, status: "pending" | "paid" | "rejected", note: string) =>

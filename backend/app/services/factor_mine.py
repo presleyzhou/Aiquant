@@ -104,6 +104,24 @@ MAX_LEN_HINT = 240
 # ------------------------------------------------------------------- data
 
 
+def _panel_cache_key(market: str) -> str:
+    settings = get_settings()
+    provider = settings.panel_provider_crypto if market == "crypto" else settings.panel_provider_us
+    # universe size and provider in the key: expansions or a source switch refresh
+    return f"panel-{market}-{len(UNIVERSES[market])}-{provider}"
+
+
+def invalidate_panel(market: str) -> None:
+    """Forget every cached copy (memory, disk, shared KV) so the next load
+    re-downloads — the admin 'force refresh' behind the coverage table."""
+    from app.services import panel_cache
+
+    _PANEL_CACHE.pop(market, None)
+    key = _panel_cache_key(market)
+    disk_cache.delete(key)
+    panel_cache.invalidate(key)
+
+
 def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
     cached = _PANEL_CACHE.get(market)
     if cached and time.time() - cached[0] < _PANEL_TTL:
@@ -111,10 +129,7 @@ def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
 
     # Disk layer: survives process restarts and serverless instance churn,
     # and cuts the 40-ticker × 3y Yahoo download to one fetch per TTL window.
-    settings = get_settings()
-    provider = settings.panel_provider_crypto if market == "crypto" else settings.panel_provider_us
-    # universe size and provider in the key: expansions or a source switch refresh
-    cache_key = f"panel-{market}-{len(UNIVERSES[market])}-{provider}"
+    cache_key = _panel_cache_key(market)
     disk = disk_cache.load(cache_key, _PANEL_TTL)
     if isinstance(disk, dict) and "close" in disk:
         _PANEL_CACHE[market] = (time.time(), disk)

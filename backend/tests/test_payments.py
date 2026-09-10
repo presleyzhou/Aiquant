@@ -300,3 +300,37 @@ def test_integrations_and_version(monkeypatch):
     assert all(r["status"] in {"green", "amber", "red", "off"} for r in body["integrations"])
     assert sum(body["counts"].values()) == len(body["integrations"])
     monkeypatch.setattr(get_settings(), "admin_token", None)
+
+
+def test_admin_warm_reports_coverage_and_refresh_redownloads(monkeypatch):
+    import numpy as np
+    import pandas as pd
+
+    from app.config import get_settings
+    from app.services import factor_mine
+
+    calls = {"downloads": 0}
+    idx = pd.date_range("2024-01-01", periods=300, freq="B", tz=None)
+
+    def fake_download(tickers, period, label, min_symbols=8, market=None):
+        calls["downloads"] += 1
+        cols = list(tickers)[:5]
+        close = pd.DataFrame(np.cumsum(np.ones((300, len(cols))), axis=0) + 100, index=idx, columns=cols)
+        close.attrs.update({"provider": "yahoo+stooq", "requested": len(tickers), "missing": list(tickers)[5:7]})
+        return {"close": close, "open": close, "high": close, "low": close, "volume": close}
+
+    monkeypatch.setattr(factor_mine, "download_panel", fake_download)
+    factor_mine._PANEL_CACHE.clear()
+    monkeypatch.setattr(get_settings(), "admin_token", "secret-admin")
+    hdr = {"X-Admin-Token": "secret-admin"}
+    client = TestClient(app)
+    w1 = client.post("/api/admin/warm?markets=us", headers=hdr).json()["warmed"]["us"]
+    assert w1["symbols"] == 5 and w1["requested"] == len(factor_mine.UNIVERSES["us"]) and len(w1["missing"]) == 2
+    assert w1["provider"] == "yahoo+stooq" and "seconds" in w1
+    n = calls["downloads"]
+    client.post("/api/admin/warm?markets=us", headers=hdr)           # cached → no new download
+    assert calls["downloads"] == n
+    client.post("/api/admin/warm?markets=us&refresh=true", headers=hdr)  # forced → re-download
+    assert calls["downloads"] == n + 1
+    monkeypatch.setattr(get_settings(), "admin_token", None)
+    factor_mine._PANEL_CACHE.clear()

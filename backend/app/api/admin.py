@@ -142,7 +142,7 @@ async def recheck(max_factors: int = 60):
 
 
 @router.post("/warm")
-async def warm(markets: str = "us,crypto"):
+async def warm(markets: str = "us,crypto", refresh: bool = False):
     """Pre-load the built-in daily panels so the shared KV layer is populated
     before users arrive (run by the scheduled workflows). Reports provider,
     size and timing per market."""
@@ -156,10 +156,15 @@ async def warm(markets: str = "us,crypto"):
             continue
         t0 = time.time()
         try:
+            if refresh:
+                # re-download instead of serving the memory / disk / KV copy
+                from app.services.factor_mine import invalidate_panel
+
+                await asyncio.to_thread(invalidate_panel, market)
             panel = await asyncio.to_thread(_load_panel_blocking, market)
             out[market] = {
-                "symbols": int(panel["close"].shape[1]), "bars": int(len(panel["close"])),
-                "provider": panel_providers.provider_of(panel), "seconds": round(time.time() - t0, 2),
+                **panel_providers.coverage_of(panel),  # symbols / requested / missing / provider / bars / first / last
+                "seconds": round(time.time() - t0, 2),
                 "shared": panel_cache.enabled(),
             }
         except Exception as exc:

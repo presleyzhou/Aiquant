@@ -77,3 +77,10 @@ def store(key: str, obj) -> None:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def delete(key: str) -> None:
+    try:
+        _path(key).unlink(missing_ok=True)
+    except OSError:
+        pass

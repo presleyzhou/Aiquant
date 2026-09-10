@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type AdminOpsRun, type AdminOverview, type AdminWithdrawal, type MarketItem, type IntegrationsReport } from "../api";
+import { api, type AdminOpsRun, type AdminOverview, type AdminWithdrawal, type MarketItem, type IntegrationsReport, type WarmedPanel } from "../api";
 import { useT } from "../i18n";
 import { fallbackTone } from "./pipeline/format";
 
@@ -13,6 +13,21 @@ export function AdminPage() {
   const [draft, setDraft] = useState("");
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [integ, setInteg] = useState<IntegrationsReport | null>(null);
+  const [warmed, setWarmed] = useState<Record<string, WarmedPanel> | null>(null);
+  const [warming, setWarming] = useState(false);
+
+  const runWarm = async (refresh: boolean) => {
+    setWarming(true);
+    setError(null);
+    try {
+      const res = await api.admin.warm(token, refresh);
+      setWarmed(res.warmed);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setWarming(false);
+    }
+  };
   const [withdrawals, setWithdrawals] = useState<AdminWithdrawal[]>([]);
   const [orders, setOrders] = useState<Array<Record<string, unknown>>>([]);
   const [listings, setListings] = useState<Array<MarketItem & { status: string; seller: string }>>([]);
@@ -94,6 +109,38 @@ export function AdminPage() {
               </li>
             ))}
           </ul>
+        )}
+      </section>
+      <section className="panel mk-mine" data-testid="adm-warm">
+        <div className="panel__head">
+          <span className="panel__title">{t("adm.warm.title")}</span>
+          <span className="panel__meta">
+            <button className="ghost" disabled={warming} onClick={() => runWarm(false)} data-testid="adm-warm-run">{warming ? "…" : t("adm.warm.run")}</button>
+            <button className="ghost" style={{ marginLeft: 8 }} disabled={warming} onClick={() => runWarm(true)} title={t("adm.warm.refreshTitle")}>{t("adm.warm.refresh")}</button>
+          </span>
+        </div>
+        {!warmed ? <div className="empty" style={{ padding: 14 }}>{t("adm.warm.hint")}</div> : (
+          <div style={{ overflowX: "auto" }}>
+            <table className="pp-compare mk-mine__table" data-testid="adm-warm-table">
+              <thead><tr><th style={{ textAlign: "left" }}>{t("fl.market")}</th><th>{t("adm.warm.coverage")}</th><th style={{ textAlign: "left" }}>{t("adm.warm.provider")}</th><th>{t("adm.warm.last")}</th><th>{t("adm.ops.seconds")}</th><th style={{ textAlign: "left" }}>{t("adm.warm.missing")}</th></tr></thead>
+              <tbody>
+                {Object.entries(warmed).map(([mk, w]) => (
+                  <tr key={mk}>
+                    <td style={{ textAlign: "left" }}>{mk === "crypto" ? t("fl.market.crypto") : t("fl.market.us")}</td>
+                    {w.error ? <td colSpan={5} className="dn" style={{ textAlign: "left" }}>{w.error}</td> : (
+                      <>
+                        <td className={(w.missing?.length ?? 0) > 0 ? "dn" : "up"}>{w.symbols} / {w.requested ?? w.symbols}</td>
+                        <td style={{ textAlign: "left" }}>{w.provider}{w.shared ? ` · ${t("adm.warm.shared")}` : ""}</td>
+                        <td>{w.last ?? "—"}</td>
+                        <td>{w.seconds.toFixed(1)}s</td>
+                        <td className="dim" style={{ textAlign: "left", fontSize: 11 }}>{w.missing && w.missing.length ? w.missing.join(", ") : "—"}</td>
+                      </>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
       <div className="stat-grid" style={{ marginBottom: 14 }}>

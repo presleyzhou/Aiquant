@@ -103,3 +103,16 @@ def describe(key: str) -> dict | None:
         return json.loads(raw) if raw else None
     except Exception:
         return None
+
+
+def invalidate(key: str) -> bool:
+    """Drop the shared copy (all fields + manifest). Best effort."""
+    if not enabled():
+        return False
+    try:
+        for f in (*FIELDS, "manifest"):
+            kvstore._kv("DEL", f"panel:{key}:{f}")
+        return True
+    except Exception as exc:
+        log.warning("panel cache invalidate failed for %s: %s", key, exc)
+        return False
