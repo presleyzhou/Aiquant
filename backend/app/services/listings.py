@@ -88,8 +88,8 @@ def _validate_payload(kind: str, payload: dict) -> dict:
         except factor_dsl.FactorError as exc:
             raise ListingError(f"invalid factor expression: {exc}") from exc
         market = str(payload.get("market", "us"))
-        if market not in {"us", "crypto"}:
-            raise ListingError("factor market must be us or crypto")
+        if market not in {"us", "crypto", "crypto_1h"}:
+            raise ListingError("factor market must be us, crypto or crypto_1h")
         horizon = int(payload.get("horizon", 10))
         if not 1 <= horizon <= 60:
             raise ListingError("factor horizon must be 1–60")

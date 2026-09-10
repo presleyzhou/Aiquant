@@ -5,6 +5,7 @@ import { DeployButton } from "./DeployButton";
 import { ExplainButton } from "./ExplainButton";
 import { FactorReportButton } from "./FactorReport";
 import { decayState, fmt, transferState } from "./factorLibUtils";
+import { marketKey } from "./marketLabel";
 
 export type CheckState = FactorCheck | "pending" | "failed" | undefined;
 export type MarginalState = MarginalResult | "pending" | "failed" | undefined;
@@ -43,7 +44,7 @@ export function FactorLibraryRow({
       <div style={{ minWidth: 0, flex: 1 }}>
         <code style={{ fontSize: 11, wordBreak: "break-all" }}>{f.expression}</code>
         <div className="dim" style={{ fontSize: 11 }}>
-          {f.market === "crypto" ? t("fl.market.crypto") : t("fl.market.us")} · IC {fmt(f.is_ic)} · OOS {fmt(f.oos_ic)} · {f.savedAt.slice(0, 10)}
+          {t(marketKey(f.market))} · IC {fmt(f.is_ic)} · OOS {fmt(f.oos_ic)} · {f.savedAt.slice(0, 10)}
         </div>
         {h && h !== "pending" && h !== "failed" && (
           <div className={`fl-badge ${decayState(f, h) === "ok" ? "fl-badge--ok" : "fl-badge--warn"}`}>
@@ -54,7 +55,7 @@ export function FactorLibraryRow({
         {tr && tr !== "pending" && tr !== "failed" && (
           <div className={`fl-badge ${transferState(f, tr) === "ok" ? "fl-badge--ok" : "fl-badge--warn"}`}>
             {t(transferState(f, tr) === "ok" ? "fl.tr.ok" : "fl.tr.fail", {
-              m: tr.market === "crypto" ? t("fl.tr.crypto") : t("fl.tr.us"), a: fmt(tr.is_ic), b: fmt(tr.oos_ic),
+              m: tr.market === "us" ? t("fl.tr.us") : t("fl.tr.crypto"), a: fmt(tr.is_ic), b: fmt(tr.oos_ic),
             })}
           </div>
         )}

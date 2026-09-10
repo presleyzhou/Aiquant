@@ -83,7 +83,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   const [costBps, setCostBps] = useState<number>(10);
   const [costTouched, setCostTouched] = useState(false);
   const [coverage, setCoverage] = useState<PanelStatus | null>(null);
-  const [libMarket, setLibMarket] = useState<"all" | "us" | "crypto">("all");
+  const [libMarket, setLibMarket] = useState<"all" | "us" | "crypto" | "crypto_1h">("all");
   const [libStatus, setLibStatus] = useState<"all" | "attention" | "clean">("all");
   const [libSort, setLibSort] = useState<"recent" | "ic" | "oos" | "marginal" | "horizon">("recent");
 
@@ -369,7 +369,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
   };
 
   const runTransfer = async (f: SavedFactor) => {
-    const other = f.market === "crypto" ? "us" : "crypto";
+    const other = f.market === "us" ? "crypto" : "us"; // hourly crypto factors are tested on daily US
     setTransfer((prev) => ({ ...prev, [key(f)]: "pending" }));
     try {
       const result = await api.factorCheck(f.expression, other, f.horizon);
@@ -479,7 +479,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
             {!aiEnabled && <div className="notice" style={{ maxWidth: 560 }}>{t("lab.aiOff")}</div>}
             {coverage && (
               <div className={`fl-coverage ${coverage.missing.length ? "fl-coverage--partial" : ""}`} data-testid="fl-coverage">
-                {t("fl.coverage", { s: String(coverage.symbols), r: String(coverage.requested), p: coverage.provider, d: coverage.last ?? "—" })}
+                {t("fl.coverage", { s: String(coverage.symbols), r: String(coverage.requested), p: coverage.provider, d: coverage.last ?? "—" })}{coverage.interval === "1h" ? ` · ${t("fl.coverage.hourly")}` : ""}
                 {coverage.missing.length > 0 && ` · ${t("fl.coverage.missing", { m: coverage.missing.slice(0, 8).join(", ") })}`}
               </div>
             )}
@@ -496,6 +496,7 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                   >
                     <option value="us">{t("fl.market.us")}</option>
                     <option value="crypto">{t("fl.market.crypto")}</option>
+                    <option value="crypto_1h">{t("fl.market.crypto_1h")}</option>
                   </select>
                 </label>
                 <label className="field">
@@ -737,10 +738,11 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                   </div>
                   {saved.length >= 4 && (
                     <div className="fl-libbar" data-testid="fl-libbar">
-                      <select className="select" value={libMarket} onChange={(e) => setLibMarket(e.target.value as "all" | "us" | "crypto")}>
+                      <select className="select" value={libMarket} onChange={(e) => setLibMarket(e.target.value as "all" | "us" | "crypto" | "crypto_1h")}>
                         <option value="all">{t("fl.lib.allMarkets")}</option>
                         <option value="us">{t("fl.market.us")}</option>
                         <option value="crypto">{t("fl.market.crypto")}</option>
+                    <option value="crypto_1h">{t("fl.market.crypto_1h")}</option>
                       </select>
                       <select className="select" value={libStatus} onChange={(e) => setLibStatus(e.target.value as "all" | "attention" | "clean")}>
                         <option value="all">{t("fl.lib.allStatus")}</option>

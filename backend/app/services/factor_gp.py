@@ -36,13 +36,13 @@ from app.services.factor_mine import (
     MAX_ZOO_CORR,
     MIN_MARGINAL_SHARPE,
     MODES,
-    UNIVERSES,
     _load_panel_blocking,
     _portfolio_from_values,
     _verdict,
     cost_bps_for,
     evaluate_candidate,
     marginal_contribution_blocking,
+    normalize_market,
 )
 
 TS_UNARY = ["ts_mean", "ts_std", "ts_sum", "ts_min", "ts_max", "ts_rank", "delay", "delta"]
@@ -231,7 +231,7 @@ def evolve_blocking(
 ) -> dict:
     """Run the GA synchronously, calling `emit(event)` after each generation.
     Returns the final report (also emitted as the `done` event by the caller)."""
-    market = market if market in UNIVERSES else "us"
+    market = normalize_market(market)
     horizon = max(1, min(30, horizon))
     population_size = max(20, min(80, population_size))
     generations = max(3, min(40, generations))

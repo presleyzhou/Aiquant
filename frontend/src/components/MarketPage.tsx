@@ -453,7 +453,7 @@ function FootBadge({ item }: { item: MarketItem }) {
     return <span className={`mk-state mk-state--${item.status.state}`}>{item.status.label}</span>;
   }
   if (item.type === "factor" && item.integration.factor) {
-    return <span className="mk-tag">{item.integration.factor.market === "crypto" ? "CRYPTO" : "US"}</span>;
+    return <span className="mk-tag">{item.integration.factor.market === "crypto_1h" ? "CRYPTO · 1H" : item.integration.factor.market === "crypto" ? "CRYPTO" : "US"}</span>;
   }
   return null;
 }

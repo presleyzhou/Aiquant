@@ -28,7 +28,7 @@ import pandas as pd
 
 log = logging.getLogger("aiquant.panel")
 
-_PERIOD_DAYS = {"1y": 366, "2y": 731, "3y": 1096, "5y": 1827, "max": 3650}
+_PERIOD_DAYS = {"90d": 90, "1y": 366, "2y": 731, "3y": 1096, "5y": 1827, "max": 3650}
 CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC")
 BINANCE_URL = "https://api.binance.com/api/v3/klines"
 COINGECKO_URL = "https://api.coingecko.com/api/v3"
@@ -248,10 +248,11 @@ def akshare_frames(symbols: list[str], period: str) -> dict[str, pd.DataFrame]:
 # ------------------------------------------------------------------- Yahoo
 
 
-def yahoo_frames(symbols: list[str], period: str) -> dict[str, pd.DataFrame]:
+def yahoo_frames(symbols: list[str], period: str, interval: str = "1d") -> dict[str, pd.DataFrame]:
     import yfinance as yf
 
-    raw = yf.download(list(symbols), period=period, interval="1d", auto_adjust=True,
+    yf_period = {"90d": "3mo"}.get(period, period) if interval == "1h" else period
+    raw = yf.download(list(symbols), period=yf_period, interval=interval, auto_adjust=True,
                       progress=False, group_by="column", threads=True)
     if raw is None or raw.empty:
         raise LookupError("yahoo: empty download")
@@ -268,7 +269,10 @@ def yahoo_frames(symbols: list[str], period: str) -> dict[str, pd.DataFrame]:
             df = pd.DataFrame(cols).dropna(how="all")
             if not df.empty:
                 idx = pd.to_datetime(df.index)
-                df.index = (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
+                if interval == "1d":
+                    df.index = (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
+                else:
+                    df.index = idx.tz_convert("UTC").tz_localize(None) if idx.tz is not None else idx
                 frames[sym] = df.astype(float)
     return frames
 
@@ -341,6 +345,84 @@ def _crypto_frames(symbols: list[str], period: str, provider: str) -> tuple[dict
 
 
 MAX_STOOQ_FILL = 12
+HOURLY_PERIOD = "90d"           # Binance / CoinGecko both give ~90 days of hourly bars for free
+
+
+def _to_utc_naive(df: pd.DataFrame) -> pd.DataFrame:
+    idx = pd.to_datetime(df.index)
+    df = df.copy()
+    df.index = idx.tz_convert("UTC").tz_localize(None) if idx.tz is not None else idx
+    return df
+
+
+def coingecko_frame_hourly(coin_id: str) -> pd.DataFrame:
+    """Hourly close/volume for the last 90 days (CoinGecko returns hourly points
+    for 2–90 day windows). Open = previous close; high/low span the two."""
+    resp = httpx.get(f"{COINGECKO_URL}/coins/{coin_id}/market_chart", params={"vs_currency": "usd", "days": 90},
+                     headers=_coingecko_headers(), timeout=30.0)
+    resp.raise_for_status()
+    body = resp.json()
+    prices = pd.DataFrame(body.get("prices", []), columns=["ts", "Close"])
+    vols = pd.DataFrame(body.get("total_volumes", []), columns=["ts", "Volume"])
+    if prices.empty:
+        raise LookupError(f"coingecko: no hourly prices for {coin_id}")
+    df = prices.merge(vols, on="ts", how="left")
+    df["Date"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.tz_localize(None).dt.floor("h")
+    df = df.drop_duplicates("Date", keep="last").set_index("Date")[["Close", "Volume"]].astype(float)
+    df["Open"] = df["Close"].shift(1)
+    df["High"] = df[["Open", "Close"]].max(axis=1)
+    df["Low"] = df[["Open", "Close"]].min(axis=1)
+    return df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+
+
+def _crypto_frames_hourly(symbols: list[str]) -> tuple[dict[str, pd.DataFrame], list[str]]:
+    """Binance 1h klines → Yahoo 1h → CoinGecko hourly for whatever is still missing."""
+    from app.services import fallback_data
+
+    frames: dict[str, pd.DataFrame] = {}
+    used: list[str] = []
+
+    def one(sym: str):
+        try:
+            return sym, _to_utc_naive(fallback_data.binance_klines(sym, HOURLY_PERIOD, "1h"))
+        except Exception as exc:  # unlisted pair or geo-block; the next provider gets a try
+            log.info("binance 1h failed for %s: %s", sym, exc)
+            return sym, None
+
+    with ThreadPoolExecutor(max_workers=_WORKERS_BINANCE) as pool:
+        for sym, df in pool.map(one, symbols):
+            if df is not None and not df.empty:
+                frames[sym] = df
+    if frames:
+        used.append("binance")
+    missing = [s for s in symbols if s not in frames]
+    if missing:
+        try:
+            yh = yahoo_frames(missing, HOURLY_PERIOD, interval="1h")
+            if yh:
+                frames.update(yh)
+                used.append("yahoo")
+        except Exception as exc:
+            log.info("yahoo 1h failed: %s", exc)
+    missing = [s for s in symbols if s not in frames]
+    if missing and _settings().coingecko_fill:
+        try:
+            ids = coingecko_ids(missing)
+            filled = 0
+            for sym in missing:
+                cid = ids.get(sym)
+                if not cid:
+                    continue
+                try:
+                    frames[sym] = coingecko_frame_hourly(cid)
+                    filled += 1
+                except Exception as exc:
+                    log.info("coingecko 1h failed for %s: %s", sym, exc)
+            if filled:
+                used.append("coingecko")
+        except Exception as exc:
+            log.info("coingecko id lookup failed: %s", exc)
+    return frames, used
 
 
 def _equity_frames(symbols: list[str], period: str, provider: str, min_symbols: int) -> tuple[dict[str, pd.DataFrame], list[str]]:
@@ -378,13 +460,27 @@ def _equity_frames(symbols: list[str], period: str, provider: str, min_symbols: 
 
 
 def download_panel(tickers: list[str], period: str, label: str, min_symbols: int = 8,
-                   market: str | None = None) -> dict[str, pd.DataFrame]:
+                   market: str | None = None, interval: str = "1d") -> dict[str, pd.DataFrame]:
     """The panel for `tickers`, from the configured providers, cleaned. The
     provider chain is recorded in `panel["close"].attrs["provider"]`."""
     from app.services import provider_health
 
     settings = _settings()
     tickers = list(dict.fromkeys(str(t).upper() for t in tickers))
+    if interval == "1h":
+        # Hourly panels are crypto-only (24×7 bars, no session gaps to reason about).
+        t0 = time.time()
+        frames, used = _crypto_frames_hourly(tickers)
+        provider_health.record("crypto_1h", "binance", used, time.time() - t0)
+        if not frames:
+            raise LookupError(f"could not download the hourly {label} universe")
+        panel = clean_panel(_assemble(frames), label, min_symbols)
+        kept = set(panel["close"].columns)
+        tag = "+".join(dict.fromkeys(used)) + "@1h"
+        for field in panel.values():
+            field.attrs.update({"provider": tag, "requested": len(tickers), "missing": [t for t in tickers if t not in kept], "interval": "1h"})
+        log.info("hourly panel %s: %d symbols × %d bars via %s", label, panel["close"].shape[1], len(panel["close"]), tag)
+        return panel
     crypto = [t for t in tickers if is_crypto(t)] if market != "us" else []
     equity = [t for t in tickers if t not in crypto]
     frames: dict[str, pd.DataFrame] = {}
@@ -409,6 +505,7 @@ def download_panel(tickers: list[str], period: str, label: str, min_symbols: int
         field.attrs["provider"] = tag
         field.attrs["requested"] = len(tickers)
         field.attrs["missing"] = missing
+        field.attrs["interval"] = "1d"
     log.info("panel %s: %d symbols via %s", label, panel["close"].shape[1], tag)
     return panel
 
@@ -431,6 +528,7 @@ def coverage_of(panel: dict[str, pd.DataFrame]) -> dict:
         "missing": list(attrs.get("missing") or []),
         "provider": provider_of(panel),
         "bars": int(len(close)),
+        "interval": attrs.get("interval", "1d"),
         "first": str(close.index[0].date()) if len(close) else None,
-        "last": str(close.index[-1].date()) if len(close) else None,
+        "last": (str(close.index[-1]) if attrs.get("interval") == "1h" else str(close.index[-1].date())) if len(close) else None,
     }

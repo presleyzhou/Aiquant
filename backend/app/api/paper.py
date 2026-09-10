@@ -26,8 +26,9 @@ from app.services import backtest as bt
 from app.services import factor_dsl
 from app.services.datasource import market_data
 from app.services.factor_mine import (
-    UNIVERSES,
     _load_panel_blocking,
+    normalize_market,
+    periods_per_year,
     portfolio_backtest_blocking,
 )
 from app.services.pipeline import current_holdings_blocking, run_pipeline_blocking
@@ -117,7 +118,7 @@ def _daily_returns(equity: list[dict], n: int = 60) -> list[dict]:
 
 
 def _factor_holdings(expression: str, market: str, top_n: int, invert: bool) -> dict:
-    panel = _load_panel_blocking(market if market in UNIVERSES else "us")
+    panel = _load_panel_blocking(normalize_market(market))
     values, _ = factor_dsl.compute(expression, panel)
     if invert:
         values = -values
@@ -203,7 +204,7 @@ async def compute_track(kind: str, started_at: date, config: dict) -> dict:
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         full_eq, full_bench = result["backtest"]["equity_curve"], result["backtest"]["benchmark_curve"]
-        ann = 252 if result["spec"]["market"] == "us" else 365
+        ann = periods_per_year(result["spec"]["market"])
         trades_live = None
         try:
             position = await asyncio.to_thread(current_holdings_blocking, config)
@@ -225,7 +226,7 @@ async def compute_track(kind: str, started_at: date, config: dict) -> dict:
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         full_eq, full_bench = result["equity_curve"], result["benchmark_curve"]
-        ann = 252 if market == "us" else 365
+        ann = periods_per_year(market)
         trades_live = None
         # current holdings: top-N of the factor on the latest COMPLETE bar
         # (the newest row is often partial — a few symbols not yet printed).

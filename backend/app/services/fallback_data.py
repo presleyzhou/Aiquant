@@ -19,7 +19,7 @@ import pandas as pd
 log = logging.getLogger("aiquant.fallback")
 
 _PERIOD_DAYS = {
-    "1d": 2, "5d": 7, "1mo": 31, "3mo": 93, "6mo": 186,
+    "1d": 2, "5d": 7, "1mo": 31, "90d": 91, "3mo": 93, "6mo": 186,
     "1y": 366, "2y": 731, "3y": 1096, "5y": 1827, "max": 3650,
 }
 

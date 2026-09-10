@@ -76,6 +76,30 @@ UNIVERSES: dict[str, list[str]] = {
     ],
 }
 
+# Hourly research universes (24×7 crypto). Kept apart from UNIVERSES so the
+# daily pipeline and sector maps never see them; `universe_for()` resolves both.
+HOURLY_UNIVERSES: dict[str, list[str]] = {"crypto_1h": list(UNIVERSES["crypto"])}
+ALL_MARKETS = tuple(UNIVERSES) + tuple(HOURLY_UNIVERSES)
+PERIODS_PER_YEAR = {"us": 252, "crypto": 365, "crypto_1h": 24 * 365}
+_HOURLY_PANEL_TTL = 3600
+
+
+def universe_for(market: str) -> list[str]:
+    return UNIVERSES.get(market) or HOURLY_UNIVERSES.get(market) or UNIVERSES["us"]
+
+
+def is_hourly(market: str) -> bool:
+    return market.endswith("_1h")
+
+
+def periods_per_year(market: str) -> int:
+    return PERIODS_PER_YEAR.get(market, 252)
+
+
+def normalize_market(market: str) -> str:
+    return market if market in ALL_MARKETS else "us"
+
+
 HOLDOUT_FRACTION = 0.2      # trailing slice the LLM never gets feedback on
 ROLLING_IC_WINDOW = 120     # trailing window for dynamic composite weights
 MIN_ABS_IC = 0.015          # "standard" in-sample bar (kept for tests/back-compat)
@@ -106,9 +130,9 @@ MAX_LEN_HINT = 240
 
 def _panel_cache_key(market: str) -> str:
     settings = get_settings()
-    provider = settings.panel_provider_crypto if market == "crypto" else settings.panel_provider_us
+    provider = settings.panel_provider_crypto if market.startswith("crypto") else settings.panel_provider_us
     # universe size and provider in the key: expansions or a source switch refresh
-    return f"panel-{market}-{len(UNIVERSES[market])}-{provider}"
+    return f"panel-{market}-{len(universe_for(market))}-{provider}"
 
 
 def invalidate_panel(market: str) -> None:
@@ -123,14 +147,15 @@ def invalidate_panel(market: str) -> None:
 
 
 def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
+    ttl = _HOURLY_PANEL_TTL if is_hourly(market) else _PANEL_TTL
     cached = _PANEL_CACHE.get(market)
-    if cached and time.time() - cached[0] < _PANEL_TTL:
+    if cached and time.time() - cached[0] < ttl:
         return cached[1]
 
     # Disk layer: survives process restarts and serverless instance churn,
     # and cuts the 40-ticker × 3y Yahoo download to one fetch per TTL window.
     cache_key = _panel_cache_key(market)
-    disk = disk_cache.load(cache_key, _PANEL_TTL)
+    disk = disk_cache.load(cache_key, ttl)
     if isinstance(disk, dict) and "close" in disk:
         _PANEL_CACHE[market] = (time.time(), disk)
         return disk
@@ -145,21 +170,25 @@ def _load_panel_blocking(market: str) -> dict[str, pd.DataFrame]:
         disk_cache.store(cache_key, shared)
         return shared
 
-    panel = download_panel(UNIVERSES[market], "3y", market, market=market)
+    if is_hourly(market):
+        panel = download_panel(universe_for(market), "90d", market, market="crypto", interval="1h")
+    else:
+        panel = download_panel(UNIVERSES[market], "3y", market, market=market)
     _PANEL_CACHE[market] = (time.time(), panel)
     disk_cache.store(cache_key, panel)
-    panel_cache.store(cache_key, panel, _PANEL_TTL)
+    panel_cache.store(cache_key, panel, ttl)
     return panel
 
 
 def download_panel(tickers: list[str], period: str, label: str, min_symbols: int = 8,
-                   market: str | None = None) -> dict[str, pd.DataFrame]:
+                   market: str | None = None, interval: str = "1d") -> dict[str, pd.DataFrame]:
     """Download and clean an OHLCV panel for `tickers` (blocking). Routed
     through `panel_providers`: Binance (+CoinGecko) for crypto, AkShare when
-    installed for US equities, Yahoo as the universal fallback."""
+    installed for US equities, Yahoo as the universal fallback; interval "1h"
+    takes the hourly crypto chain."""
     from app.services import panel_providers
 
-    return panel_providers.download_panel(tickers, period, label, min_symbols=min_symbols, market=market)
+    return panel_providers.download_panel(tickers, period, label, min_symbols=min_symbols, market=market, interval=interval)
 
 
 # ---------------------------------------------------------------- metrics
@@ -188,7 +217,7 @@ def cost_bps_for(market: str, override: float | None = None) -> float:
     from app.config import get_settings
 
     st = get_settings()
-    return float(st.cost_bps_crypto if market == "crypto" else st.cost_bps_us)
+    return float(st.cost_bps_crypto if market.startswith("crypto") else st.cost_bps_us)
 
 
 def _book_turnover(ranked: pd.DataFrame, horizon: int, top_n: int, sign: float) -> float:
@@ -529,7 +558,7 @@ async def mine_stream(
         yield {"type": "error", "message": "AI is not configured (ANTHROPIC_API_KEY)."}
         return
 
-    market = market if market in UNIVERSES else "us"
+    market = normalize_market(market)
     horizon = max(1, min(30, horizon))
     rounds = max(1, min(6, rounds))
     per_round = max(2, min(6, per_round))
@@ -709,7 +738,7 @@ def portfolio_backtest_blocking(
     No look-ahead: the factor is computed on data up to day t and the
     resulting weights earn returns from day t+1 onward.
     """
-    market = market if market in UNIVERSES else "us"
+    market = normalize_market(market)
     panel = _load_panel_blocking(market)
     values, _ = factor_dsl.compute(expression, panel)
     if invert:
@@ -759,7 +788,7 @@ def _portfolio_from_values(
     peak = equity.cummax()
     dd = (equity / peak - 1) * 100
 
-    ann = 252 if market == "us" else 365
+    ann = periods_per_year(market)
     years = len(net) / ann
 
     def stats(series: pd.Series, eq: pd.Series) -> dict:
@@ -820,7 +849,7 @@ def composite_backtest_blocking(
         raise factor_dsl.FactorError("composite needs at least 2 factors")
     if len(factors) > 8:
         raise factor_dsl.FactorError("composite supports at most 8 factors")
-    market = market if market in UNIVERSES else "us"
+    market = normalize_market(market)
     weighting = weighting if weighting in ("equal", "ic", "rolling") else "ic"
 
     panel = _load_panel_blocking(market)
@@ -899,7 +928,7 @@ def check_factor_blocking(expression: str, market: str, horizon: int) -> dict:
     """One factor's current health on one market: full-window IC, holdout IC,
     and the trailing-60-evaluable-day IC that exposes decay. Serves both the
     re-checkup button and the cross-market robustness test."""
-    market = market if market in UNIVERSES else "us"
+    market = normalize_market(market)
     horizon = max(1, min(30, horizon))
 
     panel = _load_panel_blocking(market)
@@ -975,11 +1004,11 @@ def analyze_factor_blocking(
     Letter grades summarise each axis; `suggestions` are machine-readable
     codes the UI turns into plain-language advice.
     """
-    market = market if market in UNIVERSES else "us"
+    market = normalize_market(market)
     horizon = max(1, min(30, horizon))
     top_n = max(2, min(20, top_n))
     cost_bps = cost_bps_for(market, cost_bps)
-    ann = 252 if market == "us" else 365
+    ann = periods_per_year(market)
 
     panel = _load_panel_blocking(market)
     values, node = factor_dsl.compute(expression, panel)
@@ -1016,8 +1045,8 @@ def analyze_factor_blocking(
     rank_autocorr = float(ranked.corrwith(ranked.shift(1), axis=1).mean())
     cost_pp = turnover * 2 * cost_bps / 100  # buy + sell, in % per period
     spread_after_cost = spread_pp - cost_pp
-    periods_per_year = ann / horizon
-    spread_ann = spread_after_cost * periods_per_year
+    periods_per_year_h = ann / horizon
+    spread_ann = spread_after_cost * periods_per_year_h
 
     # --- walk-forward folds ---------------------------------------------------
     folds = []
@@ -1136,7 +1165,7 @@ def marginal_contribution_blocking(
     the same rolling-IC weighting and the same portfolio rules, so the delta
     is attributable to the factor alone.
     """
-    market = market if market in UNIVERSES else "us"
+    market = normalize_market(market)
     if not others:
         raise factor_dsl.FactorError("marginal contribution needs at least one existing factor")
     others = others[:7]
@@ -1191,7 +1220,7 @@ def prune_library_blocking(factors: list[dict], market: str, top_n: int = 5, reb
     Sharpe with vs without it) and the recent-IC decay check. Verdicts:
     keep / watch / retire. The caller stores strikes across runs so a factor
     is only labelled "建议下线" after two consecutive negative reports."""
-    market = market if market in UNIVERSES else "us"
+    market = normalize_market(market)
     factors = [f for f in factors if str(f.get("expression", "")).strip()][:8]
     if len(factors) < 2:
         raise factor_dsl.FactorError("pruning needs at least 2 factors from one market")

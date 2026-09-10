@@ -10,6 +10,13 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services import factor_dsl
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cache(tmp_path, monkeypatch):
+    """Never let a test's synthetic panel land in the real disk cache."""
+    monkeypatch.setenv("AIQUANT_CACHE_DIR", str(tmp_path))
+    yield
 from app.services.factor_mine import (
     MIN_ABS_IC,
     MODES,
@@ -736,3 +743,51 @@ def test_cost_defaults_dates_and_panel_status(monkeypatch):
     assert ps["symbols"] == 12 and ps["requested"] == 14 and ps["missing"] == ["ZZZ", "YYY"]
     m = factor_mine.evaluate_candidate("rank(delta(close, 5))", panel, 10, [], cost_bps=25)
     assert m["cost_bps"] == 25
+
+
+def test_hourly_market_helpers_and_panel_download(monkeypatch):
+    from app.services import factor_mine
+    from app.services import panel_providers as pp
+
+    assert factor_mine.periods_per_year("crypto_1h") == 8760 and factor_mine.periods_per_year("us") == 252
+    assert factor_mine.normalize_market("crypto_1h") == "crypto_1h" and factor_mine.normalize_market("mars") == "us"
+    assert factor_mine.universe_for("crypto_1h") == factor_mine.UNIVERSES["crypto"]
+    assert factor_mine.cost_bps_for("crypto_1h") == 15.0
+    assert "crypto_1h" not in factor_mine.UNIVERSES  # the daily pipeline never sees hourly markets
+
+    idx = pd.date_range("2026-06-01", periods=24 * 60, freq="h", tz="UTC")
+
+    def fake_klines(symbol, period, interval):
+        assert interval == "1h" and period == "90d"
+        if symbol == "UNI-USD":
+            raise LookupError("binance: UNIUSDT not listed")
+        base = np.linspace(100, 120, len(idx))
+        return pd.DataFrame({"Open": base, "High": base * 1.01, "Low": base * 0.99, "Close": base, "Volume": 1000.0}, index=idx)
+
+    monkeypatch.setattr(pp.fallback_data if hasattr(pp, "fallback_data") else __import__("app.services.fallback_data", fromlist=["x"]), "binance_klines", fake_klines)
+    monkeypatch.setattr(pp, "yahoo_frames", lambda symbols, period, interval="1d": {})
+    monkeypatch.setattr(pp, "coingecko_ids", lambda symbols: {"UNI-USD": "uniswap"})
+    naive = idx.tz_localize(None)
+    monkeypatch.setattr(pp, "coingecko_frame_hourly", lambda cid: pd.DataFrame({"Open": 5.0, "High": 5.1, "Low": 4.9, "Close": 5.0, "Volume": 10.0}, index=naive))
+    panel = pp.download_panel(["BTC-USD", "ETH-USD", "UNI-USD"], "90d", "crypto_1h", min_symbols=2, market="crypto", interval="1h")
+    cov = pp.coverage_of(panel)
+    assert cov["interval"] == "1h" and cov["symbols"] == 3 and cov["missing"] == []
+    assert cov["provider"].endswith("@1h") and "coingecko" in cov["provider"]
+    assert panel["close"].index.tz is None and len(panel["close"]) == 24 * 60
+
+
+def test_hourly_market_loads_through_the_hourly_chain(monkeypatch):
+    from app.services import factor_mine
+
+    seen = {}
+
+    def fake_download(tickers, period, label, min_symbols=8, market=None, interval="1d"):
+        seen.update({"period": period, "market": market, "interval": interval, "n": len(tickers)})
+        return _panel(n_days=400, n_syms=12)
+
+    monkeypatch.setattr(factor_mine, "download_panel", fake_download)
+    factor_mine._PANEL_CACHE.pop("crypto_1h", None)
+    factor_mine.invalidate_panel("crypto_1h")
+    factor_mine._load_panel_blocking("crypto_1h")
+    assert seen == {"period": "90d", "market": "crypto", "interval": "1h", "n": len(factor_mine.UNIVERSES["crypto"])}
+    factor_mine._PANEL_CACHE.pop("crypto_1h", None)

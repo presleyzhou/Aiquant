@@ -89,6 +89,7 @@ export interface FactorReport {
 
 export interface PanelStatus {
   market?: string;
+  interval?: string;
   symbols: number;
   requested: number;
   missing: string[];

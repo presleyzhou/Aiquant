@@ -174,6 +174,7 @@ export function EvolveLab({ aiEnabled = false }: { aiEnabled?: boolean }) {
             <select className="select" value={market} onChange={(e) => setMarket(e.target.value)} disabled={running}>
               <option value="us">{t("fl.market.us")}</option>
               <option value="crypto">{t("fl.market.crypto")}</option>
+                    <option value="crypto_1h">{t("fl.market.crypto_1h")}</option>
             </select>
           </label>
           <label className="field">
