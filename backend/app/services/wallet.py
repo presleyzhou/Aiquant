@@ -125,6 +125,20 @@ def request_withdrawal(h: str, amount: float, method: str, address: str) -> dict
     return {"id": wid, "status": "pending", "amount": round(amount, 2), **view(h)}
 
 
+def reassign_withdrawals(old: str, new: str) -> int:
+    """Pending / settled withdrawal requests follow the account on claim, so a
+    later rejection refunds the wallet the user can actually see."""
+    n = 0
+    if old == new:
+        return 0
+    for row in kvstore.list_prefix("withdraw"):
+        if row.get("account") == old:
+            row["account"] = new
+            kvstore.put(f"withdraw:{row['id']}", row)
+            n += 1
+    return n
+
+
 def seller_credit_for_sale(seller_hash: str, gross: float, *, ref: str, item_name: str) -> None:
     fee = get_settings().platform_fee_pct / 100
     net = round(gross * (1 - fee), 2)

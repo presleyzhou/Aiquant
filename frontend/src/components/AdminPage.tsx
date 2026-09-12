@@ -251,7 +251,7 @@ export function AdminPage() {
       </section>
       <section className="panel mk-mine">
         <div className="panel__head"><span className="panel__title">{t("adm.orders")}</span><span className="panel__meta">{orders.length}</span></div>
-        <div style={{ overflowX: "auto" }}><table className="pp-compare mk-mine__table"><thead><tr><th>{t("adm.w.when")}</th><th>{t("adm.o.kind")}</th><th>{t("adm.o.item")}</th><th>{t("adm.w.amount")}</th><th>{t("adm.o.provider")}</th></tr></thead><tbody>
+        <div style={{ overflowX: "auto" }}><table className="pp-compare mk-mine__table"><thead><tr><th>{t("adm.w.when")}</th><th>{t("adm.o.kind")}</th><th>{t("adm.o.item")}</th><th>{t("adm.w.amount")}</th><th>{t("adm.o.provider")}</th><th>{t("adm.w.status")}</th></tr></thead><tbody>
           {orders.slice(0, 100).map((o) => (
             <tr key={String(o.order_id)}>
               <td className="dim" style={{ textAlign: "left" }}>{when(Number(o.at))}</td>
@@ -259,6 +259,7 @@ export function AdminPage() {
               <td style={{ textAlign: "left", fontSize: 11 }}>{String(o.item_id ?? o.account ?? "")}</td>
               <td>${Number(o.amount ?? 0).toFixed(2)}</td>
               <td className="dim">{String(o.provider)}</td>
+              <td className={o.status === "refunded" ? "dn" : o.status === "confirmed" ? "up" : "dim"} data-order-status={String(o.status ?? "")}>{t(`adm.o.s.${String(o.status ?? "confirmed")}` as "adm.o.s.confirmed")}</td>
             </tr>
           ))}
         </tbody></table></div>

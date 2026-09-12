@@ -123,6 +123,19 @@ def lookup(order_id: str, *, account_hash: str | None, token: str | None) -> dic
     return row
 
 
+def reassign_account(old: str, new: str) -> int:
+    """Disputes opened from the browser identity follow the claimed account."""
+    n = 0
+    if old == new:
+        return 0
+    for row in kvstore.list_prefix("dispute"):
+        if row.get("account") == old:
+            row["account"] = new
+            kvstore.put(_key(row["order_id"]), row)
+            n += 1
+    return n
+
+
 # ---------------------------------------------------------------- operator
 
 

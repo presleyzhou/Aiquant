@@ -10,14 +10,14 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.services import audit, auth, kvstore, listings, wallet
+from app.services import audit, auth, disputes, kvstore, listings, wallet
 from app.services.ratelimit import limiter
 
 router = APIRouter(prefix="/api/account", tags=["account"])
 
 STATE_KEYS = {
     "aiquant.factors.zoo", "aiquant.factors.lessons", "aiquant.factors.trials", "aiquant.paper",
-    "aiquant.alerts", "aiquant.purchases", "aiquant.mystrategies", "aiquant.installed",
+    "aiquant.alerts", "aiquant.purchases", "aiquant.purchases.revoked", "aiquant.mystrategies", "aiquant.installed",
     "aiquant.watchlist.us", "aiquant.watchlist.crypto", "aiquant.stripe_account", "aiquant.notify",
 }
 MAX_STATE_BYTES = 400_000
@@ -87,5 +87,12 @@ async def claim(req: Claim, request: Request):
     old, new = auth.secret_hash(req.account_secret), auth.user_hash(user["id"])
     w = await asyncio.to_thread(wallet.merge_into, old, new)
     n = await asyncio.to_thread(listings.reassign_seller, old, new)
-    audit.record("account.claimed", actor=audit.actor_for_account(new), target=old[:12], detail={"listings": n})
-    return {"wallet": w, "listings_moved": n}
+    # money records follow the identity too: otherwise a refund or a rejected
+    # withdrawal would land in the emptied browser wallet and disputes on
+    # pre-claim purchases would fail their ownership check
+    orders = await asyncio.to_thread(listings.reassign_orders, old, new)
+    withdrawals = await asyncio.to_thread(wallet.reassign_withdrawals, old, new)
+    dps = await asyncio.to_thread(disputes.reassign_account, old, new)
+    audit.record("account.claimed", actor=audit.actor_for_account(new), target=old[:12],
+                 detail={"listings": n, "orders": orders, "withdrawals": withdrawals, "disputes": dps})
+    return {"wallet": w, "listings_moved": n, "orders_moved": orders, "withdrawals_moved": withdrawals, "disputes_moved": dps}

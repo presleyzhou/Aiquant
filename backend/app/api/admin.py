@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from app.config import get_settings
 from app.services import audit, auth, disputes, kvstore, listings, payments, provider_health, wallet
 from app.services.factor_mine import (
-    UNIVERSES,
+    ALL_MARKETS,
     analyze_factor_blocking,
     check_factor_blocking,
 )
@@ -159,7 +159,7 @@ def _recheck_blocking(max_factors: int, deadline: float | None = None) -> dict:
                 targets.setdefault(key, "account")
     done, failed, cut = 0, 0, 0
     for (market, expr, horizon), source in list(targets.items())[:max_factors]:
-        if market not in UNIVERSES:
+        if market not in ALL_MARKETS:   # daily us / crypto and the hourly crypto_1h market
             continue
         if deadline is not None and time.time() > deadline:
             cut += 1
@@ -202,7 +202,7 @@ async def warm(markets: str = "us,crypto", refresh: bool = False):
 
     out: dict[str, dict] = {}
     for market in [m.strip() for m in markets.split(",") if m.strip()]:
-        if market not in UNIVERSES:
+        if market not in ALL_MARKETS:
             out[market] = {"error": "unknown market"}
             continue
         t0 = time.time()

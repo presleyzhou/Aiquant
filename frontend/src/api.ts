@@ -1482,6 +1482,11 @@ export const api = {
       body: JSON.stringify({ account_secret, item_id }),
     }).then(json<OrderStatus & { wallet: Wallet }>),
 
+  /** Bulk check of stored entitlement tokens: refunded purchases come back `revoked` so the client can drop them. */
+  verifyEntitlements: (tokens: Array<{ item_id: string; token: string }>) =>
+    fetch("/api/marketplace/entitlements/verify", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tokens }),
+    }).then(json<{ results: Array<{ item_id: string; valid: boolean; reason: "ok" | "revoked" | "invalid"; order_id?: string; dispute_status?: string | null; demo?: boolean }>; checked_at: number }>),
   /** Buyer opens a refund dispute on a confirmed order; the entitlement token proves ownership for checkout buyers. */
   openDispute: (account_secret: string, order_id: string, reason: string, token?: string) =>
     authFetch("/api/wallet/disputes", {

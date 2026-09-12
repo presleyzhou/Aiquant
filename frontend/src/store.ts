@@ -90,6 +90,29 @@ export function recordPurchase(itemId: string, record: PurchaseRecord): void {
   const all = purchases();
   all[itemId] = record;
   localStorage.setItem(PURCHASES_KEY, JSON.stringify(all));
+  // a fresh purchase lifts any earlier refund tombstone for the same item
+  const tomb = revokedPurchases().filter((id) => id !== itemId);
+  localStorage.setItem(REVOKED_KEY, JSON.stringify(tomb));
+  window.dispatchEvent(new CustomEvent(EVENTS.installed));
+}
+
+/** Items whose purchase was refunded: kept as a synced tombstone so the cloud
+ *  merge (a union of purchases) cannot bring the dead entitlement back. */
+const REVOKED_KEY = "aiquant.purchases.revoked";
+
+export function revokedPurchases(): string[] {
+  return read<string[]>(REVOKED_KEY, []);
+}
+
+export function removePurchase(itemId: string): void {
+  const all = purchases();
+  if (itemId in all) {
+    delete all[itemId];
+    localStorage.setItem(PURCHASES_KEY, JSON.stringify(all));
+  }
+  const tomb = new Set(revokedPurchases());
+  tomb.add(itemId);
+  localStorage.setItem(REVOKED_KEY, JSON.stringify([...tomb].slice(-100)));
   window.dispatchEvent(new CustomEvent(EVENTS.installed));
 }
 

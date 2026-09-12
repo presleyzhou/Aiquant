@@ -10,7 +10,7 @@ import { accessToken } from "./auth";
 
 const KEYS = [
   "aiquant.factors.zoo", "aiquant.factors.lessons", "aiquant.factors.trials", "aiquant.paper", "aiquant.alerts",
-  "aiquant.purchases", "aiquant.mystrategies", "aiquant.installed", "aiquant.watchlist.us", "aiquant.watchlist.crypto",
+  "aiquant.purchases", "aiquant.purchases.revoked", "aiquant.mystrategies", "aiquant.installed", "aiquant.watchlist.us", "aiquant.watchlist.crypto",
   "aiquant.stripe_account", "aiquant.notify",
 ];
 
@@ -44,7 +44,11 @@ export function mergeState(local: Record<string, unknown>, remote: Record<string
   out["aiquant.mystrategies"] = unionBy(local["aiquant.mystrategies"] as Id[], remote["aiquant.mystrategies"] as Id[], (s) => s.id ?? JSON.stringify(s));
   out["aiquant.factors.lessons"] = [...new Set([...((remote["aiquant.factors.lessons"] as string[]) ?? []), ...((local["aiquant.factors.lessons"] as string[]) ?? [])])].slice(-40);
   out["aiquant.factors.trials"] = Math.max(Number(local["aiquant.factors.trials"] ?? 0), Number(remote["aiquant.factors.trials"] ?? 0));
-  out["aiquant.purchases"] = { ...((remote["aiquant.purchases"] as object) ?? {}), ...((local["aiquant.purchases"] as object) ?? {}) };
+  const revoked = [...new Set([...((remote["aiquant.purchases.revoked"] as string[]) ?? []), ...((local["aiquant.purchases.revoked"] as string[]) ?? [])])];
+  const merged: Record<string, unknown> = { ...((remote["aiquant.purchases"] as object) ?? {}), ...((local["aiquant.purchases"] as object) ?? {}) };
+  for (const id of revoked) delete merged[id];   // a refund on any device wins over a stale copy elsewhere
+  out["aiquant.purchases"] = merged;
+  out["aiquant.purchases.revoked"] = revoked.slice(-100);
   for (const k of ["aiquant.installed", "aiquant.watchlist.us", "aiquant.watchlist.crypto"]) {
     const l = local[k] as unknown[] | undefined, r = remote[k] as unknown[] | undefined;
     if (Array.isArray(l) || Array.isArray(r)) out[k] = [...new Set([...(r ?? []), ...(l ?? [])].map((x) => JSON.stringify(x)))].map((x) => JSON.parse(x));

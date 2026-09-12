@@ -127,6 +127,13 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
     }
   }, [saved]);
 
+  /** The end-to-end Pipeline runs on the daily us / crypto universes only;
+   *  an hourly-only library has nothing to hand over. */
+  const pipelineMarket = (): "us" | "crypto" | null => {
+    if (libMarket === "us" || libMarket === "crypto") return saved.some((f) => f.market === libMarket) ? libMarket : null;
+    const first = saved.find((f) => f.market === "us" || f.market === "crypto");
+    return first ? (first.market as "us" | "crypto") : null;
+  };
   const openInPipeline = (market: string) => {
     const group = saved.filter((f) => f.market === market).slice(0, 8);
     if (group.length === 0) return;
@@ -873,7 +880,8 @@ export function FactorLab({ hidden, aiEnabled }: Props) {
                         <option value="rolling">{t("fl.cp.rolling")}</option>
                         <option value="family">{t("fl.cp.family")}</option>
                       </select>
-                      <button className="btn" onClick={() => openInPipeline(saved[0]?.market ?? "us")} title={t("fl.pl.title")}>
+                      <button className="btn" disabled={pipelineMarket() === null} onClick={() => { const m = pipelineMarket(); if (m) openInPipeline(m); }}
+                        title={pipelineMarket() === null ? t("fl.pl.hourly") : t("fl.pl.title")} data-testid="fl-pipeline">
                         {t("fl.pl.button")}
                       </button>
                       <button

@@ -176,3 +176,109 @@ def test_audit_prune_keeps_newest():
     # detail is sanitised: long strings clipped, None dropped
     e = audit.record("t.detail", detail={"a": None, "b": "x" * 500, "n": 3})
     assert "a" not in e["detail"] and len(e["detail"]["b"]) == 160 and e["detail"]["n"] == 3
+
+
+def _signed_in(monkeypatch, user_id="user-claim", email="claim@example.com"):
+    from app.services import auth
+
+    async def fake_verify(token):
+        return {"id": user_id, "email": email} if token == "good" else None
+
+    monkeypatch.setattr(auth, "verify", fake_verify)
+    monkeypatch.setattr(auth, "enabled", lambda: True)
+    return {"Authorization": "Bearer good"}, auth.user_hash(user_id)
+
+
+def test_claim_moves_orders_withdrawals_and_disputes_with_the_wallet(monkeypatch):
+    """The browser identity bought, disputed and asked for a withdrawal; after
+    signing in and claiming, every one of those records must follow the user —
+    a rejected withdrawal refunds the wallet the user can see, and the dispute
+    shows up under the account."""
+    client = TestClient(app)
+    _, body = _buy_real(client)                          # BUYER (browser) pays 4.50 from a 10.00 real credit
+    order_id = body["order_id"]
+    r = client.post("/api/wallet/disputes", json={"account_secret": BUYER, "order_id": order_id, "reason": "not as described"})
+    assert r.status_code == 200
+    wd = client.post("/api/wallet/withdraw", json={"account_secret": BUYER, "amount_usd": 2, "method": "crypto", "address": "0x" + "e" * 40}).json()
+    assert wd["status"] == "pending" and wd["balance_usd"] == 3.5
+
+    hdr, new_h = _signed_in(monkeypatch)
+    res = client.post("/api/account/claim", headers=hdr, json={"account_secret": BUYER}).json()
+    assert res["orders_moved"] == 1 and res["withdrawals_moved"] == 1 and res["disputes_moved"] == 1
+    assert res["wallet"]["balance_usd"] == 3.5
+    assert kvstore.get(f"order:{order_id}")["account"] == new_h
+    assert kvstore.get(f"withdraw:{wd['id']}")["account"] == new_h
+    # the user sees the dispute and owns the order now; the browser identity no longer does
+    mine = client.post("/api/wallet/disputes/mine", headers=hdr, json={}).json()["disputes"]
+    assert [d["order_id"] for d in mine] == [order_id]
+    assert client.post("/api/wallet/disputes/lookup", headers=hdr, json={"order_id": order_id}).status_code == 200
+    assert client.post("/api/wallet/disputes/lookup", json={"account_secret": BUYER, "order_id": order_id}).status_code == 403
+    # rejecting the pre-claim withdrawal refunds the USER wallet, not the emptied browser one
+    client.post(f"/api/admin/withdrawals/{wd['id']}", headers=ADMIN, json={"status": "rejected", "note": "bad address"})
+    assert client.post("/api/wallet", headers=hdr, json={}).json()["balance_usd"] == 5.5
+    assert client.post("/api/wallet", json={"account_secret": BUYER}).json()["balance_usd"] == 0.0
+    # refunding the dispute credits the user wallet too
+    client.post(f"/api/admin/disputes/{order_id}", headers=ADMIN, json={"action": "refund"})
+    assert client.post("/api/wallet", headers=hdr, json={}).json()["balance_usd"] == 10.0
+    # claiming twice is harmless
+    again = client.post("/api/account/claim", headers=hdr, json={"account_secret": BUYER}).json()
+    assert again["orders_moved"] == 0 and again["wallet"]["balance_usd"] == 10.0
+    claimed = audit.recent(50, action_prefix="account.claimed")   # newest first: the idempotent re-claim, then the real one
+    assert [e["detail"]["orders"] for e in claimed] == [0, 1]
+
+
+def test_entitlement_bulk_verify_tells_revoked_from_invalid():
+    client = TestClient(app)
+    item, body = _buy_real(client)
+    order_id, token = body["order_id"], body["token"]
+    r = client.post("/api/marketplace/entitlements/verify", json={"tokens": [
+        {"item_id": item["id"], "token": token},
+        {"item_id": item["id"], "token": "garbage.token"},
+        {"item_id": "other-item", "token": token},          # right signature, wrong item
+    ]}).json()["results"]
+    assert [x["reason"] for x in r] == ["ok", "invalid", "invalid"]
+    assert r[0] == {"item_id": item["id"], "valid": True, "reason": "ok", "order_id": order_id, "demo": False}
+    disputes.open_dispute(order_id, reason="broken", account_hash=wallet.account_hash(BUYER))
+    disputes.resolve(order_id, "refund")
+    r = client.post("/api/marketplace/entitlements/verify", json={"tokens": [{"item_id": item["id"], "token": token}]}).json()["results"]
+    assert r == [{"item_id": item["id"], "valid": False, "reason": "revoked", "order_id": order_id, "dispute_status": "refunded"}]
+    assert client.post("/api/marketplace/entitlements/verify", json={"tokens": [{"item_id": "x", "token": "y" * 8}] * 51}).status_code == 422
+
+
+def test_recheck_covers_listed_hourly_factors(monkeypatch):
+    import numpy as np
+    import pandas as pd
+
+    from app.services import factor_mine
+
+    client = TestClient(app)
+    idx = pd.date_range("2026-06-01", periods=700, freq="h", tz="UTC")
+    rng = np.random.default_rng(7)
+    close = pd.DataFrame(100 * np.exp(np.cumsum(rng.normal(0, 0.004, (700, 10)), axis=0)), index=idx, columns=[f"C{i}-USD" for i in range(10)])
+    panel = {"close": close, "open": close, "high": close * 1.005, "low": close * 0.995, "volume": close * 500}
+    monkeypatch.setattr(factor_mine, "_load_panel_blocking", lambda market: panel)
+    r = client.post("/api/marketplace/listings", json=_listing(type="factor", price_usd=0, payout={},
+                                                               payload={"expression": "rank(-delta(close, 6))", "market": "crypto_1h", "horizon": 6}))
+    assert r.status_code == 200, r.text
+    meta = client.post("/api/admin/recheck", headers=ADMIN).json()
+    assert meta["done"] >= 1 and meta["failed"] == 0
+    health = client.post("/api/factors/health", json={"market": "crypto_1h", "expressions": ["rank(-delta(close, 6))"]}).json()["health"]
+    assert "rank(-delta(close, 6))" in health and health["rank(-delta(close, 6))"]["market"] == "crypto_1h"
+    # the public listing now carries the live-record badge
+    items = client.get("/api/marketplace/items?type=community").json()["items"]
+    assert items[0]["health"] is not None and items[0]["health"]["grades"]
+    # warm-up accepts the hourly market as well
+    w = client.post("/api/admin/warm?markets=crypto_1h", headers=ADMIN).json()["warmed"]["crypto_1h"]
+    assert "error" not in w and w["bars"] == 700
+
+
+def test_version_is_a_build_fingerprint_and_health_reports_it():
+    import re
+
+    client = TestClient(app)
+    v = client.get("/api/version").json()
+    assert re.fullmatch(r"[0-9a-f]{7}|\d{4}\.\d{2}\.\d{2}", v["version"]), v["version"]
+    for f in ("disputes", "audit", "hourly_factors", "risk_controls", "entitlement_verify"):
+        assert f in v["features"]
+    h = client.get("/api/health").json()
+    assert h["version"] == v["version"] and h["persistence"] in {"file", "kv"}

@@ -303,6 +303,20 @@ def seller_summary(h: str) -> list[dict]:
     return out
 
 
+def reassign_orders(old: str, new: str) -> int:
+    """Move wallet-paid orders recorded under the browser identity to the
+    user account so refunds and dispute ownership follow the buyer."""
+    n = 0
+    if old == new:
+        return 0
+    for row in kvstore.list_prefix("order"):
+        if row.get("account") == old:
+            row["account"] = new
+            kvstore.put(f"order:{row['order_id']}", row)
+            n += 1
+    return n
+
+
 def reassign_seller(old: str, new: str) -> int:
     """Move every listing owned by `old` (browser secret hash) to `new` (user
     hash) — the one-time claim when a browser signs in."""

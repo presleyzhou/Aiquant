@@ -93,8 +93,40 @@ async def _validation_error(_request: Request, exc: RequestValidationError) -> J
     return JSONResponse(status_code=422, content={"detail": _finite(jsonable_encoder(exc.errors()))})
 
 
-APP_VERSION = "2026.09.08"
-APP_FEATURES = ["kronos_hourly", "factor_report", "wallet", "accounts", "admin", "panel_coverage", "integrations"]
+def _build_version() -> str:
+    """Short commit SHA of the running code. Vercel exposes it as an env var;
+    the Kronos Space clones the repo with git, so its .git/HEAD is readable;
+    anywhere else falls back to a dated constant. The admin integrations page
+    compares this value across the two deployments to spot a stale Space."""
+    import os
+    from pathlib import Path
+
+    for var in ("APP_BUILD", "VERCEL_GIT_COMMIT_SHA", "SOURCE_COMMIT", "GIT_COMMIT"):
+        v = os.environ.get(var, "").strip()
+        if v:
+            return v[:7]
+    try:
+        git_dir = Path(__file__).resolve().parents[2] / ".git"
+        head = (git_dir / "HEAD").read_text().strip()
+        if head.startswith("ref: "):
+            ref = git_dir / head[5:]
+            if ref.exists():
+                return ref.read_text().strip()[:7]
+            packed = git_dir / "packed-refs"
+            if packed.exists():
+                for line in packed.read_text().splitlines():
+                    if line.endswith(" " + head[5:]):
+                        return line.split(" ", 1)[0][:7]
+        else:
+            return head[:7]
+    except OSError:
+        pass
+    return "2026.09.12"
+
+
+APP_VERSION = _build_version()
+APP_FEATURES = ["kronos_hourly", "factor_report", "wallet", "accounts", "admin", "panel_coverage", "integrations",
+                "hourly_factors", "regimes", "families", "risk_controls", "disputes", "audit", "admin_tiers", "entitlement_verify"]
 
 
 @app.get("/api/version")
@@ -105,10 +137,13 @@ async def version() -> dict:
 
 @app.get("/api/health")
 async def health():
+    from app.services import kvstore
     from app.services.llm import analyst
 
     return {
         "status": "ok",
+        "version": APP_VERSION,
+        "persistence": kvstore.mode(),
         "ai_enabled": analyst.enabled,
         "model": settings.claude_model if analyst.enabled else None,
     }

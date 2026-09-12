@@ -14,6 +14,7 @@ import {
   installedIds,
   isPurchased,
   purchases,
+  removePurchase,
   queueBacktestPreset,
   recordPurchase,
   saveFactors,
@@ -98,15 +99,29 @@ export function MarketPage({ onRunStrategy }: Props) {
         const list = res.items ?? [];
         setItems(list);
         setPersistence((res as { persistence?: string }).persistence ?? null);
-        // Paid community items bought earlier in this browser: fetch payloads.
+        // Paid community items bought earlier in this browser: verify the
+        // stored entitlements first — a refund revokes the token server-side
+        // and the card must fall back to "buy", not show a stale "owned".
         const bought = purchases();
-        for (const it of list) {
-          const rec = bought[it.id];
-          if (it.locked && rec?.token) unlock(it, rec.token);
-        }
+        const held = Object.entries(bought).filter(([, rec]) => rec?.token).map(([item_id, rec]) => ({ item_id, token: rec.token as string }));
+        const unlockAll = (ids: Set<string>) => {
+          for (const it of list) if (it.locked && ids.has(it.id) && bought[it.id]?.token) unlock(it, bought[it.id].token as string);
+        };
+        if (held.length === 0) return;
+        api.verifyEntitlements(held.slice(0, 50))
+          .then((res) => {
+            const revoked = res.results.filter((r) => !r.valid && r.reason === "revoked").map((r) => r.item_id);
+            for (const id of revoked) removePurchase(id);
+            if (revoked.length) {
+              setOwned((prev) => { const next = { ...prev }; for (const id of revoked) next[id] = false; return next; });
+              setNotice(t("mk.revokedNotice", { n: String(revoked.length) }));
+            }
+            unlockAll(new Set(res.results.filter((r) => r.valid).map((r) => r.item_id)));
+          })
+          .catch(() => unlockAll(new Set(held.map((h) => h.item_id))));   // verification unavailable → behave as before
       })
       .catch((err: Error) => setError(err.message));
-  }, [unlock]);
+  }, [unlock, t]);
 
   useEffect(() => {
     loadItems();

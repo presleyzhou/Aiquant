@@ -456,6 +456,10 @@ async function mockApi(page: Page) {
         { id: "1700000500000-0001-ab", at: 1_700_000_500, action: "dispute.refunded", actor: "admin", target: "wal_1", detail: { mode: "wallet", amount: 3.5, clawback: "done" } },
         { id: "1700000000000-0000-aa", at: 1_700_000_000, action: "order.confirmed", actor: "account:abcdef123456", target: "wal_1", detail: { item: "c_e2e", amount: "3.50" } } ] });
     if (path === "/api/wallet/disputes/lookup") return json({ dispute: null, refund_window_days: 14 });
+    if (path === "/api/marketplace/entitlements/verify") {
+      const body = route.request().postDataJSON() as { tokens: Array<{ item_id: string; token: string }> };
+      return json({ checked_at: 1_700_000_000, results: body.tokens.map((t) => ({ item_id: t.item_id, valid: true, reason: "ok", order_id: "o_" + t.item_id, demo: true })) });
+    }
     if (path === "/api/wallet/disputes")
       return json({ id: "dp_demo_e2e", order_id: "demo_e2e", item_id: "c_e2e", account: null, provider: "demo", amount: "3.50", currency: "USD", demo: true,
         reason: route.request().postDataJSON().reason, status: "open", at: 1_700_000_000, resolved_at: null, resolution: null, note: "", refund: null });
@@ -1657,4 +1661,38 @@ test("charts expose a spoken summary and keyboard navigation", async ({ page }) 
   const eq = page.getByTestId("equity-chart");
   await expect(eq).toHaveAttribute("aria-label", /策略净值曲线，\d+ 个交易日/);
   await expect(eq).toHaveAttribute("role", "img");
+});
+
+test("marketplace: a refunded purchase is dropped on load, the card is purchasable again and a tombstone syncs", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    localStorage.setItem("aiquant.purchases", JSON.stringify({ "trend-sniper-pro": { chargeId: "wal_9", provider: "wallet", demo: false, at: "2026-09-01T00:00:00Z", token: "tok.revoked", method: "wallet" } }));
+  });
+  await page.route("**/api/marketplace/entitlements/verify", (route) => route.fulfill({ json: { checked_at: 1, results: [{ item_id: "trend-sniper-pro", valid: false, reason: "revoked", order_id: "wal_9", dispute_status: "refunded" }] } }));
+  await page.reload();
+  await page.getByRole("button", { name: "市场" }).click();
+  await expect(page.locator(".mk-notice")).toContainText("1 项购买已退款");
+  await page.locator(".mk-card", { hasText: "趋势狙击" }).first().click();
+  await expect(page.getByRole("button", { name: /购买/ })).toBeVisible();
+  const state = await page.evaluate(() => ({
+    purchases: JSON.parse(localStorage.getItem("aiquant.purchases") ?? "{}"),
+    revoked: JSON.parse(localStorage.getItem("aiquant.purchases.revoked") ?? "[]"),
+  }));
+  expect(state.purchases).toEqual({});
+  expect(state.revoked).toEqual(["trend-sniper-pro"]);
+});
+
+test("factor library: the Pipeline hand-off is disabled for an hourly-only library", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    // the composite / hand-off toolbar appears from two factors up; both are hourly → nothing the daily Pipeline can take
+    localStorage.setItem("aiquant.factors.zoo", JSON.stringify([
+      { expression: "rank(-delta(close, 6))", market: "crypto_1h", horizon: 6, is_ic: 0.02, is_icir: 0.2, oos_ic: 0.01, savedAt: new Date().toISOString() },
+      { expression: "rank(ts_std(close, 24))", market: "crypto_1h", horizon: 6, is_ic: -0.015, is_icir: -0.1, oos_ic: -0.01, savedAt: new Date().toISOString() },
+    ]));
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "因子挖掘" }).click();
+  await expect(page.getByTestId("fl-pipeline")).toBeDisabled();
+  await expect(page.getByTestId("fl-pipeline")).toHaveAttribute("title", /日线市场/);
 });

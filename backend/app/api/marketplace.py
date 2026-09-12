@@ -3,7 +3,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app.services import auth, kvstore, listings, marketplace
+from app.services import auth, disputes, kvstore, listings, marketplace
 from app.services.ratelimit import limiter
 
 router = APIRouter(prefix="/api/marketplace", tags=["marketplace"])
@@ -100,6 +100,35 @@ async def remove_listing(listing_id: str, req: SellerAuth, request: Request):
     if not ok:
         raise HTTPException(status_code=404, detail="listing not found")
     return {"removed": listing_id}
+
+
+class EntitlementCheck(BaseModel):
+    item_id: str = Field(min_length=1, max_length=64)
+    token: str = Field(min_length=8, max_length=600)
+
+
+class EntitlementsVerify(BaseModel):
+    tokens: list[EntitlementCheck] = Field(max_length=50)
+
+
+@router.post("/entitlements/verify")
+async def verify_entitlements(req: EntitlementsVerify):
+    """Bulk check of the entitlement tokens a browser holds. Lets the client
+    drop purchases that were refunded (token revoked) instead of showing a
+    stale "owned" badge whose payload silently fails to unlock."""
+    out = []
+    for t in req.tokens:
+        body = listings.verify_entitlement(t.token, t.item_id, check_revoked=False)
+        if body is None:
+            out.append({"item_id": t.item_id, "valid": False, "reason": "invalid"})
+            continue
+        if disputes.is_revoked(body.get("order")):
+            dp = disputes.get(str(body.get("order")))
+            out.append({"item_id": t.item_id, "valid": False, "reason": "revoked", "order_id": body.get("order"),
+                        "dispute_status": dp.get("status") if dp else None})
+            continue
+        out.append({"item_id": t.item_id, "valid": True, "reason": "ok", "order_id": body.get("order"), "demo": bool(body.get("demo"))})
+    return {"results": out, "checked_at": int(__import__("time").time())}
 
 
 @router.get("/listings/{listing_id}/payload")
