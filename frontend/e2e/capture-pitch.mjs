@@ -1,0 +1,16 @@
+import { chromium } from "@playwright/test";
+const OUT = "/Users/presley/Claude/Projects/Aiquant/docs/lecture/shots";
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 2, colorScheme: "dark" });
+await page.goto("https://aiquant-rust.vercel.app/");
+await page.evaluate(() => { localStorage.setItem("aiquant.tour.done", "1"); localStorage.setItem("aiquant.lang", "zh"); });
+await page.reload(); await wait(5000);
+await page.getByRole("button", { name: "市场", exact: true }).first().click(); await wait(3000);
+await page.screenshot({ path: `${OUT}/market.png`, clip: { x: 0, y: 60, width: 1280, height: 700 } });
+console.log("market");
+await page.getByRole("button", { name: "模拟持仓", exact: true }).first().click(); await wait(2500);
+await page.screenshot({ path: `${OUT}/paper-live.png`, clip: { x: 0, y: 60, width: 1280, height: 640 } });
+await page.goto("https://aiquant-rust.vercel.app/?admin=1"); await wait(2500);
+await page.screenshot({ path: `${OUT}/admin-gate.png`, clip: { x: 0, y: 60, width: 1280, height: 500 } });
+await browser.close();
